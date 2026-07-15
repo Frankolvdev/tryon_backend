@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.exception_handlers import (
+    app_exception_handler,
     localized_exception_handler,
 )
 from app.api.v1.router import api_router
+from app.common.exceptions import AppException
 from app.common.localized_exceptions import (
     LocalizedApplicationException,
 )
@@ -12,9 +16,7 @@ from app.core.config import settings
 from app.middleware.abuse_detection_middleware import (
     AbuseDetectionMiddleware,
 )
-from app.middleware.i18n_middleware import (
-    I18nMiddleware,
-)
+from app.middleware.i18n_middleware import I18nMiddleware
 from app.middleware.rate_limit_middleware import (
     RateLimitMiddleware,
 )
@@ -39,6 +41,11 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 
 app.add_exception_handler(
+    AppException,
+    app_exception_handler,
+)
+
+app.add_exception_handler(
     LocalizedApplicationException,
     localized_exception_handler,
 )
@@ -57,16 +64,12 @@ cors_origins = getattr(
     ],
 )
 
-if isinstance(
-    cors_origins,
-    str,
-):
+if isinstance(cors_origins, str):
     cors_origins = [
         origin.strip()
         for origin in cors_origins.split(",")
         if origin.strip()
     ]
-
 
 app.add_middleware(
     CORSMiddleware,
