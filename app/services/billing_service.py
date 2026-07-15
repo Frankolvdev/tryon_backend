@@ -40,7 +40,11 @@ class BillingService:
         if isinstance(obj, dict):
             return obj.get(key, default)
 
-        return getattr(obj, key, default)
+        return getattr(
+            obj,
+            key,
+            default,
+        )
 
     def create_token_checkout(
         self,
@@ -61,11 +65,27 @@ class BillingService:
         *,
         event: Any,
     ) -> StripeWebhookResult:
-        event_type = self._value(event, "type")
-        event_id = self._value(event, "id")
+        event_type = self._value(
+            event,
+            "type",
+        )
 
-        data = self._value(event, "data", {})
-        event_object = self._value(data, "object", {})
+        event_id = self._value(
+            event,
+            "id",
+        )
+
+        data = self._value(
+            event,
+            "data",
+            {},
+        )
+
+        event_object = self._value(
+            data,
+            "object",
+            {},
+        )
 
         handlers = {
             "checkout.session.completed": (
@@ -95,21 +115,35 @@ class BillingService:
             "customer.subscription.deleted": (
                 self._subscription_changed
             ),
-            "invoice.paid": self._invoice_paid,
+            "invoice.paid": (
+                self._invoice_paid
+            ),
             "invoice.payment_failed": (
                 self._invoice_payment_failed
             ),
-            "invoice.voided": self._invoice_changed,
+            "invoice.voided": (
+                self._invoice_changed
+            ),
             "invoice.marked_uncollectible": (
                 self._invoice_changed
             ),
-            "refund.created": self._refund_changed,
-            "refund.updated": self._refund_changed,
-            "refund.failed": self._refund_changed,
-            "charge.refunded": self._charge_refunded,
+            "refund.created": (
+                self._refund_changed
+            ),
+            "refund.updated": (
+                self._refund_changed
+            ),
+            "refund.failed": (
+                self._refund_changed
+            ),
+            "charge.refunded": (
+                self._charge_refunded
+            ),
         }
 
-        handler = handlers.get(event_type)
+        handler = handlers.get(
+            event_type,
+        )
 
         if not handler:
             return StripeWebhookResult(
@@ -146,7 +180,10 @@ class BillingService:
             {},
         ) or {}
 
-        checkout_type = metadata.get("type")
+        checkout_type = self._value(
+            metadata,
+            "type",
+        )
 
         if checkout_type == "token_purchase":
             purchase = (
@@ -192,7 +229,9 @@ class BillingService:
         return StripeWebhookResult(
             received=True,
             event_type=event_type,
-            message="Unsupported Checkout type ignored.",
+            message=(
+                "Unsupported Checkout type ignored."
+            ),
             metadata={
                 "stripe_event_id": event_id,
                 "checkout_type": checkout_type,
@@ -207,16 +246,21 @@ class BillingService:
         event_id: str,
         event_object: Any,
     ) -> StripeWebhookResult:
-        purchase = token_purchase_service.mark_checkout_failed(
-            db,
-            checkout_session=event_object,
-            error_message=event_type,
+        purchase = (
+            token_purchase_service
+            .mark_checkout_failed(
+                db,
+                checkout_session=event_object,
+                error_message=event_type,
+            )
         )
 
         return StripeWebhookResult(
             received=True,
             event_type=event_type,
-            message="Failed Checkout Session processed.",
+            message=(
+                "Failed Checkout Session processed."
+            ),
             metadata={
                 "stripe_event_id": event_id,
                 "token_purchase_id": (
@@ -236,7 +280,8 @@ class BillingService:
         event_object: Any,
     ) -> StripeWebhookResult:
         subscription = (
-            subscription_service.sync_from_stripe_object(
+            subscription_service
+            .sync_from_stripe_object(
                 db,
                 stripe_subscription=event_object,
             )
@@ -245,10 +290,14 @@ class BillingService:
         return StripeWebhookResult(
             received=True,
             event_type=event_type,
-            message="Subscription synchronized.",
+            message=(
+                "Subscription synchronized."
+            ),
             metadata={
                 "stripe_event_id": event_id,
-                "user_subscription_id": subscription.id,
+                "user_subscription_id": (
+                    subscription.id
+                ),
                 "status": subscription.status,
             },
         )
@@ -261,9 +310,12 @@ class BillingService:
         event_id: str,
         event_object: Any,
     ) -> StripeWebhookResult:
-        invoice = billing_invoice_service.sync_invoice(
-            db,
-            stripe_invoice=event_object,
+        invoice = (
+            billing_invoice_service
+            .sync_invoice(
+                db,
+                stripe_invoice=event_object,
+            )
         )
 
         subscription = None
@@ -273,8 +325,12 @@ class BillingService:
                 subscription_service
                 .grant_period_tokens_if_needed(
                     db,
-                    subscription_id=invoice.user_subscription_id,
-                    reference_id=invoice.provider_invoice_id,
+                    subscription_id=(
+                        invoice.user_subscription_id
+                    ),
+                    reference_id=(
+                        invoice.provider_invoice_id
+                    ),
                 )
             )
 
@@ -304,15 +360,20 @@ class BillingService:
         event_id: str,
         event_object: Any,
     ) -> StripeWebhookResult:
-        invoice = billing_invoice_service.mark_payment_failed(
-            db,
-            stripe_invoice=event_object,
+        invoice = (
+            billing_invoice_service
+            .mark_payment_failed(
+                db,
+                stripe_invoice=event_object,
+            )
         )
 
         return StripeWebhookResult(
             received=True,
             event_type=event_type,
-            message="Failed invoice payment recorded.",
+            message=(
+                "Failed invoice payment recorded."
+            ),
             metadata={
                 "stripe_event_id": event_id,
                 "billing_invoice_id": invoice.id,
@@ -327,15 +388,20 @@ class BillingService:
         event_id: str,
         event_object: Any,
     ) -> StripeWebhookResult:
-        invoice = billing_invoice_service.sync_invoice(
-            db,
-            stripe_invoice=event_object,
+        invoice = (
+            billing_invoice_service
+            .sync_invoice(
+                db,
+                stripe_invoice=event_object,
+            )
         )
 
         return StripeWebhookResult(
             received=True,
             event_type=event_type,
-            message="Invoice synchronized.",
+            message=(
+                "Invoice synchronized."
+            ),
             metadata={
                 "stripe_event_id": event_id,
                 "billing_invoice_id": invoice.id,
@@ -365,20 +431,33 @@ class BillingService:
         )
 
         if payment:
-            payment.status = BillingPaymentStatus.SUCCEEDED.value
-            payment.paid_at = payment.paid_at or utc_now()
+            payment.status = (
+                BillingPaymentStatus.SUCCEEDED.value
+            )
+
+            payment.paid_at = (
+                payment.paid_at
+                or utc_now()
+            )
 
             latest_charge = self._value(
                 event_object,
                 "latest_charge",
             )
 
-            if isinstance(latest_charge, str):
-                payment.provider_charge_id = latest_charge
+            if isinstance(
+                latest_charge,
+                str,
+            ):
+                payment.provider_charge_id = (
+                    latest_charge
+                )
             else:
-                payment.provider_charge_id = self._value(
-                    latest_charge,
-                    "id",
+                payment.provider_charge_id = (
+                    self._value(
+                        latest_charge,
+                        "id",
+                    )
                 )
 
             db.add(payment)
@@ -387,7 +466,9 @@ class BillingService:
         return StripeWebhookResult(
             received=True,
             event_type=event_type,
-            message="PaymentIntent success synchronized.",
+            message=(
+                "PaymentIntent success synchronized."
+            ),
             metadata={
                 "stripe_event_id": event_id,
                 "billing_payment_id": (
@@ -426,15 +507,20 @@ class BillingService:
                 {},
             ) or {}
 
-            payment.status = BillingPaymentStatus.FAILED.value
+            payment.status = (
+                BillingPaymentStatus.FAILED.value
+            )
+
             payment.failure_code = self._value(
                 last_error,
                 "code",
             )
+
             payment.failure_message = self._value(
                 last_error,
                 "message",
             )
+
             payment.failed_at = utc_now()
 
             db.add(payment)
@@ -443,7 +529,9 @@ class BillingService:
         return StripeWebhookResult(
             received=True,
             event_type=event_type,
-            message="PaymentIntent failure synchronized.",
+            message=(
+                "PaymentIntent failure synchronized."
+            ),
             metadata={
                 "stripe_event_id": event_id,
                 "billing_payment_id": (
@@ -552,9 +640,12 @@ class BillingService:
             payment.refunded_amount = (
                 Decimal(amount_refunded)
                 / Decimal("100")
-            ).quantize(Decimal("0.01"))
+            ).quantize(
+                Decimal("0.01")
+            )
 
             payment.refunded_at = utc_now()
+
             payment.status = (
                 BillingPaymentStatus.REFUNDED.value
                 if fully_refunded
@@ -564,8 +655,12 @@ class BillingService:
             db.add(payment)
 
         if purchase and fully_refunded:
-            purchase.status = TokenPurchaseStatus.REFUNDED.value
+            purchase.status = (
+                TokenPurchaseStatus.REFUNDED.value
+            )
+
             purchase.refunded_at = utc_now()
+
             db.add(purchase)
 
         db.commit()
@@ -573,7 +668,9 @@ class BillingService:
         return StripeWebhookResult(
             received=True,
             event_type=event_type,
-            message="Charge refund synchronized.",
+            message=(
+                "Charge refund synchronized."
+            ),
             metadata={
                 "stripe_event_id": event_id,
                 "billing_payment_id": (
