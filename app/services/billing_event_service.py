@@ -28,6 +28,41 @@ class BillingEventService:
             default=str,
         )
 
+    def _stripe_event_to_dict(
+        self,
+        stripe_event: Any,
+    ) -> dict:
+        if isinstance(stripe_event, dict):
+            return stripe_event
+
+        to_dict_recursive = getattr(
+            stripe_event,
+            "to_dict_recursive",
+            None,
+        )
+
+        if callable(to_dict_recursive):
+            parsed = to_dict_recursive()
+
+            if isinstance(parsed, dict):
+                return parsed
+
+        to_dict = getattr(
+            stripe_event,
+            "to_dict",
+            None,
+        )
+
+        if callable(to_dict):
+            parsed = to_dict()
+
+            if isinstance(parsed, dict):
+                return parsed
+
+        raise TypeError(
+            "Stripe event could not be converted to a dictionary."
+        )
+
     def _parse(self, value: str | None) -> dict:
         if not value:
             return {}
@@ -111,7 +146,9 @@ class BillingEventService:
                     "event_type": event_type,
                     "status": BillingEventStatus.RECEIVED.value,
                     "payload_json": self._serialize(
-                        dict(stripe_event)
+                        self._stripe_event_to_dict(
+                            stripe_event,
+                        )
                     ),
                     "processing_attempts": 0,
                     "received_at": utc_now(),
