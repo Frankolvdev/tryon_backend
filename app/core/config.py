@@ -26,7 +26,13 @@ class Settings(BaseSettings):
 
     STORAGE_PROVIDER: str = "local"
     LOCAL_STORAGE_DIR: str = "storage/local"
+
     TRYON_TOKENS_COST: int = 10
+
+    COMFYUI_BASE_URL: str = "http://127.0.0.1:8188"
+    COMFYUI_WORKFLOWS_DIR: str = "workflows"
+    COMFYUI_POLL_TIMEOUT_SECONDS: int = 300
+    COMFYUI_POLL_INTERVAL_SECONDS: float = 2.0
 
     RUNPOD_API_KEY: str | None = None
     RUNPOD_ENDPOINT_ID: str | None = None
@@ -35,6 +41,7 @@ class Settings(BaseSettings):
     RUNPOD_POLL_INTERVAL_SECONDS: float = 2.0
     RUNPOD_CALLBACK_URL: str | None = None
     RUNPOD_CALLBACK_SECRET: str | None = None
+
     WORKER_API_KEY: str | None = None
 
     METRICS_BACKGROUND_COLLECTION_ENABLED: bool = True
@@ -63,7 +70,6 @@ class Settings(BaseSettings):
 
     USER_NOTIFICATION_EMAIL_ENABLED: bool = True
     USER_NOTIFICATION_WEB_PUSH_ENABLED: bool = True
-
     USER_NOTIFICATION_RETENTION_DAYS: int = 365
     USER_NOTIFICATION_ARCHIVED_RETENTION_DAYS: int = 90
     USER_NOTIFICATION_MAX_EMAIL_ATTEMPTS: int = 5
@@ -82,7 +88,10 @@ class Settings(BaseSettings):
 
     @property
     def REDIS_URL(self) -> str:
-        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        return (
+            f"redis://{self.REDIS_HOST}:"
+            f"{self.REDIS_PORT}/{self.REDIS_DB}"
+        )
 
     model_config = SettingsConfigDict(
         env_file=".env",
