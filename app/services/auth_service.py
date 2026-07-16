@@ -4,9 +4,7 @@ import secrets
 
 from sqlalchemy.orm import Session
 
-from app.common.exceptions import (
-    UnauthorizedException,
-)
+from app.common.exceptions import UnauthorizedException
 from app.common.time import utc_now
 from app.core.config import settings
 from app.core.jwt import create_access_token
@@ -39,9 +37,7 @@ class AuthService:
             refresh_token.encode("utf-8")
         ).hexdigest()
 
-    def _generate_refresh_token(
-        self,
-    ) -> str:
+    def _generate_refresh_token(self) -> str:
         return secrets.token_urlsafe(64)
 
     def _record_failed_login(
@@ -57,7 +53,6 @@ class AuthService:
                 user_id=user.id,
             )
         )
-
         now = utc_now()
 
         if (
@@ -76,9 +71,7 @@ class AuthService:
             security.locked_until = (
                 now
                 + timedelta(
-                    minutes=(
-                        self.LOGIN_LOCK_MINUTES
-                    )
+                    minutes=self.LOGIN_LOCK_MINUTES
                 )
             )
 
@@ -103,7 +96,6 @@ class AuthService:
                 user_id=user.id,
             )
         )
-
         now = utc_now()
 
         if (
@@ -128,18 +120,18 @@ class AuthService:
             account_security_service
             .get_or_create_settings(db)
         )
-
-        verification_required = (
+        verification_required = bool(
             security.verification_required
-            and account_settings
-            .verification_required
+            and account_settings.verification_required
         )
 
         if (
             verification_required
             and not security.email_verified
-            and not account_settings
-            .allow_login_before_verification
+            and not (
+                account_settings
+                .allow_login_before_verification
+            )
         ):
             raise UnauthorizedException(
                 "You must verify your email "
@@ -148,29 +140,33 @@ class AuthService:
 
         return security
 
-    def _validate_admin_mfa(
+    def _validate_mfa(
         self,
         db: Session,
         *,
         user: User,
         mfa_code: str | None,
     ) -> bool:
-        required = (
-            admin_mfa_service.is_required(
-                db,
-                user=user,
-            )
+        required = admin_mfa_service.is_required(
+            db,
+            user=user,
         )
-
-        enabled = (
-            admin_mfa_service.is_enabled(
-                db,
-                user_id=user.id,
-            )
+        enabled = admin_mfa_service.is_enabled(
+            db,
+            user_id=user.id,
         )
 
         if not required and not enabled:
             return False
+
+        if required and not admin_mfa_service.totp_enabled(
+            db,
+            user=user,
+        ):
+            raise UnauthorizedException(
+                "MFA is required but no MFA method "
+                "is enabled for this account type."
+            )
 
         if required and not enabled:
             return True
@@ -180,14 +176,18 @@ class AuthService:
                 "MFA code is required."
             )
 
-        valid = (
-            admin_mfa_service.verify_code(
-                db,
-                user_id=user.id,
-                code=mfa_code,
-            )
+        valid = admin_mfa_service.verify_code(
+            db,
+            user_id=user.id,
+            code=mfa_code,
+            allow_recovery_codes=(
+                admin_mfa_service
+                .recovery_codes_enabled(
+                    db,
+                    user=user,
+                )
+            ),
         )
-
         if not valid:
             raise UnauthorizedException(
                 "Invalid MFA code."
@@ -204,10 +204,7 @@ class AuthService:
         ip_address: str | None = None,
         mfa_code: str | None = None,
     ) -> dict:
-        normalized_email = (
-            str(email).strip().lower()
-        )
-
+        normalized_email = str(email).strip().lower()
         user = user_repository.get_by_email(
             db,
             normalized_email,
@@ -229,24 +226,18 @@ class AuthService:
                 db,
                 user=user,
             )
-
             raise UnauthorizedException(
                 "Invalid credentials."
             )
 
-        security = (
-            self._validate_account_access(
-                db,
-                user=user,
-            )
+        security = self._validate_account_access(
+            db,
+            user=user,
         )
-
-        mfa_setup_required = (
-            self._validate_admin_mfa(
-                db,
-                user=user,
-                mfa_code=mfa_code,
-            )
+        mfa_setup_required = self._validate_mfa(
+            db,
+            user=user,
+            mfa_code=mfa_code,
         )
 
         security.failed_login_attempts = 0
@@ -262,25 +253,19 @@ class AuthService:
                 security.email_verified
             )
 
-            db.add(user)
-
+        db.add(user)
         db.add(security)
         db.commit()
 
-        access_token = create_access_token(
-            user.id
-        )
-
+        access_token = create_access_token(user.id)
         refresh_token = (
             self._generate_refresh_token()
         )
-
         refresh_token_hash = (
             self._hash_refresh_token(
                 refresh_token
             )
         )
-
         expires_at = (
             utc_now()
             + timedelta(
@@ -298,7 +283,6 @@ class AuthService:
             ip_address=ip_address,
             expires_at=expires_at,
         )
-
         db.add(db_refresh_token)
         db.commit()
 
@@ -321,7 +305,6 @@ class AuthService:
                 refresh_token
             )
         )
-
         db_refresh_token = (
             refresh_token_repository
             .get_by_token_hash(
@@ -334,16 +317,11 @@ class AuthService:
             raise UnauthorizedException(
                 "Invalid refresh token."
             )
-
         if db_refresh_token.is_revoked:
             raise UnauthorizedException(
                 "Refresh token has been revoked."
             )
-
-        if (
-            db_refresh_token.expires_at
-            < utc_now()
-        ):
+        if db_refresh_token.expires_at < utc_now():
             raise UnauthorizedException(
                 "Refresh token has expired."
             )
@@ -352,7 +330,6 @@ class AuthService:
             db,
             db_refresh_token.user_id,
         )
-
         if user is None:
             raise UnauthorizedException(
                 "Invalid user."
@@ -397,7 +374,6 @@ class AuthService:
                 refresh_token
             )
         )
-
         db_refresh_token = (
             refresh_token_repository
             .get_by_token_hash(
@@ -405,13 +381,11 @@ class AuthService:
                 refresh_token_hash,
             )
         )
-
         if db_refresh_token is None:
             return
 
         db_refresh_token.is_revoked = True
         db_refresh_token.revoked_at = utc_now()
-
         db.add(db_refresh_token)
         db.commit()
 
@@ -428,17 +402,14 @@ class AuthService:
                 user_id=user_id,
             )
         )
-
         revoked = 0
         now = utc_now()
 
         for session in sessions:
             if session.is_revoked:
                 continue
-
             session.is_revoked = True
             session.revoked_at = now
-
             db.add(session)
             revoked += 1
 
@@ -485,13 +456,11 @@ class AuthService:
                 session_id,
             )
         )
-
         if session is None:
             return
 
         session.is_revoked = True
         session.revoked_at = utc_now()
-
         db.add(session)
         db.commit()
 
