@@ -30,6 +30,7 @@ from app.api.v1.endpoints.admin import (
     default_settings,
     external_ai_jobs,
     feature_flags,
+    i18n,
     integrations,
     integrations_extra,
     monitoring,
@@ -235,6 +236,10 @@ admin_router.include_router(
 admin_router.include_router(
     feature_flags.router,
     tags=["Admin - Feature Flags"],
+)
+admin_router.include_router(
+    i18n.router,
+    tags=["Admin - Internationalization"],
 )
 admin_router.include_router(
     reports.router,

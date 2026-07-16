@@ -4,7 +4,10 @@ import secrets
 
 from sqlalchemy.orm import Session
 
-from app.common.exceptions import UnauthorizedException
+from app.common.exceptions import (
+    AppException,
+    UnauthorizedException,
+)
 from app.common.time import utc_now
 from app.core.config import settings
 from app.core.jwt import create_access_token
@@ -140,55 +143,66 @@ class AuthService:
 
         return security
 
-    def _validate_mfa(
+    def _is_admin(self, user: User) -> bool:
+        return bool(
+            user.is_superuser
+            or user.role in {
+                "admin",
+                "superadmin",
+                "super_admin",
+            }
+        )
+
+    def _validate_admin_mfa(
         self,
         db: Session,
         *,
         user: User,
         mfa_code: str | None,
     ) -> bool:
-        required = admin_mfa_service.is_required(
-            db,
-            user=user,
+        """
+        Preserve the original BackOffice behavior:
+
+        - Only administrative accounts use login MFA.
+        - If MFA is disabled globally, no code is requested.
+        - If MFA is required but the admin has not enrolled yet,
+          login succeeds with mfa_setup_required=True so the
+          BackOffice redirects to /mfa/setup.
+        - If MFA is enrolled, the first login request without a
+          code returns MFA_REQUIRED. The same form then asks for
+          the current authenticator/recovery code.
+        """
+        if not self._is_admin(user):
+            return False
+
+        account_settings = (
+            account_security_service
+            .get_or_create_settings(db)
         )
+
+        if not account_settings.admin_mfa_required:
+            return False
+
         enabled = admin_mfa_service.is_enabled(
             db,
             user_id=user.id,
         )
 
-        if not required and not enabled:
-            return False
-
-        if required and not admin_mfa_service.totp_enabled(
-            db,
-            user=user,
-        ):
-            raise UnauthorizedException(
-                "MFA is required but no MFA method "
-                "is enabled for this account type."
-            )
-
-        if required and not enabled:
+        if not enabled:
             return True
 
         if not mfa_code:
-            raise UnauthorizedException(
-                "MFA code is required."
+            raise AppException(
+                message="MFA code is required.",
+                status_code=401,
+                error_code="MFA_REQUIRED",
             )
 
-        valid = admin_mfa_service.verify_code(
+        if not admin_mfa_service.verify_code(
             db,
             user_id=user.id,
             code=mfa_code,
-            allow_recovery_codes=(
-                admin_mfa_service
-                .recovery_codes_enabled(
-                    db,
-                    user=user,
-                )
-            ),
-        )
-        if not valid:
+        ):
             raise UnauthorizedException(
                 "Invalid MFA code."
             )
@@ -234,10 +248,13 @@ class AuthService:
             db,
             user=user,
         )
-        mfa_setup_required = self._validate_mfa(
-            db,
-            user=user,
-            mfa_code=mfa_code,
+
+        mfa_setup_required = (
+            self._validate_admin_mfa(
+                db,
+                user=user,
+                mfa_code=mfa_code,
+            )
         )
 
         security.failed_login_attempts = 0
@@ -258,21 +275,14 @@ class AuthService:
         db.commit()
 
         access_token = create_access_token(user.id)
-        refresh_token = (
-            self._generate_refresh_token()
-        )
-        refresh_token_hash = (
-            self._hash_refresh_token(
-                refresh_token
-            )
+        refresh_token = self._generate_refresh_token()
+        refresh_token_hash = self._hash_refresh_token(
+            refresh_token
         )
         expires_at = (
             utc_now()
             + timedelta(
-                days=(
-                    settings
-                    .REFRESH_TOKEN_EXPIRE_DAYS
-                )
+                days=settings.REFRESH_TOKEN_EXPIRE_DAYS
             )
         )
 
@@ -290,9 +300,7 @@ class AuthService:
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
-            "mfa_setup_required": (
-                mfa_setup_required
-            ),
+            "mfa_setup_required": mfa_setup_required,
         }
 
     def refresh_access_token(
@@ -300,10 +308,8 @@ class AuthService:
         db: Session,
         refresh_token: str,
     ) -> dict:
-        refresh_token_hash = (
-            self._hash_refresh_token(
-                refresh_token
-            )
+        refresh_token_hash = self._hash_refresh_token(
+            refresh_token
         )
         db_refresh_token = (
             refresh_token_repository
@@ -340,28 +346,24 @@ class AuthService:
             user=user,
         )
 
+        account_settings = (
+            account_security_service
+            .get_or_create_settings(db)
+        )
         mfa_setup_required = bool(
-            admin_mfa_service.is_required(
-                db,
-                user=user,
-            )
+            self._is_admin(user)
+            and account_settings.admin_mfa_required
             and not admin_mfa_service.is_enabled(
                 db,
                 user_id=user.id,
             )
         )
 
-        access_token = create_access_token(
-            user.id
-        )
-
         return {
-            "access_token": access_token,
+            "access_token": create_access_token(user.id),
             "refresh_token": refresh_token,
             "token_type": "bearer",
-            "mfa_setup_required": (
-                mfa_setup_required
-            ),
+            "mfa_setup_required": mfa_setup_required,
         }
 
     def logout(
@@ -369,10 +371,8 @@ class AuthService:
         db: Session,
         refresh_token: str,
     ) -> None:
-        refresh_token_hash = (
-            self._hash_refresh_token(
-                refresh_token
-            )
+        refresh_token_hash = self._hash_refresh_token(
+            refresh_token
         )
         db_refresh_token = (
             refresh_token_repository
