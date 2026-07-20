@@ -12,18 +12,33 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.services.i18n_service import i18n_service
 
+
 logger = logging.getLogger("app.account_verification_email")
 
 
 class AccountVerificationEmailService:
     def _frontend_base_url(self) -> str:
-        return str(getattr(settings, "FRONTEND_URL", "http://localhost:3003")).strip().rstrip("/")
+        return str(
+            getattr(settings, "FRONTEND_URL", "http://localhost:3001")
+        ).strip().rstrip("/")
 
-    def _action_url(self, *, email: str, purpose: str, token: str) -> str:
-        route = "/reset-password" if purpose == "password_reset" else "/verify-account"
+    def _verification_url(
+        self,
+        *,
+        email: str,
+        purpose: str,
+        token: str,
+    ) -> str:
+        route = (
+            "/reset-password"
+            if purpose == "password_reset"
+            else "/verify-account"
+        )
         return (
             f"{self._frontend_base_url()}{route}"
-            f"?email={quote(email)}&purpose={quote(purpose)}&token={quote(token)}"
+            f"?email={quote(email)}"
+            f"&purpose={quote(purpose)}"
+            f"&token={quote(token)}"
         )
 
     def _translate(
@@ -43,94 +58,192 @@ class AccountVerificationEmailService:
             default=default,
         )
 
-    def _html(
-        self,
+    @staticmethod
+    def _brand_icon() -> str:
+        return """
+        <table role="presentation" cellspacing="0" cellpadding="0">
+          <tr>
+            <td width="48" height="48" align="center" valign="middle"
+                style="width:48px;height:48px;border:1px solid #4b1820;
+                       border-radius:16px;background:#1b090c;color:#f87171">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+                   xmlns="http://www.w3.org/2000/svg"
+                   stroke="#f87171" stroke-width="1.8"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <path d="m12 3-1.2 4.1a4.6 4.6 0 0 1-3.1 3.1L3.6 11.4l4.1 1.2a4.6 4.6 0 0 1 3.1 3.1L12 19.8l1.2-4.1a4.6 4.6 0 0 1 3.1-3.1l4.1-1.2-4.1-1.2a4.6 4.6 0 0 1-3.1-3.1L12 3Z"/>
+                <path d="m19 3-.45 1.55L17 5l1.55.45L19 7l.45-1.55L21 5l-1.55-.45L19 3Z"/>
+              </svg>
+            </td>
+          </tr>
+        </table>
+        """
+
+    @classmethod
+    def _layout(
+        cls,
         *,
         eyebrow: str,
         title: str,
         intro: str,
-        button_label: str | None,
-        button_url: str | None,
-        otp: str | None,
-        expiration: str,
-        ignore: str,
+        content: str,
+        warning: str,
     ) -> str:
-        button = ""
-        if button_label and button_url:
-            button = f"""
-            <table role="presentation" width="100%" style="margin:30px 0 22px">
-              <tr><td align="center">
-                <a href="{escape(button_url, quote=True)}"
-                   style="display:inline-block;padding:16px 28px;border-radius:14px;
-                          background:linear-gradient(135deg,#761120,#e1324d);
-                          color:#fff;text-decoration:none;font-weight:800">
-                  {escape(button_label)}
-                </a>
-              </td></tr>
-            </table>
-            """
-
-        otp_block = ""
-        if otp:
-            otp_block = f"""
-            <div style="margin:26px 0;padding:22px;border:1px solid #2a2a31;
-                        border-radius:16px;background:#111116;text-align:center">
-              <div style="margin-bottom:9px;color:#8c8d98;font-size:11px;
-                          font-weight:800;letter-spacing:.16em;text-transform:uppercase">
-                Código de seguridad
-              </div>
-              <div style="color:#fff;font-size:30px;font-weight:900;letter-spacing:.22em">
-                {escape(otp)}
-              </div>
-            </div>
-            """
-
         return f"""<!doctype html>
 <html lang="es">
-<body style="margin:0;background:#050507;color:#f6f6f8;font-family:Arial,Helvetica,sans-serif">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-       style="background:#050507">
-<tr><td align="center" style="padding:36px 16px">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-       style="max-width:620px;border:1px solid #25252c;border-radius:26px;
-              overflow:hidden;background:#0a0a0e;box-shadow:0 30px 90px rgba(0,0,0,.55)">
-<tr><td style="padding:28px 34px;border-bottom:1px solid #202027;
-               background:linear-gradient(135deg,#171218,#0a0a0e)">
-<table role="presentation"><tr>
-<td style="width:44px;height:44px;border-radius:14px;text-align:center;
-           background:linear-gradient(145deg,#e23952,#71111f);
-           color:#fff;font-size:20px;font-weight:900">L</td>
-<td style="padding-left:12px">
-<div style="color:#fff;font-size:20px;font-weight:900">LUXIA</div>
-<div style="margin-top:3px;color:#777985;font-size:9px;font-weight:800;
-            letter-spacing:.19em;text-transform:uppercase">AI Fashion Studio</div>
-</td></tr></table>
-</td></tr>
-<tr><td style="padding:42px 38px 34px">
-<div style="margin-bottom:14px;color:#ef455d;font-size:10px;font-weight:900;
-            letter-spacing:.22em;text-transform:uppercase">{escape(eyebrow)}</div>
-<h1 style="margin:0;color:#fff;font-size:34px;line-height:1.12">{escape(title)}</h1>
-<p style="margin:18px 0 0;color:#a0a1ab;font-size:15px;line-height:1.75">
-{escape(intro)}
-</p>
-{otp_block}
-{button}
-<div style="margin-top:24px;padding:15px 16px;border:1px solid #25252d;
-            border-radius:14px;background:#101014;color:#8c8d98;
-            font-size:12px;line-height:1.65">{escape(expiration)}</div>
-<p style="margin:22px 0 0;color:#666873;font-size:12px;line-height:1.65">
-{escape(ignore)}
-</p>
-</td></tr>
-<tr><td style="padding:22px 38px;border-top:1px solid #202027;
-               background:#08080b;color:#565862;font-size:11px;line-height:1.6">
-Mensaje automático de LUXIA. Nunca compartas enlaces ni códigos de seguridad.
-</td></tr>
-</table>
-</td></tr>
-</table>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{escape(title)}</title>
+</head>
+<body style="margin:0;padding:0;background:#030303;color:#f5f5f5;
+             font-family:Arial,Helvetica,sans-serif">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+         style="width:100%;background:#030303">
+    <tr>
+      <td align="center" style="padding:36px 16px">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+               style="width:100%;max-width:620px;border:1px solid #1d1d20;
+                      border-radius:28px;background:#0b0b0d;overflow:hidden;
+                      box-shadow:0 20px 70px rgba(0,0,0,.45)">
+          <tr>
+            <td style="padding:30px 36px;border-bottom:1px solid #19191c;
+                       background:#080809">
+              <table role="presentation" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td>{cls._brand_icon()}</td>
+                  <td style="padding-left:16px">
+                    <div style="margin:0;color:#fff;font-size:20px;
+                                line-height:28px;font-weight:600;
+                                letter-spacing:.22em">LUXIA</div>
+                    <div style="margin-top:4px;color:#ef4444;font-size:10px;
+                                line-height:15px;font-weight:600;
+                                letter-spacing:.3em;text-transform:uppercase">
+                      AI Fashion Studio
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:40px 36px 36px">
+              <div style="margin:0;color:#ef4444;font-size:12px;
+                          line-height:18px;font-weight:600;letter-spacing:.28em;
+                          text-transform:uppercase">
+                {escape(eyebrow)}
+              </div>
+
+              <h1 style="margin:12px 0 0;color:#fff;font-size:30px;
+                         line-height:36px;font-weight:600;letter-spacing:-.025em">
+                {escape(title)}
+              </h1>
+
+              <p style="margin:12px 0 0;color:#71717a;font-size:14px;
+                        line-height:24px">
+                {escape(intro)}
+              </p>
+
+              {content}
+
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                     style="margin-top:28px">
+                <tr>
+                  <td style="padding:14px 16px;border:1px solid #26262a;
+                             border-radius:12px;background:#101012;color:#71717a;
+                             font-size:12px;line-height:20px">
+                    {escape(warning)}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:22px 36px;border-top:1px solid #19191c;
+                       background:#080809;color:#3f3f46;font-size:11px;
+                       line-height:18px;text-align:center">
+              Tu seguridad y privacidad están protegidas por los controles de LUXIA.
+              Este mensaje fue enviado automáticamente.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
 </body>
 </html>"""
+
+    @staticmethod
+    def _otp_block(
+        *,
+        otp: str,
+        expiration_minutes: int,
+    ) -> str:
+        return f"""
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+               style="margin-top:28px">
+          <tr>
+            <td align="center" style="padding:20px;border:1px solid #26262a;
+                                     border-radius:12px;background:#050505">
+              <div style="color:#52525b;font-size:10px;font-weight:600;
+                          letter-spacing:.18em;text-transform:uppercase">
+                Código de seguridad
+              </div>
+              <div style="margin-top:10px;color:#fff;font-size:30px;
+                          font-weight:600;letter-spacing:.24em">
+                {escape(otp)}
+              </div>
+              <div style="margin-top:10px;color:#52525b;font-size:11px">
+                Caduca en {expiration_minutes} minutos
+              </div>
+            </td>
+          </tr>
+        </table>
+        """
+
+    @staticmethod
+    def _link_block(
+        *,
+        url: str,
+        label: str,
+        expiration_minutes: int,
+    ) -> str:
+        safe_url = escape(url, quote=True)
+        return f"""
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+               style="margin-top:28px">
+          <tr>
+            <td align="center">
+              <a href="{safe_url}"
+                 style="display:block;padding:15px 24px;border-radius:12px;
+                        background:#c70a25;color:#fff;text-decoration:none;
+                        font-size:14px;line-height:18px;font-weight:600;
+                        box-shadow:0 12px 28px rgba(120,4,22,.3)">
+                {escape(label)}
+              </a>
+            </td>
+          </tr>
+        </table>
+
+        <p style="margin:18px 0 0;color:#52525b;font-size:11px;line-height:18px;
+                  text-align:center">
+          El enlace caduca en {expiration_minutes} minutos y solo puede usarse una vez.
+        </p>
+
+        <div style="margin-top:20px;padding:14px 16px;border:1px solid #1d1d20;
+                    border-radius:12px;background:#050505">
+          <div style="color:#52525b;font-size:10px;line-height:16px;
+                      text-transform:uppercase;letter-spacing:.12em">
+            Si el botón no funciona, copia este enlace
+          </div>
+          <div style="margin-top:8px;color:#a1a1aa;font-size:11px;
+                      line-height:18px;word-break:break-all">
+            {escape(url)}
+          </div>
+        </div>
+        """
 
     def _build_content(
         self,
@@ -145,70 +258,88 @@ Mensaje automático de LUXIA. Nunca compartas enlaces ni códigos de seguridad.
         otp_expiration_minutes: int,
         email_link_expiration_minutes: int,
     ) -> tuple[str, str, str]:
-        password_reset = purpose == "password_reset"
+        is_reset = purpose == "password_reset"
 
-        if password_reset:
-            subject = "Restablece tu contraseña de LUXIA"
-            eyebrow = "RECUPERACIÓN SEGURA"
-            title = "Crea una nueva contraseña"
-            intro = (
-                "Recibimos una solicitud para recuperar el acceso a tu cuenta. "
-                "Utiliza el enlace seguro para establecer una nueva contraseña."
-            )
-            button_label = "Restablecer contraseña"
-        else:
-            subject = self._translate(
-                db,
-                user_id=user_id,
-                key="account.verification.email.subject",
-                default="Verifica tu cuenta de LUXIA",
-            )
-            eyebrow = "ACTIVA TU CUENTA"
-            title = "Verifica tu correo electrónico"
-            intro = self._translate(
-                db,
-                user_id=user_id,
-                key="account.verification.email.greeting",
-                default="Confirma que esta dirección te pertenece para activar y proteger tu cuenta.",
-            )
-            button_label = self._translate(
-                db,
-                user_id=user_id,
-                key="account.verification.email.link_label",
-                default="Verificar correo",
-            )
-
-        ignore = self._translate(
-            db,
-            user_id=user_id,
-            key="account.verification.email.ignore",
-            default="Si no solicitaste esta acción, ignora el mensaje. Tu cuenta permanecerá protegida.",
+        subject = (
+            "Restablece tu contraseña de LUXIA"
+            if is_reset
+            else "Verifica tu cuenta de LUXIA"
+        )
+        title = (
+            "Crea una nueva contraseña"
+            if is_reset
+            else "Confirma tu correo electrónico"
+        )
+        intro = (
+            "Recibimos una solicitud para recuperar el acceso a tu cuenta."
+            if is_reset
+            else "Estás a un paso de activar tu estudio creativo y proteger tu cuenta."
+        )
+        warning = (
+            "Si no solicitaste este cambio, ignora el mensaje. "
+            "Tu contraseña actual seguirá funcionando."
+            if is_reset
+            else "Si no creaste esta cuenta, puedes ignorar este mensaje con seguridad."
         )
 
-        url = (
-            self._action_url(email=email, purpose=purpose, token=link_token)
-            if link_token
-            else None
-        )
-        minutes = email_link_expiration_minutes if link_token else otp_expiration_minutes
-        expiration = f"Este acceso vence en {minutes} minutos y solo puede utilizarse una vez."
+        blocks: list[str] = []
+        text = [intro, ""]
 
-        text = [title, "", intro, ""]
         if otp:
-            text += ["Código de seguridad:", otp, ""]
-        if url:
-            text += [button_label, url, ""]
-        text += [expiration, "", ignore]
+            blocks.append(
+                self._otp_block(
+                    otp=otp,
+                    expiration_minutes=otp_expiration_minutes,
+                )
+            )
+            text.extend(
+                [
+                    "Código:",
+                    otp,
+                    f"Caduca en {otp_expiration_minutes} minutos.",
+                    "",
+                ]
+            )
 
-        html = self._html(
-            eyebrow=eyebrow,
+        if link_token:
+            url = self._verification_url(
+                email=email,
+                purpose=purpose,
+                token=link_token,
+            )
+            label = (
+                "Crear nueva contraseña"
+                if is_reset
+                else "Verificar mi correo"
+            )
+            blocks.append(
+                self._link_block(
+                    url=url,
+                    label=label,
+                    expiration_minutes=email_link_expiration_minutes,
+                )
+            )
+            text.extend(
+                [
+                    label,
+                    url,
+                    f"Caduca en {email_link_expiration_minutes} minutos.",
+                    "",
+                ]
+            )
+
+        text.append(warning)
+
+        html = self._layout(
+            eyebrow=(
+                "RECUPERACIÓN DE ACCESO"
+                if is_reset
+                else "VERIFICACIÓN DE CUENTA"
+            ),
             title=title,
             intro=intro,
-            button_label=button_label if url else None,
-            button_url=url,
-            otp=otp,
-            expiration=expiration,
-            ignore=ignore,
+            content="".join(blocks),
+            warning=warning,
         )
         return subject, "\n".join(text), html
 
@@ -216,11 +347,18 @@ Mensaje automático de LUXIA. Nunca compartas enlaces ni códigos de seguridad.
         host = str(getattr(settings, "SMTP_HOST", "")).strip()
         port = int(getattr(settings, "SMTP_PORT", 587))
         use_ssl = bool(getattr(settings, "SMTP_USE_SSL", False))
+
         if not host:
             raise RuntimeError("SMTP_HOST is not configured.")
+
         context = ssl.create_default_context()
         if use_ssl:
-            return smtplib.SMTP_SSL(host, port, timeout=30, context=context)
+            return smtplib.SMTP_SSL(
+                host,
+                port,
+                timeout=30,
+                context=context,
+            )
         return smtplib.SMTP(host, port, timeout=30)
 
     def send_verification(
@@ -236,8 +374,13 @@ Mensaje automático de LUXIA. Nunca compartas enlaces ni códigos de seguridad.
         otp_expiration_minutes: int,
         email_link_expiration_minutes: int,
     ) -> None:
-        from_email = str(getattr(settings, "SMTP_FROM_EMAIL", "")).strip()
-        from_name = str(getattr(settings, "SMTP_FROM_NAME", "LUXIA")).strip()
+        from_email = str(
+            getattr(settings, "SMTP_FROM_EMAIL", "")
+        ).strip()
+        from_name = str(
+            getattr(settings, "SMTP_FROM_NAME", "LUXIA AI Fashion Studio")
+        ).strip()
+
         if not from_email:
             raise RuntimeError("SMTP_FROM_EMAIL is not configured.")
 
@@ -260,10 +403,18 @@ Mensaje automático de LUXIA. Nunca compartas enlaces ni códigos de seguridad.
         message.set_content(text_body)
         message.add_alternative(html_body, subtype="html")
 
-        username = str(getattr(settings, "SMTP_USERNAME", "")).strip()
-        password = str(getattr(settings, "SMTP_PASSWORD", ""))
-        use_tls = bool(getattr(settings, "SMTP_USE_TLS", True))
-        use_ssl = bool(getattr(settings, "SMTP_USE_SSL", False))
+        username = str(
+            getattr(settings, "SMTP_USERNAME", "")
+        ).strip()
+        password = str(
+            getattr(settings, "SMTP_PASSWORD", "")
+        )
+        use_tls = bool(
+            getattr(settings, "SMTP_USE_TLS", True)
+        )
+        use_ssl = bool(
+            getattr(settings, "SMTP_USE_SSL", False)
+        )
         context = ssl.create_default_context()
 
         server = self._smtp_connection()
