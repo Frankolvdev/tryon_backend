@@ -67,3 +67,14 @@ class OAuthProviderConfigResponse(BaseModel):
 
 class OAuthProvidersResponse(BaseModel):
     providers: list[OAuthProviderConfigResponse]
+
+
+class OAuthStartRequest(BaseModel):
+    redirect_uri: HttpUrl
+    terms_accepted: bool = False
+    terms_version: str | None = Field(default=None, max_length=100)
+    age_confirmed: bool = False
+
+
+class OAuthGrantExchangeRequest(BaseModel):
+    code: str = Field(min_length=32, max_length=512)

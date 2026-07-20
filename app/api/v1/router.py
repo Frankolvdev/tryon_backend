@@ -17,6 +17,7 @@ from app.api.v1.endpoints import (
     i18n,
     job_progress,
     metrics,
+    oauth,
     password_recovery,
     pricing,
     runpod_callbacks,
@@ -44,6 +45,11 @@ api_router.include_router(
     auth.router,
     prefix="/auth",
     tags=["Authentication"],
+)
+api_router.include_router(
+    oauth.router,
+    prefix="/oauth",
+    tags=["OAuth"],
 )
 api_router.include_router(
     account_verification.router,

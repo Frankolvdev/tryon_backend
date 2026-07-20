@@ -303,6 +303,38 @@ class AuthService:
             "mfa_setup_required": mfa_setup_required,
         }
 
+    def issue_session_tokens(
+        self,
+        db: Session,
+        *,
+        user: User,
+        user_agent: str | None = None,
+        ip_address: str | None = None,
+        mfa_setup_required: bool = False,
+    ) -> dict:
+        access_token = create_access_token(user.id)
+        refresh_token = self._generate_refresh_token()
+        refresh_token_hash = self._hash_refresh_token(refresh_token)
+        expires_at = utc_now() + timedelta(
+            days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+        )
+        db.add(
+            RefreshToken(
+                user_id=user.id,
+                token_hash=refresh_token_hash,
+                user_agent=user_agent,
+                ip_address=ip_address,
+                expires_at=expires_at,
+            )
+        )
+        db.commit()
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "mfa_setup_required": mfa_setup_required,
+        }
+
     def refresh_access_token(
         self,
         db: Session,
