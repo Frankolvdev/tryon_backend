@@ -402,6 +402,13 @@ class IntegrationService:
                 config={"redirect_uri": ""},
             ),
             IntegrationConfigCreate(
+                provider=IntegrationProvider.GITHUB_OAUTH,
+                name="GitHub OAuth",
+                status=IntegrationStatus.DISABLED,
+                is_enabled=False,
+                config={"redirect_uri": ""},
+            ),
+            IntegrationConfigCreate(
                 provider=IntegrationProvider.APPLE_OAUTH,
                 name="Apple OAuth",
                 status=IntegrationStatus.DISABLED,

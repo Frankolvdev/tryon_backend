@@ -2,6 +2,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
 
+from app.common.enums import IntegrationProvider
+
 
 class OAuthProviderName(StrEnum):
     GOOGLE = "google"
@@ -47,3 +49,21 @@ class OAuthAccountRead(BaseModel):
     provider_avatar_url: str | None = None
     email_verified: bool
     is_active: bool
+
+
+class OAuthProviderConfigResponse(BaseModel):
+    """Public configuration state for an OAuth integration.
+
+    Secrets are never exposed. The provider value intentionally follows the
+    existing IntegrationProvider enum used by the BackOffice.
+    """
+
+    provider: IntegrationProvider
+    enabled: bool
+    configured: bool
+    authorization_url: str | None = None
+    redirect_uri: str | None = None
+
+
+class OAuthProvidersResponse(BaseModel):
+    providers: list[OAuthProviderConfigResponse]

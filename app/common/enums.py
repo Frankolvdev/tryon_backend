@@ -236,6 +236,7 @@ class IntegrationProvider(str, Enum):
     S3 = "s3"
     SMTP = "smtp"
     GOOGLE_OAUTH = "google_oauth"
+    GITHUB_OAUTH = "github_oauth"
     APPLE_OAUTH = "apple_oauth"
     FACEBOOK_OAUTH = "facebook_oauth"
 
