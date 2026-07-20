@@ -58,6 +58,7 @@ from app.models.notification import Notification
 from app.models.operational_event import (
     OperationalEvent,
 )
+from app.models.oauth_account import OAuthAccount
 from app.models.pricing_rule import PricingRule
 from app.models.rate_limit_policy import (
     RateLimitPolicy,
@@ -155,6 +156,7 @@ __all__ = [
     "IntegrationEvent",
     "Notification",
     "OperationalEvent",
+    "OAuthAccount",
     "PricingRule",
     "RateLimitPolicy",
     "RbacPermission",
