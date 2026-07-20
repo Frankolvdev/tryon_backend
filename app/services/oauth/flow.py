@@ -286,10 +286,52 @@ class OAuthFlowService:
             mfa_setup_required=False,
         )
 
+    def callback_frontend_uri_from_state(
+        self,
+        state: str | None,
+        provider: OAuthProviderName,
+    ) -> str:
+        """Resolve the AppWeb callback URI without trusting an invalid OAuth state.
+
+        A verified state is preferred. If verification fails, the payload is read
+        only to recover the requested frontend URI and that URI is still checked
+        against FRONTEND_URL. The final fallback always stays on the configured
+        frontend origin.
+        """
+        if state:
+            try:
+                payload = self.decode_state(state, provider)
+                return str(payload["redirect_uri"])
+            except AppException:
+                try:
+                    unverified = jwt.decode(
+                        state,
+                        options={"verify_signature": False, "verify_exp": False},
+                        algorithms=[settings.JWT_ALGORITHM],
+                    )
+                    candidate = str(unverified.get("redirect_uri") or "")
+                    return self._validate_frontend_redirect(candidate)
+                except (AppException, jwt.PyJWTError, TypeError, ValueError):
+                    pass
+
+        return f"{str(settings.FRONTEND_URL).rstrip('/')}/oauth/callback"
+
     @staticmethod
     def callback_redirect(frontend_redirect_uri: str, grant: str) -> str:
         separator = "&" if "?" in frontend_redirect_uri else "?"
         return f"{frontend_redirect_uri}{separator}{urlencode({'code': grant})}"
+
+    def callback_error_redirect(
+        self,
+        frontend_redirect_uri: str,
+        *,
+        error: str,
+        error_description: str,
+    ) -> str:
+        parsed = urlparse(frontend_redirect_uri)
+        error_path = "/oauth/error"
+        base = parsed._replace(path=error_path, query="", fragment="").geturl()
+        return f"{base}?{urlencode({'error': error, 'error_description': error_description, 'message': error_description})}"
 
 
 oauth_flow_service = OAuthFlowService()

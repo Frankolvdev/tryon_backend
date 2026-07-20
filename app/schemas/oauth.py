@@ -1,11 +1,17 @@
-from enum import StrEnum
+from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
 
 from app.common.enums import IntegrationProvider
 
 
-class OAuthProviderName(StrEnum):
+class OAuthProviderName(str, Enum):
+    """OAuth providers supported by the public authentication contract.
+
+    ``str, Enum`` is intentionally used instead of ``StrEnum`` so the backend
+    remains compatible with Python 3.10.
+    """
+
     GOOGLE = "google"
     GITHUB = "github"
     FACEBOOK = "facebook"
@@ -13,7 +19,7 @@ class OAuthProviderName(StrEnum):
 
 
 class OAuthProviderProfile(BaseModel):
-    """Normalized profile returned by any supported OAuth provider."""
+    """Normalized identity returned by any OAuth provider implementation."""
 
     provider: OAuthProviderName
     provider_user_id: str = Field(min_length=1, max_length=255)
@@ -52,11 +58,7 @@ class OAuthAccountRead(BaseModel):
 
 
 class OAuthProviderConfigResponse(BaseModel):
-    """Public configuration state for an OAuth integration.
-
-    Secrets are never exposed. The provider value intentionally follows the
-    existing IntegrationProvider enum used by the BackOffice.
-    """
+    """BackOffice-safe provider state; credentials are never serialized."""
 
     provider: IntegrationProvider
     enabled: bool
@@ -67,8 +69,6 @@ class OAuthProviderConfigResponse(BaseModel):
 
 class OAuthProvidersResponse(BaseModel):
     providers: list[OAuthProviderConfigResponse]
-
-
 
 
 class OAuthPublicProviderRead(BaseModel):

@@ -3,6 +3,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
+from app.common.exceptions import AppException
 from app.schemas.auth import TokenResponse
 from app.schemas.oauth import (
     OAuthAuthorizationResponse,
@@ -16,6 +17,45 @@ from app.services.oauth_provider_service import oauth_provider_service
 
 
 router = APIRouter()
+
+
+def _oauth_error_code(exc: AppException) -> str:
+    message = exc.message.lower()
+    if "administrative account" in message:
+        return "admin_account"
+    if "terms and conditions" in message or "accept the terms" in message:
+        return "terms_not_accepted"
+    if "minimum age" in message or "confirm that you meet" in message:
+        return "age_not_confirmed"
+    if "registration is currently disabled" in message:
+        return "registration_disabled"
+    if "verified email" in message:
+        return "email_not_verified"
+    if "different account linked" in message:
+        return "provider_already_linked"
+    if "state" in message:
+        return "invalid_state"
+    if "not available" in message or "not configured" in message:
+        return "provider_unavailable"
+    if "temporarily unavailable" in message:
+        return "service_unavailable"
+    return exc.error_code.lower()
+
+
+def _callback_error_response(
+    *,
+    provider: OAuthProviderName,
+    state: str | None,
+    error: str,
+    description: str,
+) -> RedirectResponse:
+    frontend_uri = oauth_flow_service.callback_frontend_uri_from_state(state, provider)
+    target = oauth_flow_service.callback_error_redirect(
+        frontend_uri,
+        error=error,
+        error_description=description,
+    )
+    return RedirectResponse(url=target, status_code=302)
 
 
 @router.get("/providers", response_model=OAuthPublicProvidersResponse)
@@ -55,18 +95,63 @@ def start_oauth(
 async def oauth_callback(
     provider: OAuthProviderName,
     request: Request,
-    code: str = Query(min_length=1),
-    state: str = Query(min_length=32),
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    error_description: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
+    # OAuth providers return errors such as access_denied directly to this
+    # callback. Convert them to an AppWeb screen instead of exposing JSON.
+    if error:
+        return _callback_error_response(
+            provider=provider,
+            state=state,
+            error=error,
+            description=error_description or "The OAuth authorization was not completed.",
+        )
+
+    if not code:
+        return _callback_error_response(
+            provider=provider,
+            state=state,
+            error="missing_code",
+            description="The OAuth provider did not return an authorization code.",
+        )
+
+    if not state:
+        return _callback_error_response(
+            provider=provider,
+            state=None,
+            error="missing_state",
+            description="The OAuth authorization state is missing or invalid.",
+        )
+
     callback_uri = str(request.url_for("oauth_callback", provider=provider.value))
-    frontend_redirect_uri, grant = await oauth_flow_service.callback(
-        db,
-        provider_name=provider,
-        code=code,
-        state=state,
-        backend_callback_uri=callback_uri,
-    )
+    try:
+        frontend_redirect_uri, grant = await oauth_flow_service.callback(
+            db,
+            provider_name=provider,
+            code=code,
+            state=state,
+            backend_callback_uri=callback_uri,
+        )
+    except AppException as exc:
+        return _callback_error_response(
+            provider=provider,
+            state=state,
+            error=_oauth_error_code(exc),
+            description=exc.message,
+        )
+    except Exception:
+        # Do not leak provider tokens, traces, or internal details to the browser.
+        return _callback_error_response(
+            provider=provider,
+            state=state,
+            error="oauth_callback_failed",
+            description="We could not complete the OAuth login. Please try again.",
+        )
+
     return RedirectResponse(
         url=oauth_flow_service.callback_redirect(frontend_redirect_uri, grant),
         status_code=302,
