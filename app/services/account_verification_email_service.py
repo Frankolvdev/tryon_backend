@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import smtplib
 import ssl
@@ -15,94 +17,198 @@ logger = logging.getLogger("app.account_verification_email")
 
 class AccountVerificationEmailService:
     def _frontend_base_url(self) -> str:
-        return str(getattr(settings, "FRONTEND_URL", "http://localhost:3001")).strip().rstrip("/")
+        return str(getattr(settings, "FRONTEND_URL", "http://localhost:3003")).strip().rstrip("/")
 
-    def _verification_url(self, *, email: str, purpose: str, token: str) -> str:
+    def _action_url(self, *, email: str, purpose: str, token: str) -> str:
         route = "/reset-password" if purpose == "password_reset" else "/verify-account"
         return (
             f"{self._frontend_base_url()}{route}"
             f"?email={quote(email)}&purpose={quote(purpose)}&token={quote(token)}"
         )
 
-    def _translate(self, db: Session, *, user_id: int, key: str, default: str, variables: dict | None = None) -> str:
+    def _translate(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        key: str,
+        default: str,
+        variables: dict | None = None,
+    ) -> str:
         return i18n_service.translate(
-            db, translation_key=key, user_id=user_id, variables=variables, default=default
+            db,
+            translation_key=key,
+            user_id=user_id,
+            variables=variables,
+            default=default,
         )
 
-    @staticmethod
-    def _layout(*, eyebrow: str, title: str, intro: str, content: str, warning: str) -> str:
+    def _html(
+        self,
+        *,
+        eyebrow: str,
+        title: str,
+        intro: str,
+        button_label: str | None,
+        button_url: str | None,
+        otp: str | None,
+        expiration: str,
+        ignore: str,
+    ) -> str:
+        button = ""
+        if button_label and button_url:
+            button = f"""
+            <table role="presentation" width="100%" style="margin:30px 0 22px">
+              <tr><td align="center">
+                <a href="{escape(button_url, quote=True)}"
+                   style="display:inline-block;padding:16px 28px;border-radius:14px;
+                          background:linear-gradient(135deg,#761120,#e1324d);
+                          color:#fff;text-decoration:none;font-weight:800">
+                  {escape(button_label)}
+                </a>
+              </td></tr>
+            </table>
+            """
+
+        otp_block = ""
+        if otp:
+            otp_block = f"""
+            <div style="margin:26px 0;padding:22px;border:1px solid #2a2a31;
+                        border-radius:16px;background:#111116;text-align:center">
+              <div style="margin-bottom:9px;color:#8c8d98;font-size:11px;
+                          font-weight:800;letter-spacing:.16em;text-transform:uppercase">
+                Código de seguridad
+              </div>
+              <div style="color:#fff;font-size:30px;font-weight:900;letter-spacing:.22em">
+                {escape(otp)}
+              </div>
+            </div>
+            """
+
         return f"""<!doctype html>
-<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>{escape(title)}</title></head>
-<body style="margin:0;background:#070709;color:#f7f7f8;font-family:Arial,Helvetica,sans-serif;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#070709;padding:34px 14px;">
-<tr><td align="center">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:620px;background:#111116;border:1px solid #292931;border-radius:22px;overflow:hidden;">
-<tr><td style="height:5px;background:linear-gradient(90deg,#4d0b14,#d52d42,#4d0b14);font-size:0">&nbsp;</td></tr>
-<tr><td style="padding:34px 38px 16px;">
-<table role="presentation" width="100%"><tr>
-<td><div style="font-size:23px;font-weight:900;letter-spacing:.08em;">LUX<span style="color:#df3047">IA</span></div>
-<div style="font-size:10px;color:#898994;letter-spacing:.18em;margin-top:4px;">AI FASHION STUDIO</div></td>
-<td align="right"><span style="display:inline-block;border:1px solid #3a2026;background:#1a1114;color:#f07788;border-radius:999px;padding:8px 12px;font-size:10px;font-weight:700;letter-spacing:.12em;">CUENTA SEGURA</span></td>
-</tr></table></td></tr>
-<tr><td style="padding:18px 38px 8px;">
-<div style="color:#e54a5f;font-size:11px;font-weight:800;letter-spacing:.14em;margin-bottom:12px;">{escape(eyebrow)}</div>
-<h1 style="margin:0 0 14px;font-size:32px;line-height:1.12;color:#fff;">{escape(title)}</h1>
-<p style="margin:0;color:#b7b7c0;font-size:15px;line-height:1.7;">{escape(intro)}</p>
+<html lang="es">
+<body style="margin:0;background:#050507;color:#f6f6f8;font-family:Arial,Helvetica,sans-serif">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+       style="background:#050507">
+<tr><td align="center" style="padding:36px 16px">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+       style="max-width:620px;border:1px solid #25252c;border-radius:26px;
+              overflow:hidden;background:#0a0a0e;box-shadow:0 30px 90px rgba(0,0,0,.55)">
+<tr><td style="padding:28px 34px;border-bottom:1px solid #202027;
+               background:linear-gradient(135deg,#171218,#0a0a0e)">
+<table role="presentation"><tr>
+<td style="width:44px;height:44px;border-radius:14px;text-align:center;
+           background:linear-gradient(145deg,#e23952,#71111f);
+           color:#fff;font-size:20px;font-weight:900">L</td>
+<td style="padding-left:12px">
+<div style="color:#fff;font-size:20px;font-weight:900">LUXIA</div>
+<div style="margin-top:3px;color:#777985;font-size:9px;font-weight:800;
+            letter-spacing:.19em;text-transform:uppercase">AI Fashion Studio</div>
+</td></tr></table>
 </td></tr>
-<tr><td style="padding:22px 38px 10px;">{content}</td></tr>
-<tr><td style="padding:18px 38px 32px;">
-<div style="border:1px solid #292931;background:#0b0b0e;border-radius:14px;padding:15px;color:#8f909a;font-size:12px;line-height:1.65;">🔒 {escape(warning)}</div>
+<tr><td style="padding:42px 38px 34px">
+<div style="margin-bottom:14px;color:#ef455d;font-size:10px;font-weight:900;
+            letter-spacing:.22em;text-transform:uppercase">{escape(eyebrow)}</div>
+<h1 style="margin:0;color:#fff;font-size:34px;line-height:1.12">{escape(title)}</h1>
+<p style="margin:18px 0 0;color:#a0a1ab;font-size:15px;line-height:1.75">
+{escape(intro)}
+</p>
+{otp_block}
+{button}
+<div style="margin-top:24px;padding:15px 16px;border:1px solid #25252d;
+            border-radius:14px;background:#101014;color:#8c8d98;
+            font-size:12px;line-height:1.65">{escape(expiration)}</div>
+<p style="margin:22px 0 0;color:#666873;font-size:12px;line-height:1.65">
+{escape(ignore)}
+</p>
 </td></tr>
-<tr><td style="border-top:1px solid #25252c;padding:22px 38px;color:#70717b;font-size:11px;line-height:1.6;">
-Este mensaje fue enviado automáticamente por LUXIA. No respondas a este correo.<br>
-© AI Fashion Studio · Seguridad y privacidad por diseño.
+<tr><td style="padding:22px 38px;border-top:1px solid #202027;
+               background:#08080b;color:#565862;font-size:11px;line-height:1.6">
+Mensaje automático de LUXIA. Nunca compartas enlaces ni códigos de seguridad.
 </td></tr>
-</table></td></tr></table></body></html>"""
+</table>
+</td></tr>
+</table>
+</body>
+</html>"""
 
     def _build_content(
-        self, db: Session, *, user_id: int, email: str, purpose: str,
-        verification_method: str, otp: str | None, link_token: str | None,
-        otp_expiration_minutes: int, email_link_expiration_minutes: int,
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        email: str,
+        purpose: str,
+        verification_method: str,
+        otp: str | None,
+        link_token: str | None,
+        otp_expiration_minutes: int,
+        email_link_expiration_minutes: int,
     ) -> tuple[str, str, str]:
-        is_reset = purpose == "password_reset"
-        subject = "Restablece tu contraseña de LUXIA" if is_reset else "Verifica tu cuenta de LUXIA"
-        title = "Crea una nueva contraseña" if is_reset else "Confirma tu correo electrónico"
-        intro = (
-            "Recibimos una solicitud para recuperar el acceso a tu cuenta."
-            if is_reset else
-            "Estás a un paso de activar tu estudio creativo y proteger tu cuenta."
+        password_reset = purpose == "password_reset"
+
+        if password_reset:
+            subject = "Restablece tu contraseña de LUXIA"
+            eyebrow = "RECUPERACIÓN SEGURA"
+            title = "Crea una nueva contraseña"
+            intro = (
+                "Recibimos una solicitud para recuperar el acceso a tu cuenta. "
+                "Utiliza el enlace seguro para establecer una nueva contraseña."
+            )
+            button_label = "Restablecer contraseña"
+        else:
+            subject = self._translate(
+                db,
+                user_id=user_id,
+                key="account.verification.email.subject",
+                default="Verifica tu cuenta de LUXIA",
+            )
+            eyebrow = "ACTIVA TU CUENTA"
+            title = "Verifica tu correo electrónico"
+            intro = self._translate(
+                db,
+                user_id=user_id,
+                key="account.verification.email.greeting",
+                default="Confirma que esta dirección te pertenece para activar y proteger tu cuenta.",
+            )
+            button_label = self._translate(
+                db,
+                user_id=user_id,
+                key="account.verification.email.link_label",
+                default="Verificar correo",
+            )
+
+        ignore = self._translate(
+            db,
+            user_id=user_id,
+            key="account.verification.email.ignore",
+            default="Si no solicitaste esta acción, ignora el mensaje. Tu cuenta permanecerá protegida.",
         )
-        warning = (
-            "Si no solicitaste este cambio, ignora el mensaje. Tu contraseña actual seguirá funcionando."
-            if is_reset else
-            "Si no creaste esta cuenta, puedes ignorar este mensaje con seguridad."
+
+        url = (
+            self._action_url(email=email, purpose=purpose, token=link_token)
+            if link_token
+            else None
         )
-        blocks = []
-        text = [intro, ""]
+        minutes = email_link_expiration_minutes if link_token else otp_expiration_minutes
+        expiration = f"Este acceso vence en {minutes} minutos y solo puede utilizarse una vez."
+
+        text = [title, "", intro, ""]
         if otp:
-            blocks.append(
-                f'<div style="background:#0a0a0d;border:1px solid #302126;border-radius:16px;padding:22px;text-align:center;margin-bottom:16px;">'
-                f'<div style="color:#8f9099;font-size:11px;letter-spacing:.12em;margin-bottom:10px;">CÓDIGO DE SEGURIDAD</div>'
-                f'<div style="color:#fff;font-size:34px;font-weight:900;letter-spacing:8px;">{escape(otp)}</div>'
-                f'<div style="color:#7d7e87;font-size:12px;margin-top:10px;">Caduca en {otp_expiration_minutes} minutos.</div></div>'
-            )
-            text += ["Código:", otp, f"Caduca en {otp_expiration_minutes} minutos.", ""]
-        if link_token:
-            url = self._verification_url(email=email, purpose=purpose, token=link_token)
-            label = "Crear nueva contraseña" if is_reset else "Verificar mi correo"
-            blocks.append(
-                f'<div style="text-align:center;padding:8px 0 18px;">'
-                f'<a href="{escape(url)}" style="display:inline-block;background:linear-gradient(135deg,#97182a,#d52d42);'
-                f'color:#fff;text-decoration:none;font-weight:800;border-radius:13px;padding:16px 25px;">{escape(label)}</a>'
-                f'<div style="color:#777883;font-size:12px;margin-top:14px;">El enlace caduca en {email_link_expiration_minutes} minutos.</div></div>'
-                f'<div style="color:#777883;font-size:11px;line-height:1.6;word-break:break-all;">Si el botón no funciona, copia este enlace:<br>{escape(url)}</div>'
-            )
-            text += [label, url, f"Caduca en {email_link_expiration_minutes} minutos.", ""]
-        text.append(warning)
-        html = self._layout(
-            eyebrow="RECUPERACIÓN DE ACCESO" if is_reset else "VERIFICACIÓN DE CUENTA",
-            title=title, intro=intro, content="".join(blocks), warning=warning,
+            text += ["Código de seguridad:", otp, ""]
+        if url:
+            text += [button_label, url, ""]
+        text += [expiration, "", ignore]
+
+        html = self._html(
+            eyebrow=eyebrow,
+            title=title,
+            intro=intro,
+            button_label=button_label if url else None,
+            button_url=url,
+            otp=otp,
+            expiration=expiration,
+            ignore=ignore,
         )
         return subject, "\n".join(text), html
 
@@ -118,20 +224,35 @@ Este mensaje fue enviado automáticamente por LUXIA. No respondas a este correo.
         return smtplib.SMTP(host, port, timeout=30)
 
     def send_verification(
-        self, db: Session, *, user_id: int, email: str, purpose: str,
-        verification_method: str, otp: str | None, link_token: str | None,
-        otp_expiration_minutes: int, email_link_expiration_minutes: int,
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        email: str,
+        purpose: str,
+        verification_method: str,
+        otp: str | None,
+        link_token: str | None,
+        otp_expiration_minutes: int,
+        email_link_expiration_minutes: int,
     ) -> None:
         from_email = str(getattr(settings, "SMTP_FROM_EMAIL", "")).strip()
-        from_name = str(getattr(settings, "SMTP_FROM_NAME", "LUXIA AI Fashion Studio")).strip()
+        from_name = str(getattr(settings, "SMTP_FROM_NAME", "LUXIA")).strip()
         if not from_email:
             raise RuntimeError("SMTP_FROM_EMAIL is not configured.")
+
         subject, text_body, html_body = self._build_content(
-            db, user_id=user_id, email=email, purpose=purpose,
-            verification_method=verification_method, otp=otp, link_token=link_token,
+            db,
+            user_id=user_id,
+            email=email,
+            purpose=purpose,
+            verification_method=verification_method,
+            otp=otp,
+            link_token=link_token,
             otp_expiration_minutes=otp_expiration_minutes,
             email_link_expiration_minutes=email_link_expiration_minutes,
         )
+
         message = EmailMessage()
         message["Subject"] = subject
         message["From"] = f"{from_name} <{from_email}>"
@@ -144,6 +265,7 @@ Este mensaje fue enviado automáticamente por LUXIA. No respondas a este correo.
         use_tls = bool(getattr(settings, "SMTP_USE_TLS", True))
         use_ssl = bool(getattr(settings, "SMTP_USE_SSL", False))
         context = ssl.create_default_context()
+
         server = self._smtp_connection()
         try:
             if use_tls and not use_ssl:
@@ -156,9 +278,15 @@ Este mensaje fue enviado automáticamente por LUXIA. No respondas a este correo.
                 server.quit()
             except Exception:
                 pass
-        logger.info("Account security email sent.", extra={
-            "user_id": user_id, "purpose": purpose, "verification_method": verification_method,
-        })
+
+        logger.info(
+            "Account security email sent.",
+            extra={
+                "user_id": user_id,
+                "purpose": purpose,
+                "verification_method": verification_method,
+            },
+        )
 
 
 account_verification_email_service = AccountVerificationEmailService()
