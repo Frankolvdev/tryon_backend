@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
@@ -194,8 +194,6 @@ class UserService:
             not verification_required
         )
 
-        # Campo temporal de validación anti-bot; no pertenece al modelo SQLAlchemy User.
-        user_dict.pop("turnstile_token", None)
         user = user_repository.create(
             db,
             data=user_dict,
