@@ -69,6 +69,19 @@ class OAuthProvidersResponse(BaseModel):
     providers: list[OAuthProviderConfigResponse]
 
 
+
+
+class OAuthPublicProviderRead(BaseModel):
+    provider: OAuthProviderName
+    enabled: bool
+    configured: bool
+    available: bool
+
+
+class OAuthPublicProvidersResponse(BaseModel):
+    providers: list[OAuthPublicProviderRead]
+
+
 class OAuthStartRequest(BaseModel):
     redirect_uri: HttpUrl
     terms_accepted: bool = False

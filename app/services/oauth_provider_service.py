@@ -7,6 +7,22 @@ from app.services.oauth.config import (
 
 
 class OAuthProviderService:
+    def list_public_providers(self, db: Session) -> list[dict]:
+        providers: list[dict] = []
+
+        for definition in OAUTH_PROVIDER_DEFINITIONS:
+            runtime = load_oauth_provider_config(db, definition)
+            providers.append(
+                {
+                    "provider": definition.name.value,
+                    "enabled": runtime.enabled,
+                    "configured": runtime.configured,
+                    "available": bool(runtime.enabled and runtime.configured),
+                }
+            )
+
+        return providers
+
     def list_providers(self, db: Session) -> list[dict]:
         providers: list[dict] = []
 

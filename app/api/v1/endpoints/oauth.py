@@ -7,13 +7,24 @@ from app.schemas.auth import TokenResponse
 from app.schemas.oauth import (
     OAuthAuthorizationResponse,
     OAuthGrantExchangeRequest,
+    OAuthPublicProvidersResponse,
     OAuthProviderName,
     OAuthStartRequest,
 )
 from app.services.oauth.flow import oauth_flow_service
+from app.services.oauth_provider_service import oauth_provider_service
 
 
 router = APIRouter()
+
+
+@router.get("/providers", response_model=OAuthPublicProvidersResponse)
+def list_oauth_providers(
+    db: Session = Depends(get_db),
+):
+    return OAuthPublicProvidersResponse(
+        providers=oauth_provider_service.list_public_providers(db)
+    )
 
 
 @router.post("/{provider}/start", response_model=OAuthAuthorizationResponse)
