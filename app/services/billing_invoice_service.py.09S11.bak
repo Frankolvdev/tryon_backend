@@ -192,75 +192,6 @@ class BillingInvoiceService:
             limit=limit,
         )
 
-    def _payment_intent_id(
-        self,
-        stripe_invoice: Any,
-    ) -> str | None:
-        direct = self._stripe_id(
-            self._stripe_value(
-                stripe_invoice,
-                "payment_intent",
-            )
-        )
-        if direct:
-            return direct
-
-        payments = (
-            self._stripe_value(
-                stripe_invoice,
-                "payments",
-                {},
-            )
-            or {}
-        )
-        entries = (
-            self._stripe_value(
-                payments,
-                "data",
-                [],
-            )
-            or []
-        )
-
-        for entry in entries:
-            payment = (
-                self._stripe_value(
-                    entry,
-                    "payment",
-                    {},
-                )
-                or {}
-            )
-            payment_type = self._stripe_value(
-                payment,
-                "type",
-            )
-            if payment_type not in {
-                None,
-                "payment_intent",
-            }:
-                continue
-
-            payment_intent_id = self._stripe_id(
-                self._stripe_value(
-                    payment,
-                    "payment_intent",
-                )
-            )
-            if payment_intent_id:
-                return payment_intent_id
-
-            payment_intent_id = self._stripe_id(
-                self._stripe_value(
-                    entry,
-                    "payment_intent",
-                )
-            )
-            if payment_intent_id:
-                return payment_intent_id
-
-        return None
-
     def sync_invoice(
         self,
         db: Session,
@@ -271,24 +202,20 @@ class BillingInvoiceService:
             stripe_invoice,
             "id",
         )
-        if not provider_invoice_id:
-            raise ValueError("Stripe invoice ID is required.")
 
-        existing = (
-            billing_invoice_repository
-            .get_by_provider_invoice_id(
-                db,
-                provider_invoice_id,
-            )
+        customer_id = self._stripe_value(
+            stripe_invoice,
+            "customer",
         )
 
-        customer_id = self._stripe_id(
-            self._stripe_value(
-                stripe_invoice,
-                "customer",
+        if not isinstance(customer_id, str):
+            customer_id = self._stripe_value(
+                customer_id,
+                "id",
             )
-        )
+
         billing_customer = None
+
         if customer_id:
             billing_customer = (
                 billing_customer_repository
@@ -302,7 +229,9 @@ class BillingInvoiceService:
         subscription_id = self.provider_subscription_id(
             stripe_invoice
         )
+
         user_subscription = None
+
         if subscription_id:
             user_subscription = (
                 user_subscription_repository
@@ -313,30 +242,31 @@ class BillingInvoiceService:
             )
 
         user_id = None
+
         if user_subscription:
             user_id = user_subscription.user_id
         elif billing_customer:
             user_id = billing_customer.user_id
-        elif existing:
-            user_id = existing.user_id
 
         if user_id is None:
             raise ValueError(
                 "Internal user could not be resolved for invoice."
             )
 
-        payment_intent_id = self._payment_intent_id(
-            stripe_invoice
+        payment_intent_id = self._stripe_value(
+            stripe_invoice,
+            "payment_intent",
         )
 
-        payment = None
-        if existing and existing.billing_payment_id:
-            payment = billing_payment_repository.get_by_id(
-                db,
-                existing.billing_payment_id,
+        if not isinstance(payment_intent_id, str):
+            payment_intent_id = self._stripe_value(
+                payment_intent_id,
+                "id",
             )
 
-        if payment is None and payment_intent_id:
+        payment = None
+
+        if payment_intent_id:
             payment = (
                 billing_payment_repository
                 .get_by_payment_intent_id(
@@ -353,6 +283,7 @@ class BillingInvoiceService:
             )
             or BillingInvoiceStatus.OPEN.value
         )
+
         currency = (
             self._stripe_value(
                 stripe_invoice,
@@ -361,6 +292,7 @@ class BillingInvoiceService:
             )
             or "usd"
         ).upper()
+
         amount_paid = self._money(
             self._stripe_value(
                 stripe_invoice,
@@ -368,6 +300,7 @@ class BillingInvoiceService:
                 0,
             )
         )
+
         total = self._money(
             self._stripe_value(
                 stripe_invoice,
@@ -376,187 +309,68 @@ class BillingInvoiceService:
             )
         )
 
-        billing_reason = self._stripe_value(
-            stripe_invoice,
-            "billing_reason",
-        )
-        payment_type = (
-            BillingPaymentType.SUBSCRIPTION.value
-            if billing_reason == "subscription_create"
-            else BillingPaymentType.SUBSCRIPTION_RENEWAL.value
-        )
-        payment_status = (
-            BillingPaymentStatus.SUCCEEDED.value
-            if invoice_status == BillingInvoiceStatus.PAID.value
-            else BillingPaymentStatus.PROCESSING.value
-        )
-
-        should_create_payment = (
-            payment is None
-            and (
-                payment_intent_id is not None
-                or invoice_status == BillingInvoiceStatus.PAID.value
-                or amount_paid > Decimal("0.00")
-            )
-        )
-
-        if should_create_payment:
+        if not payment and payment_intent_id:
             payment = BillingPayment(
                 user_id=user_id,
                 billing_customer_id=(
                     billing_customer.id
                     if billing_customer
-                    else (
-                        existing.billing_customer_id
-                        if existing
-                        else None
-                    )
+                    else None
                 ),
                 user_subscription_id=(
                     user_subscription.id
                     if user_subscription
-                    else (
-                        existing.user_subscription_id
-                        if existing
-                        else None
-                    )
+                    else None
                 ),
                 provider=BillingProvider.STRIPE.value,
-                payment_type=payment_type,
-                status=payment_status,
+                payment_type=BillingPaymentType.SUBSCRIPTION_RENEWAL.value,
+                status=(
+                    BillingPaymentStatus.SUCCEEDED.value
+                    if invoice_status == BillingInvoiceStatus.PAID.value
+                    else BillingPaymentStatus.PROCESSING.value
+                ),
                 currency=currency,
-                amount=amount_paid or total,
+                amount=total,
                 refunded_amount=Decimal("0.00"),
                 provider_payment_intent_id=payment_intent_id,
-                description=(
-                    f"Stripe invoice {provider_invoice_id}"
-                ),
-                metadata_json=self._serialize(
-                    {
-                        "provider_invoice_id": provider_invoice_id,
-                        "billing_reason": billing_reason,
-                        "payment_intent_source": (
-                            "invoice.payment_intent"
-                            if self._stripe_id(
-                                self._stripe_value(
-                                    stripe_invoice,
-                                    "payment_intent",
-                                )
-                            )
-                            else (
-                                "invoice.payments.data"
-                                if payment_intent_id
-                                else "invoice_fallback"
-                            )
-                        ),
-                    }
-                ),
+                description=f"Stripe invoice {provider_invoice_id}",
                 paid_at=(
-                    self._timestamp(
-                        self._stripe_value(
-                            self._stripe_value(
-                                stripe_invoice,
-                                "status_transitions",
-                                {},
-                            ),
-                            "paid_at",
-                        )
-                    )
-                    or (
-                        utc_now()
-                        if payment_status
-                        == BillingPaymentStatus.SUCCEEDED.value
-                        else None
-                    )
+                    utc_now()
+                    if invoice_status == BillingInvoiceStatus.PAID.value
+                    else None
                 ),
             )
-            db.add(payment)
-            db.flush()
-        elif payment:
-            payment.user_id = user_id
-            payment.billing_customer_id = (
-                billing_customer.id
-                if billing_customer
-                else payment.billing_customer_id
-            )
-            payment.user_subscription_id = (
-                user_subscription.id
-                if user_subscription
-                else payment.user_subscription_id
-            )
-            payment.payment_type = payment_type
-            payment.amount = amount_paid or total
-            payment.currency = currency
-            if (
-                payment.provider_payment_intent_id is None
-                and payment_intent_id
-            ):
-                payment.provider_payment_intent_id = (
-                    payment_intent_id
-                )
-            if invoice_status == BillingInvoiceStatus.PAID.value:
-                payment.status = (
-                    BillingPaymentStatus.SUCCEEDED.value
-                )
-                payment.paid_at = (
-                    payment.paid_at
-                    or self._timestamp(
-                        self._stripe_value(
-                            self._stripe_value(
-                                stripe_invoice,
-                                "status_transitions",
-                                {},
-                            ),
-                            "paid_at",
-                        )
-                    )
-                    or utc_now()
-                )
-                payment.failure_code = None
-                payment.failure_message = None
-                payment.failed_at = None
+
             db.add(payment)
             db.flush()
 
-        discount_amounts = (
-            self._stripe_value(
-                stripe_invoice,
-                "total_discount_amounts",
-                [],
-            )
-            or []
-        )
-        tax_amounts = (
-            self._stripe_value(
-                stripe_invoice,
-                "total_tax_amounts",
-                [],
-            )
-            or []
-        )
+        elif payment:
+            payment.amount = total
+            payment.currency = currency
+
+            if invoice_status == BillingInvoiceStatus.PAID.value:
+                payment.status = BillingPaymentStatus.SUCCEEDED.value
+                payment.paid_at = payment.paid_at or utc_now()
+
+            db.add(payment)
+            db.flush()
 
         values = {
             "user_id": user_id,
             "billing_customer_id": (
                 billing_customer.id
                 if billing_customer
-                else (
-                    existing.billing_customer_id
-                    if existing
-                    else None
-                )
+                else None
             ),
             "user_subscription_id": (
                 user_subscription.id
                 if user_subscription
-                else (
-                    existing.user_subscription_id
-                    if existing
-                    else None
-                )
+                else None
             ),
             "billing_payment_id": (
-                payment.id if payment else None
+                payment.id
+                if payment
+                else None
             ),
             "provider": BillingProvider.STRIPE.value,
             "provider_invoice_id": provider_invoice_id,
@@ -575,20 +389,28 @@ class BillingInvoiceService:
             ),
             "discount_amount": self._money(
                 self._stripe_value(
-                    discount_amounts[0],
-                    "amount",
-                    0,
+                    stripe_invoice,
+                    "total_discount_amounts",
+                    [],
+                )[0].get("amount", 0)
+                if self._stripe_value(
+                    stripe_invoice,
+                    "total_discount_amounts",
+                    [],
                 )
-                if discount_amounts
                 else 0
             ),
             "tax_amount": self._money(
                 self._stripe_value(
-                    tax_amounts[0],
-                    "amount",
-                    0,
+                    stripe_invoice,
+                    "total_tax_amounts",
+                    [],
+                )[0].get("amount", 0)
+                if self._stripe_value(
+                    stripe_invoice,
+                    "total_tax_amounts",
+                    [],
                 )
-                if tax_amounts
                 else 0
             ),
             "total": total,
@@ -639,6 +461,14 @@ class BillingInvoiceService:
                 )
             ),
         }
+
+        existing = (
+            billing_invoice_repository
+            .get_by_provider_invoice_id(
+                db,
+                provider_invoice_id,
+            )
+        )
 
         if existing:
             invoice = billing_invoice_repository.update(

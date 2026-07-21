@@ -1,198 +1,14 @@
-import json
-from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Any
+from __future__ import annotations
 
-from sqlalchemy.orm import Session
-
-from app.common.billing_enums import (
-    BillingInvoiceStatus,
-    BillingPaymentStatus,
-    BillingPaymentType,
-    BillingProvider,
-    SubscriptionStatus,
-)
-from app.common.time import utc_now
-from app.models.billing_invoice import BillingInvoice
-from app.models.billing_payment import BillingPayment
-from app.repositories.billing_customer_repository import (
-    billing_customer_repository,
-)
-from app.repositories.billing_invoice_repository import (
-    billing_invoice_repository,
-)
-from app.repositories.billing_payment_repository import (
-    billing_payment_repository,
-)
-from app.repositories.user_subscription_repository import (
-    user_subscription_repository,
-)
-from app.schemas.billing_invoice import (
-    BillingInvoiceListResponse,
-    BillingInvoiceResponse,
-)
+from pathlib import Path
+import re
+import shutil
+import sys
 
 
-class BillingInvoiceService:
-    def _stripe_value(
-        self,
-        obj: Any,
-        key: str,
-        default: Any = None,
-    ) -> Any:
-        if isinstance(obj, dict):
-            return obj.get(key, default)
+TARGET = Path("app/services/billing_invoice_service.py")
 
-        return getattr(obj, key, default)
-
-    def _stripe_id(self, value: Any) -> str | None:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            return value
-        return self._stripe_value(value, "id")
-
-    def provider_subscription_id(self, stripe_invoice: Any) -> str | None:
-        direct = self._stripe_id(
-            self._stripe_value(stripe_invoice, "subscription")
-        )
-        if direct:
-            return direct
-
-        parent = self._stripe_value(stripe_invoice, "parent", {}) or {}
-        details = self._stripe_value(
-            parent,
-            "subscription_details",
-            {},
-        ) or {}
-        return self._stripe_id(
-            self._stripe_value(details, "subscription")
-        )
-
-    def _timestamp(
-        self,
-        value: int | float | None,
-    ) -> datetime | None:
-        if value is None:
-            return None
-
-        return datetime.fromtimestamp(
-            value,
-            tz=timezone.utc,
-        ).replace(tzinfo=None)
-
-    def _money(self, cents: int | None) -> Decimal:
-        return (
-            Decimal(int(cents or 0)) / Decimal("100")
-        ).quantize(Decimal("0.01"))
-
-    def _stripe_dict(self, value: Any) -> dict[str, Any]:
-        if value is None:
-            return {}
-        if isinstance(value, dict):
-            return value
-
-        to_dict_recursive = getattr(value, "to_dict_recursive", None)
-        if callable(to_dict_recursive):
-            converted = to_dict_recursive()
-            return converted if isinstance(converted, dict) else {}
-
-        to_dict = getattr(value, "to_dict", None)
-        if callable(to_dict):
-            converted = to_dict()
-            return converted if isinstance(converted, dict) else {}
-
-        try:
-            converted = dict(value)
-        except (TypeError, ValueError, KeyError):
-            return {}
-
-        return converted if isinstance(converted, dict) else {}
-
-    def _serialize(self, value: Any) -> str:
-        return json.dumps(
-            value or {},
-            ensure_ascii=False,
-            default=str,
-        )
-
-    def _parse(self, value: str | None) -> dict:
-        if not value:
-            return {}
-
-        try:
-            parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            return {}
-
-    def _response(
-        self,
-        invoice: BillingInvoice,
-    ) -> BillingInvoiceResponse:
-        return BillingInvoiceResponse(
-            id=invoice.id,
-            user_id=invoice.user_id,
-            billing_customer_id=invoice.billing_customer_id,
-            user_subscription_id=invoice.user_subscription_id,
-            billing_payment_id=invoice.billing_payment_id,
-            provider=invoice.provider,
-            provider_invoice_id=invoice.provider_invoice_id,
-            invoice_number=invoice.invoice_number,
-            status=invoice.status,
-            currency=invoice.currency,
-            subtotal=invoice.subtotal,
-            discount_amount=invoice.discount_amount,
-            tax_amount=invoice.tax_amount,
-            total=invoice.total,
-            amount_paid=invoice.amount_paid,
-            hosted_invoice_url=invoice.hosted_invoice_url,
-            invoice_pdf_url=invoice.invoice_pdf_url,
-            period_start=invoice.period_start,
-            period_end=invoice.period_end,
-            due_at=invoice.due_at,
-            paid_at=invoice.paid_at,
-            metadata=self._parse(invoice.metadata_json),
-            created_at=invoice.created_at,
-            updated_at=invoice.updated_at,
-        )
-
-    def list_invoices(
-        self,
-        db: Session,
-        *,
-        user_id: int | None = None,
-        status: BillingInvoiceStatus | None = None,
-        skip: int = 0,
-        limit: int = 100,
-    ) -> BillingInvoiceListResponse:
-        status_value = status.value if status else None
-
-        invoices = billing_invoice_repository.list_all_filtered(
-            db,
-            user_id=user_id,
-            status=status_value,
-            skip=skip,
-            limit=limit,
-        )
-
-        total = billing_invoice_repository.count_filtered(
-            db,
-            user_id=user_id,
-            status=status_value,
-        )
-
-        return BillingInvoiceListResponse(
-            items=[
-                self._response(invoice)
-                for invoice in invoices
-            ],
-            total=total,
-            skip=skip,
-            limit=limit,
-        )
-
-    def _payment_intent_id(
+NEW_SYNC = r'''    def _payment_intent_id(
         self,
         stripe_invoice: Any,
     ) -> str | None:
@@ -654,50 +470,51 @@ class BillingInvoiceService:
 
         return invoice
 
-    def mark_payment_failed(
-        self,
-        db: Session,
-        *,
-        stripe_invoice: Any,
-    ) -> BillingInvoice:
-        invoice = self.sync_invoice(
-            db,
-            stripe_invoice=stripe_invoice,
+'''
+
+
+def main() -> int:
+    if not TARGET.exists():
+        print(
+            f"ERROR: No se encontró {TARGET}. "
+            "Ejecuta este script desde la raíz de tryon_backend.",
+            file=sys.stderr,
         )
+        return 1
 
-        if invoice.billing_payment_id:
-            payment = billing_payment_repository.get_by_id(
-                db,
-                invoice.billing_payment_id,
-            )
+    source = TARGET.read_text(encoding="utf-8")
+    pattern = re.compile(
+        r"    def sync_invoice\(\n.*?"
+        r"(?=    def mark_payment_failed\()",
+        re.DOTALL,
+    )
+    match = pattern.search(source)
+    if not match:
+        print(
+            "ERROR: No se encontró sync_invoice con "
+            "la estructura esperada.",
+            file=sys.stderr,
+        )
+        return 1
 
-            if payment:
-                payment.status = BillingPaymentStatus.FAILED.value
-                payment.failure_message = (
-                    "Stripe invoice payment failed."
-                )
-                payment.failed_at = utc_now()
+    updated = (
+        source[:match.start()]
+        + NEW_SYNC
+        + source[match.end():]
+    )
 
-                db.add(payment)
+    backup = TARGET.with_suffix(".py.09S11.bak")
+    if not backup.exists():
+        shutil.copy2(TARGET, backup)
 
-        if invoice.user_subscription_id:
-            subscription = (
-                user_subscription_repository.get_by_id(
-                    db,
-                    invoice.user_subscription_id,
-                )
-            )
-
-            if subscription:
-                subscription.status = (
-                    SubscriptionStatus.PAST_DUE.value
-                )
-                db.add(subscription)
-
-        db.commit()
-        db.refresh(invoice)
-
-        return invoice
+    TARGET.write_text(updated, encoding="utf-8")
+    print(
+        "OK: billing_invoice_service.py actualizado "
+        "para Stripe moderno."
+    )
+    print(f"Backup: {backup}")
+    return 0
 
 
-billing_invoice_service = BillingInvoiceService()
+if __name__ == "__main__":
+    raise SystemExit(main())
