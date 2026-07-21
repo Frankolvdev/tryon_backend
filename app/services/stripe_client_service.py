@@ -324,6 +324,62 @@ class StripeClientService:
             metadata=metadata,
         )
 
+    def _sanitize_checkout_line_items(
+        self,
+        line_items: list[dict],
+    ) -> list[dict]:
+        """Remove optional empty values that Stripe rejects."""
+        sanitized_items: list[dict] = []
+
+        for item in line_items:
+            sanitized_item = dict(item)
+            price_data = sanitized_item.get("price_data")
+
+            if isinstance(price_data, dict):
+                sanitized_price_data = dict(price_data)
+                product_data = sanitized_price_data.get("product_data")
+
+                if isinstance(product_data, dict):
+                    sanitized_product_data = dict(product_data)
+                    description = sanitized_product_data.get("description")
+
+                    if not isinstance(description, str) or not description.strip():
+                        sanitized_product_data.pop("description", None)
+                    else:
+                        sanitized_product_data["description"] = description.strip()
+
+                    images = sanitized_product_data.get("images")
+                    if isinstance(images, list):
+                        clean_images = [
+                            image.strip()
+                            for image in images
+                            if isinstance(image, str) and image.strip()
+                        ]
+                        if clean_images:
+                            sanitized_product_data["images"] = clean_images
+                        else:
+                            sanitized_product_data.pop("images", None)
+
+                    product_metadata = sanitized_product_data.get("metadata")
+                    if isinstance(product_metadata, dict):
+                        clean_product_metadata = {
+                            str(key): str(value)
+                            for key, value in product_metadata.items()
+                            if value is not None and str(value).strip()
+                        }
+                        if clean_product_metadata:
+                            sanitized_product_data["metadata"] = clean_product_metadata
+                        else:
+                            sanitized_product_data.pop("metadata", None)
+
+                    sanitized_price_data["product_data"] = sanitized_product_data
+
+                sanitized_item["price_data"] = sanitized_price_data
+
+            sanitized_items.append(sanitized_item)
+
+        return sanitized_items
+
     def create_checkout_session(
         self,
         db: Session,
@@ -345,7 +401,7 @@ class StripeClientService:
 
         payload: dict[str, Any] = {
             "mode": mode,
-            "line_items": line_items,
+            "line_items": self._sanitize_checkout_line_items(line_items),
             "success_url": success_url,
             "cancel_url": cancel_url,
             "metadata": metadata,

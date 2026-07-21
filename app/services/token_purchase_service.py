@@ -389,9 +389,13 @@ class TokenPurchaseService:
                                 "currency": currency.lower(),
                                 "product_data": {
                                     "name": token_package.name,
-                                    "description": (
-                                        token_package.description
-                                        or ""
+                                    **(
+                                        {
+                                            "description": token_package.description.strip(),
+                                        }
+                                        if token_package.description
+                                        and token_package.description.strip()
+                                        else {}
                                     ),
                                     "metadata": metadata,
                                 },
