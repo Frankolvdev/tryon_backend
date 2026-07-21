@@ -797,6 +797,40 @@ class UserService:
 
         return result
 
+    def admin_permanently_delete_user(
+        self,
+        db: Session,
+        user_id: int,
+        current_admin_id: int,
+    ) -> None:
+        if user_id == current_admin_id:
+            raise ForbiddenException(
+                "You cannot permanently delete your own account."
+            )
+
+        user = self.get_user_by_id(
+            db,
+            user_id,
+        )
+
+        if not user:
+            raise NotFoundException(
+                "User not found."
+            )
+
+        auth_service.revoke_all_user_sessions(
+            db,
+            user_id=user.id,
+        )
+
+        try:
+            db.delete(user)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+
     def admin_adjust_user_tokens(
         self,
         db: Session,

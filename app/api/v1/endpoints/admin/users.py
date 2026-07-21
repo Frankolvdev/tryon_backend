@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
+from app.api.v1.guards.superadmin_guard import superadmin_guard
 from app.common.responses import SuccessResponse
 from app.models.user import User
 from app.schemas.admin_user import (
@@ -206,6 +207,53 @@ def delete_user_admin(
     )
 
     return SuccessResponse(message="User deactivated successfully.")
+
+
+@router.delete("/users/{user_id}/permanent", response_model=SuccessResponse)
+def permanently_delete_user_admin(
+    user_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(superadmin_guard),
+):
+    if current_admin.id == user_id:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot permanently delete your own account.",
+        )
+
+    user = user_service.get_user_by_id(db, user_id)
+    if not user:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    deleted_email = user.email
+
+    write_admin_audit(
+        db,
+        request,
+        current_admin,
+        action="admin_user_permanently_deleted",
+        entity_type="user",
+        entity_id=str(user_id),
+        description=f"Superadmin permanently deleted user {deleted_email}.",
+    )
+
+    user_service.admin_permanently_delete_user(
+        db=db,
+        user_id=user_id,
+        current_admin_id=current_admin.id,
+    )
+
+    return SuccessResponse(
+        message="User and associated data permanently deleted.",
+    )
 
 
 @router.post("/users/{user_id}/tokens/adjust", response_model=UserResponse)
