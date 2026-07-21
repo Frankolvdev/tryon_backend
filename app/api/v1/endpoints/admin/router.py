@@ -46,6 +46,7 @@ from app.api.v1.endpoints.admin import (
     reports,
     runpod,
     scheduler,
+    simulated_engine,
     search,
     security_blocks,
     storage,
@@ -208,6 +209,10 @@ admin_router.include_router(
 admin_router.include_router(
     subscriptions.router,
     tags=["Admin - Subscriptions"],
+)
+admin_router.include_router(
+    simulated_engine.router,
+    tags=["Admin - Simulated Engine"],
 )
 admin_router.include_router(
     runpod.router,

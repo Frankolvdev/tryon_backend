@@ -182,5 +182,26 @@ class PricingService:
         rule = pricing_rule_repository.update(db, db_obj=rule, data=update_data)
         return self._to_response(db, rule)
 
+    def reprice_catalog(self, db: Session) -> dict[str, int | float | str]:
+        from decimal import Decimal
+        from app.repositories.subscription_plan_repository import subscription_plan_repository
+        from app.repositories.token_package_repository import token_package_repository
+
+        plans = subscription_plan_repository.list_all_filtered(db, skip=0, limit=10000)
+        packages = token_package_repository.list_all(db)
+        currency = self._currency(db)
+        for plan in plans:
+            amount, _ = self.price_for_tokens(db, plan.tokens_per_period)
+            plan.price_amount = Decimal(str(amount))
+            plan.currency = currency
+            db.add(plan)
+        for package in packages:
+            amount, _ = self.price_for_tokens(db, package.tokens_amount)
+            package.price_cents = int(round(amount * 100))
+            package.currency = currency.lower()
+            db.add(package)
+        db.commit()
+        return {"plans_updated": len(plans), "packages_updated": len(packages), "currency": currency, "token_value_usd": self._token_value(db)}
+
 
 pricing_service = PricingService()

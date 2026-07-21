@@ -206,6 +206,13 @@ class DefaultSettingsService:
                 sort_order=20,
             ),
 
+            # SIMULATED AI ENGINE
+            SystemSettingCreate(category=SettingCategory.SYSTEM, key="ai_execution_mode", label="AI Execution Mode", description="Select simulated, ComfyUI local, RunPod serverless or automatic routing.", value_type=SettingValueType.STRING, value="simulated", default_value="simulated", is_public=False, sort_order=210),
+            SystemSettingCreate(category=SettingCategory.SYSTEM, key="simulated_engine_enabled", label="Simulated Engine Enabled", description="Enable the no-GPU simulated execution engine.", value_type=SettingValueType.BOOLEAN, value=True, default_value=True, is_public=False, sort_order=220),
+            SystemSettingCreate(category=SettingCategory.SYSTEM, key="simulated_delay_seconds", label="Simulated Delay Seconds", description="Artificial delay for simulated jobs.", value_type=SettingValueType.FLOAT, value=0.5, default_value=0.5, is_public=False, sort_order=230),
+            SystemSettingCreate(category=SettingCategory.SYSTEM, key="simulated_failure_rate_percent", label="Simulated Failure Rate", description="Percentage of simulated jobs that fail intentionally.", value_type=SettingValueType.FLOAT, value=0.0, default_value=0.0, is_public=False, sort_order=240),
+            SystemSettingCreate(category=SettingCategory.SYSTEM, key="simulated_copy_person_image_as_result", label="Copy Person Image as Result", description="Create a local result file for successful simulated jobs.", value_type=SettingValueType.BOOLEAN, value=True, default_value=True, is_public=False, sort_order=250),
+
             # RUNPOD
             SystemSettingCreate(
                 category=SettingCategory.RUNPOD,

@@ -13,6 +13,7 @@ from app.schemas.pricing import (
     PricingRuleResponse,
     PricingRuleUpdate,
 )
+from app.schemas.simulated_engine import CommercialRepriceResponse
 from app.services.audit_service import audit_service
 from app.services.pricing_service import pricing_service
 
@@ -89,3 +90,10 @@ def update_pricing_rule(
     current_admin: User = Depends(admin_guard),
 ):
     return pricing_service.update_rule(db=db, rule_id=rule_id, data=data)
+
+
+@router.post("/commercial-reprice", response_model=CommercialRepriceResponse)
+def reprice_commercial_catalog(request: Request, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    result = pricing_service.reprice_catalog(db)
+    audit_service.create_log(db, actor_user_id=current_admin.id, action="admin_commercial_catalog_repriced", entity_type="commercial_catalog", entity_id=None, description=f"Repriced {result['plans_updated']} plans and {result['packages_updated']} token packages.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
+    return CommercialRepriceResponse(**result, message="Commercial catalog repriced successfully.")

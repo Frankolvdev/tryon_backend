@@ -99,11 +99,22 @@ class TryOnService:
         db.refresh(job)
 
         try:
-            if runtime_settings_service.runpod_enabled(db):
+            execution_mode = runtime_settings_service.get_string(
+                db, "ai_execution_mode", default="simulated"
+            ).lower()
+
+            if execution_mode == "simulated":
+                from app.services.simulated_engine_service import simulated_engine_service
+                result = simulated_engine_service.process_job(db, job_id=job.id)
+                if result.status == TryOnJobStatus.FAILED.value:
+                    self._refund_failed_job(db, job=result, reason=f"Try-on job #{result.id} failed: {result.error_message}")
+                return result
+
+            if execution_mode == "runpod_serverless" or (execution_mode == "auto" and runtime_settings_service.runpod_enabled(db)):
                 self.submit_runpod_tryon_job(db=db, job_id=job.id)
                 return tryon_job_repository.get_by_id(db, job.id)
 
-            if self._comfyui_enabled(db):
+            if execution_mode == "comfyui_local" or (execution_mode == "auto" and self._comfyui_enabled(db)):
                 self.process_comfyui_tryon_job(db=db, job_id=job.id)
                 return tryon_job_repository.get_by_id(db, job.id)
 
