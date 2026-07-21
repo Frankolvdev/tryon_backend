@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -370,9 +371,15 @@ class SubscriptionService:
                     "plan_key": plan.key,
                 },
                 client_reference_id=str(user.id),
+                # A Checkout Session can expire, be completed, or be cancelled.
+                # Reusing a permanent idempotency key would make Stripe return
+                # that old Session on every later click instead of creating a
+                # fresh checkout. Keep the key unique per checkout attempt while
+                # still allowing Stripe SDK retries for this request to remain
+                # idempotent.
                 idempotency_key=(
                     f"subscription-checkout-"
-                    f"{user.id}-{plan.id}"
+                    f"{user.id}-{plan.id}-{uuid4().hex}"
                 ),
             )
         )
