@@ -48,15 +48,6 @@ class TryOnService:
 
         runpod_config = runpod_config_service.get_active_config(db)
 
-        token_service.debit_tokens(
-            db=db,
-            user_id=user.id,
-            amount=pricing_rule.tokens_cost,
-            source="tryon",
-            reference_id=None,
-            description="Try-on job token consumption",
-        )
-
         person_file = storage_service.save_upload_file(
             db=db,
             user_id=user.id,
@@ -92,19 +83,49 @@ class TryOnService:
         )
 
         db.add(job)
+        db.flush()
+
+        token_service.debit_tokens(
+            db=db,
+            user_id=user.id,
+            amount=pricing_rule.tokens_cost,
+            source="tryon",
+            reference_id=str(job.id),
+            description=f"Try-on job #{job.id} token consumption",
+            commit=False,
+        )
+
         db.commit()
         db.refresh(job)
 
-        if runtime_settings_service.runpod_enabled(db):
-            self.submit_runpod_tryon_job(db=db, job_id=job.id)
-            return tryon_job_repository.get_by_id(db, job.id)
+        try:
+            if runtime_settings_service.runpod_enabled(db):
+                self.submit_runpod_tryon_job(db=db, job_id=job.id)
+                return tryon_job_repository.get_by_id(db, job.id)
 
-        if self._comfyui_enabled(db):
-            self.process_comfyui_tryon_job(db=db, job_id=job.id)
-            return tryon_job_repository.get_by_id(db, job.id)
+            if self._comfyui_enabled(db):
+                self.process_comfyui_tryon_job(db=db, job_id=job.id)
+                return tryon_job_repository.get_by_id(db, job.id)
 
-        self.process_local_mock_job(db, job.id)
-        return tryon_job_repository.get_by_id(db, job.id)
+            self.process_local_mock_job(db, job.id)
+            return tryon_job_repository.get_by_id(db, job.id)
+        except Exception as error:
+            db.rollback()
+            failed_job = tryon_job_repository.get_by_id(db, job.id)
+            if not failed_job:
+                raise
+
+            failed_job.status = TryOnJobStatus.FAILED.value
+            failed_job.error_message = str(error)
+            db.add(failed_job)
+            db.commit()
+            db.refresh(failed_job)
+            self._refund_failed_job(
+                db,
+                job=failed_job,
+                reason=f"Try-on job #{failed_job.id} failed: {error}",
+            )
+            return failed_job
 
     def _comfyui_enabled(self, db: Session) -> bool:
         try:
@@ -112,6 +133,21 @@ class TryOnService:
             return bool(config.is_enabled)
         except Exception:
             return False
+
+    def _refund_failed_job(
+        self,
+        db: Session,
+        *,
+        job: TryOnJob,
+        reason: str,
+    ) -> None:
+        token_service.refund_tryon_tokens(
+            db,
+            user_id=job.user_id,
+            job_id=job.id,
+            amount=job.tokens_cost,
+            reason=reason,
+        )
 
     def process_comfyui_tryon_job(
         self,
@@ -129,6 +165,8 @@ class TryOnService:
         db.commit()
         db.refresh(job)
 
+        failure_reason: str | None = None
+
         try:
             from app.services.comfyui_tryon_service import comfyui_tryon_service
 
@@ -144,12 +182,20 @@ class TryOnService:
             job.actual_gpu_cost_cents = job.estimated_gpu_cost_cents
 
         except Exception as error:
+            failure_reason = str(error)
             job.status = TryOnJobStatus.FAILED.value
-            job.error_message = str(error)
+            job.error_message = failure_reason
 
         db.add(job)
         db.commit()
         db.refresh(job)
+
+        if failure_reason:
+            self._refund_failed_job(
+                db,
+                job=job,
+                reason=f"Try-on job #{job.id} failed: {failure_reason}",
+            )
 
         return job
 
@@ -236,6 +282,11 @@ class TryOnService:
             db.add(job)
             db.commit()
             db.refresh(job)
+            self._refund_failed_job(
+                db,
+                job=job,
+                reason=f"Try-on job #{job.id} failed: {job.error_message}",
+            )
             return job
 
         result_file = storage_service.create_local_copy_result(

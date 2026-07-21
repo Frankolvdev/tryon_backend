@@ -4,6 +4,7 @@ from app.common.enums import TryOnJobStatus
 from app.common.time import utc_now
 from app.repositories.tryon_job_repository import tryon_job_repository
 from app.services.storage_service import storage_service
+from app.services.token_service import token_service
 
 
 class TryOnResultService:
@@ -42,6 +43,14 @@ class TryOnResultService:
             db.commit()
             db.refresh(job)
 
+            token_service.refund_tryon_tokens(
+                db,
+                user_id=job.user_id,
+                job_id=job.id,
+                amount=job.tokens_cost,
+                reason=f"Try-on job #{job.id} failed: {job.error_message}",
+            )
+
             return job
 
         if normalized_status not in ["completed", "success"]:
@@ -66,6 +75,14 @@ class TryOnResultService:
             db.add(job)
             db.commit()
             db.refresh(job)
+
+            token_service.refund_tryon_tokens(
+                db,
+                user_id=job.user_id,
+                job_id=job.id,
+                amount=job.tokens_cost,
+                reason=f"Try-on job #{job.id} failed: {job.error_message}",
+            )
 
             return job
 

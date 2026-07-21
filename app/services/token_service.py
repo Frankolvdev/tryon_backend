@@ -1,3 +1,4 @@
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.common.enums import TokenTransactionType
@@ -72,11 +73,16 @@ class TokenService:
         source: str,
         reference_id: str | None = None,
         description: str | None = None,
+        commit: bool = True,
     ) -> User:
         if amount <= 0:
             raise ConflictException("Credit amount must be greater than zero.")
 
-        user = user_repository.get_by_id(db, user_id)
+        user = db.execute(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update()
+        ).scalar_one_or_none()
 
         if not user:
             raise NotFoundException("User not found.")
@@ -95,8 +101,11 @@ class TokenService:
 
         db.add(user)
         db.add(transaction)
-        db.commit()
-        db.refresh(user)
+        if commit:
+            db.commit()
+            db.refresh(user)
+        else:
+            db.flush()
 
         return user
 
@@ -109,11 +118,16 @@ class TokenService:
         source: str,
         reference_id: str | None = None,
         description: str | None = None,
+        commit: bool = True,
     ) -> User:
         if amount <= 0:
             raise ConflictException("Debit amount must be greater than zero.")
 
-        user = user_repository.get_by_id(db, user_id)
+        user = db.execute(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update()
+        ).scalar_one_or_none()
 
         if not user:
             raise NotFoundException("User not found.")
@@ -135,10 +149,50 @@ class TokenService:
 
         db.add(user)
         db.add(transaction)
-        db.commit()
-        db.refresh(user)
+        if commit:
+            db.commit()
+            db.refresh(user)
+        else:
+            db.flush()
 
         return user
+
+    def refund_tryon_tokens(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        job_id: int,
+        amount: int,
+        reason: str | None = None,
+    ) -> User:
+        reference_id = str(job_id)
+        user = db.execute(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if not user:
+            raise NotFoundException("User not found.")
+
+        existing = token_transaction_repository.get_by_source_reference(
+            db,
+            user_id=user_id,
+            source="tryon_refund",
+            reference_id=reference_id,
+        )
+        if existing:
+            db.rollback()
+            return user
+
+        return self.credit_tokens(
+            db,
+            user_id=user_id,
+            amount=amount,
+            source="tryon_refund",
+            reference_id=reference_id,
+            description=reason or "Automatic refund for failed try-on job",
+        )
 
     def admin_adjust_tokens(
         self,

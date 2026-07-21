@@ -28,6 +28,24 @@ class TokenTransactionRepository(BaseRepository[TokenTransaction]):
 
         return list(db.execute(statement).scalars().all())
 
+
+    def get_by_source_reference(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        source: str,
+        reference_id: str,
+    ) -> TokenTransaction | None:
+        statement = (
+            select(TokenTransaction)
+            .where(TokenTransaction.user_id == user_id)
+            .where(TokenTransaction.source == source)
+            .where(TokenTransaction.reference_id == reference_id)
+            .order_by(TokenTransaction.id.desc())
+        )
+        return db.execute(statement).scalars().first()
+
     def sum_credits(self, db: Session) -> int:
         statement = (
             select(func.coalesce(func.sum(TokenTransaction.amount), 0))
