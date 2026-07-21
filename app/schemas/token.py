@@ -1,8 +1,35 @@
+import re
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.common.enums import TokenTransactionType
+
+
+def _commercial_description(value: str | None) -> str | None:
+    if not value:
+        return value
+
+    if re.match(
+        r"^Subscription tokens for plan\s+[^;]+(?:;\s*invoice\s+\S+)?$",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        return "Tokens incluidos en tu suscripción"
+
+    if re.match(
+        r"^Token purchase #\d+$",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        return "Tokens acreditados por compra"
+
+    return re.sub(
+        r";\s*invoice\s+in_[A-Za-z0-9_]+",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    ).strip()
 
 
 class TokenPackageCreate(BaseModel):
@@ -52,6 +79,11 @@ class TokenTransactionResponse(BaseModel):
     reference_id: str | None
     description: str | None
     created_at: datetime
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def sanitize_description(cls, value: str | None) -> str | None:
+        return _commercial_description(value)
 
     model_config = ConfigDict(from_attributes=True)
 

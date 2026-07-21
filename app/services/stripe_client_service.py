@@ -7,6 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.common.enums import IntegrationProvider
 from app.common.exceptions import ConflictException
+from app.services.billing_invoice_policy_service import (
+    billing_invoice_policy_service,
+)
 from app.services.integration_service import integration_service
 
 
@@ -16,17 +19,10 @@ class StripeClientService:
             db,
             IntegrationProvider.STRIPE,
         )
-
         if not config.is_enabled:
-            raise ConflictException(
-                "Stripe integration is disabled."
-            )
-
+            raise ConflictException("Stripe integration is disabled.")
         if not config.api_key:
-            raise ConflictException(
-                "Stripe API key is not configured."
-            )
-
+            raise ConflictException("Stripe API key is not configured.")
         stripe.api_key = config.api_key
         return config
 
@@ -35,7 +31,6 @@ class StripeClientService:
             Decimal("0.01"),
             rounding=ROUND_HALF_UP,
         )
-
         return int(normalized * 100)
 
     def _datetime_to_timestamp(
@@ -44,10 +39,8 @@ class StripeClientService:
     ) -> int | None:
         if value is None:
             return None
-
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
-
         return int(value.timestamp())
 
     def create_customer(
@@ -59,15 +52,12 @@ class StripeClientService:
         metadata: dict[str, str],
     ):
         self._get_config(db)
-
         payload: dict[str, Any] = {
             "email": email,
             "metadata": metadata,
         }
-
         if name:
             payload["name"] = name
-
         return stripe.Customer.create(**payload)
 
     def retrieve_customer(
@@ -89,19 +79,13 @@ class StripeClientService:
         metadata: dict[str, str],
     ):
         self._get_config(db)
-
         payload: dict[str, Any] = {
             "email": email,
             "metadata": metadata,
         }
-
         if name is not None:
             payload["name"] = name
-
-        return stripe.Customer.modify(
-            customer_id,
-            **payload,
-        )
+        return stripe.Customer.modify(customer_id, **payload)
 
     def create_product(
         self,
@@ -113,16 +97,13 @@ class StripeClientService:
         active: bool = True,
     ):
         self._get_config(db)
-
         payload: dict[str, Any] = {
             "name": name,
             "active": active,
             "metadata": metadata,
         }
-
         if description:
             payload["description"] = description
-
         return stripe.Product.create(**payload)
 
     def update_product(
@@ -136,7 +117,6 @@ class StripeClientService:
         active: bool,
     ):
         self._get_config(db)
-
         return stripe.Product.modify(
             product_id,
             name=name,
@@ -166,7 +146,6 @@ class StripeClientService:
         metadata: dict[str, str],
     ):
         self._get_config(db)
-
         return stripe.Price.create(
             product=product_id,
             currency=currency.lower(),
@@ -220,34 +199,23 @@ class StripeClientService:
         idempotency_key: str,
     ):
         self._get_config(db)
-
         payload: dict[str, Any] = {
             "name": name,
             "duration": duration,
             "metadata": metadata,
         }
-
         if discount_type == "percentage":
             payload["percent_off"] = float(percentage_off)
         else:
-            payload["amount_off"] = self._money_to_cents(
-                amount_off
-            )
+            payload["amount_off"] = self._money_to_cents(amount_off)
             payload["currency"] = currency.lower()
-
         if duration == "repeating":
             payload["duration_in_months"] = duration_in_months
-
         if max_redemptions is not None:
             payload["max_redemptions"] = max_redemptions
-
-        redeem_by_timestamp = self._datetime_to_timestamp(
-            redeem_by
-        )
-
+        redeem_by_timestamp = self._datetime_to_timestamp(redeem_by)
         if redeem_by_timestamp is not None:
             payload["redeem_by"] = redeem_by_timestamp
-
         return stripe.Coupon.create(
             **payload,
             idempotency_key=idempotency_key,
@@ -269,11 +237,9 @@ class StripeClientService:
         idempotency_key: str,
     ):
         self._get_config(db)
-
         restrictions: dict[str, Any] = {
             "first_time_transaction": first_time_transaction_only,
         }
-
         if minimum_amount is not None:
             restrictions["minimum_amount"] = self._money_to_cents(
                 minimum_amount
@@ -281,7 +247,6 @@ class StripeClientService:
             restrictions["minimum_amount_currency"] = (
                 minimum_amount_currency.lower()
             )
-
         payload: dict[str, Any] = {
             "promotion": {
                 "type": "coupon",
@@ -292,17 +257,11 @@ class StripeClientService:
             "restrictions": restrictions,
             "metadata": metadata,
         }
-
         if max_redemptions is not None:
             payload["max_redemptions"] = max_redemptions
-
-        expires_at_timestamp = self._datetime_to_timestamp(
-            expires_at
-        )
-
+        expires_at_timestamp = self._datetime_to_timestamp(expires_at)
         if expires_at_timestamp is not None:
             payload["expires_at"] = expires_at_timestamp
-
         return stripe.PromotionCode.create(
             **payload,
             idempotency_key=idempotency_key,
@@ -317,7 +276,6 @@ class StripeClientService:
         metadata: dict[str, str],
     ):
         self._get_config(db)
-
         return stripe.PromotionCode.modify(
             promotion_code_id,
             active=active,
@@ -330,23 +288,24 @@ class StripeClientService:
     ) -> list[dict]:
         """Remove optional empty values that Stripe rejects."""
         sanitized_items: list[dict] = []
-
         for item in line_items:
             sanitized_item = dict(item)
             price_data = sanitized_item.get("price_data")
-
             if isinstance(price_data, dict):
                 sanitized_price_data = dict(price_data)
                 product_data = sanitized_price_data.get("product_data")
-
                 if isinstance(product_data, dict):
                     sanitized_product_data = dict(product_data)
                     description = sanitized_product_data.get("description")
-
-                    if not isinstance(description, str) or not description.strip():
+                    if (
+                        not isinstance(description, str)
+                        or not description.strip()
+                    ):
                         sanitized_product_data.pop("description", None)
                     else:
-                        sanitized_product_data["description"] = description.strip()
+                        sanitized_product_data["description"] = (
+                            description.strip()
+                        )
 
                     images = sanitized_product_data.get("images")
                     if isinstance(images, list):
@@ -368,16 +327,17 @@ class StripeClientService:
                             if value is not None and str(value).strip()
                         }
                         if clean_product_metadata:
-                            sanitized_product_data["metadata"] = clean_product_metadata
+                            sanitized_product_data["metadata"] = (
+                                clean_product_metadata
+                            )
                         else:
                             sanitized_product_data.pop("metadata", None)
 
-                    sanitized_price_data["product_data"] = sanitized_product_data
-
+                    sanitized_price_data["product_data"] = (
+                        sanitized_product_data
+                    )
                 sanitized_item["price_data"] = sanitized_price_data
-
             sanitized_items.append(sanitized_item)
-
         return sanitized_items
 
     def create_checkout_session(
@@ -399,24 +359,25 @@ class StripeClientService:
     ):
         self._get_config(db)
 
+        checkout_metadata = {
+            str(key): str(value)
+            for key, value in metadata.items()
+            if value is not None
+        }
         payload: dict[str, Any] = {
             "mode": mode,
             "line_items": self._sanitize_checkout_line_items(line_items),
             "success_url": success_url,
             "cancel_url": cancel_url,
-            "metadata": metadata,
+            "metadata": checkout_metadata,
         }
 
         if promotion_code_id:
             payload["discounts"] = [
-                {
-                    "promotion_code": promotion_code_id,
-                }
+                {"promotion_code": promotion_code_id}
             ]
         else:
-            payload["allow_promotion_codes"] = (
-                allow_promotion_codes
-            )
+            payload["allow_promotion_codes"] = allow_promotion_codes
 
         if customer_id:
             payload["customer"] = customer_id
@@ -431,8 +392,33 @@ class StripeClientService:
                 "metadata": subscription_metadata,
             }
 
-        request_options: dict[str, Any] = {}
+        if mode == "payment":
+            invoice_enabled, invoice_category = (
+                billing_invoice_policy_service.checkout_invoice_enabled(
+                    db,
+                    checkout_metadata,
+                )
+            )
+            if invoice_category:
+                checkout_metadata["invoice_category"] = invoice_category
+                checkout_metadata["invoice_enabled"] = (
+                    "true" if invoice_enabled else "false"
+                )
+                payload["metadata"] = checkout_metadata
 
+            payload["payment_intent_data"] = {
+                "metadata": checkout_metadata,
+            }
+
+            if invoice_enabled:
+                payload["invoice_creation"] = {
+                    "enabled": True,
+                    "invoice_data": {
+                        "metadata": checkout_metadata,
+                    },
+                }
+
+        request_options: dict[str, Any] = {}
         if idempotency_key:
             request_options["idempotency_key"] = idempotency_key
 
@@ -448,7 +434,6 @@ class StripeClientService:
         checkout_session_id: str,
     ):
         self._get_config(db)
-
         return stripe.checkout.Session.retrieve(
             checkout_session_id,
             expand=[
@@ -465,10 +450,7 @@ class StripeClientService:
         checkout_session_id: str,
     ):
         self._get_config(db)
-
-        return stripe.checkout.Session.expire(
-            checkout_session_id,
-        )
+        return stripe.checkout.Session.expire(checkout_session_id)
 
     def retrieve_payment_intent(
         self,
@@ -477,7 +459,6 @@ class StripeClientService:
         payment_intent_id: str,
     ):
         self._get_config(db)
-
         return stripe.PaymentIntent.retrieve(
             payment_intent_id,
             expand=["latest_charge"],
@@ -491,7 +472,6 @@ class StripeClientService:
         return_url: str,
     ):
         self._get_config(db)
-
         return stripe.billing_portal.Session.create(
             customer=customer_id,
             return_url=return_url,
@@ -504,7 +484,6 @@ class StripeClientService:
         subscription_id: str,
     ):
         self._get_config(db)
-
         return stripe.Subscription.retrieve(
             subscription_id,
             expand=["items.data.price"],
@@ -518,7 +497,6 @@ class StripeClientService:
         cancel_at_period_end: bool,
     ):
         self._get_config(db)
-
         return stripe.Subscription.modify(
             subscription_id,
             cancel_at_period_end=cancel_at_period_end,
@@ -533,7 +511,6 @@ class StripeClientService:
         prorate: bool = False,
     ):
         self._get_config(db)
-
         return stripe.Subscription.cancel(
             subscription_id,
             invoice_now=invoice_now,
@@ -550,7 +527,6 @@ class StripeClientService:
         proration_behavior: str,
     ):
         self._get_config(db)
-
         return stripe.Subscription.modify(
             subscription_id,
             items=[
@@ -561,9 +537,7 @@ class StripeClientService:
             ],
             proration_behavior=proration_behavior,
             cancel_at_period_end=False,
-            metadata={
-                "last_plan_change_source": "api",
-            },
+            metadata={"last_plan_change_source": "api"},
             expand=["items.data.price"],
         )
 
@@ -575,17 +549,14 @@ class StripeClientService:
         signature_header: str | None,
     ):
         config = self._get_config(db)
-
         if not config.webhook_secret:
             raise ConflictException(
                 "Stripe webhook secret is not configured."
             )
-
         if not signature_header:
             raise ConflictException(
                 "Stripe signature header is missing."
             )
-
         return stripe.Webhook.construct_event(
             payload=payload,
             sig_header=signature_header,
@@ -603,22 +574,17 @@ class StripeClientService:
         idempotency_key: str | None = None,
     ):
         self._get_config(db)
-
         payload: dict[str, Any] = {
             "payment_intent": payment_intent_id,
         }
-
         if amount_cents is not None:
             payload["amount"] = amount_cents
-
         if reason:
             payload["reason"] = reason
-
         if metadata:
             payload["metadata"] = metadata
 
         request_options: dict[str, Any] = {}
-
         if idempotency_key:
             request_options["idempotency_key"] = idempotency_key
 
