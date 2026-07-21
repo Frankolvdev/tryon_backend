@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.common.account_security_enums import (
     AccountVerificationPurpose,
 )
+from app.common.billing_enums import BillingProvider
 from app.common.enums import (
     UserRole,
     UserStatus,
@@ -21,6 +22,9 @@ from app.core.security import (
     verify_password,
 )
 from app.models.user import User
+from app.repositories.billing_customer_repository import (
+    billing_customer_repository,
+)
 from app.repositories.user_repository import (
     user_repository,
 )
@@ -44,6 +48,9 @@ from app.services.runtime_settings_service import (
 )
 from app.services.storage_service import (
     storage_service,
+)
+from app.services.stripe_client_service import (
+    stripe_client_service,
 )
 from app.services.token_service import (
     token_service,
@@ -816,6 +823,30 @@ class UserService:
         if not user:
             raise NotFoundException(
                 "User not found."
+            )
+
+        billing_customer = (
+            billing_customer_repository
+            .get_by_user_and_provider(
+                db,
+                user_id=user.id,
+                provider=BillingProvider.STRIPE.value,
+            )
+        )
+
+        # Stripe is an external system and cannot participate in the
+        # database transaction. Clean it first and abort the local
+        # deletion if any Stripe operation fails.
+        if billing_customer is not None:
+            (
+                stripe_client_service
+                .delete_customer_with_subscriptions(
+                    db,
+                    customer_id=(
+                        billing_customer
+                        .provider_customer_id
+                    ),
+                )
             )
 
         auth_service.revoke_all_user_sessions(

@@ -252,7 +252,10 @@ def permanently_delete_user_admin(
     )
 
     return SuccessResponse(
-        message="User and associated data permanently deleted.",
+        message=(
+            "User, Stripe customer, active subscriptions, "
+            "and associated local data permanently deleted."
+        ),
     )
 
 
