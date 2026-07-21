@@ -96,6 +96,39 @@ class SubscriptionService:
 
         return getattr(obj, key, default)
 
+    def _stripe_dict(self, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+
+        if isinstance(value, dict):
+            return dict(value)
+
+        to_dict_recursive = getattr(
+            value,
+            "to_dict_recursive",
+            None,
+        )
+
+        if callable(to_dict_recursive):
+            parsed = to_dict_recursive()
+
+            if isinstance(parsed, dict):
+                return parsed
+
+        to_dict = getattr(
+            value,
+            "to_dict",
+            None,
+        )
+
+        if callable(to_dict):
+            parsed = to_dict()
+
+            if isinstance(parsed, dict):
+                return parsed
+
+        return {}
+
     def _stripe_id(self, value: Any) -> str | None:
         if value is None:
             return None
@@ -746,7 +779,7 @@ class SubscriptionService:
             {},
         ) or {}
 
-        metadata = dict(raw_metadata)
+        metadata = self._stripe_dict(raw_metadata)
 
         existing = (
             user_subscription_repository
