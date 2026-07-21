@@ -81,6 +81,21 @@ class TokenPurchaseService:
 
         return getattr(obj, key, default)
 
+    def _stripe_int(
+        self,
+        obj: Any,
+        key: str,
+    ) -> int | None:
+        value = self._stripe_value(obj, key)
+
+        if value in (None, ""):
+            return None
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _money_to_cents(self, amount: Decimal) -> int:
         normalized = amount.quantize(
             Decimal("0.01"),
@@ -487,12 +502,12 @@ class TokenPurchaseService:
             {},
         ) or {}
 
-        purchase_id_value = metadata.get(
-            "token_purchase_id"
+        purchase_id = self._stripe_int(
+            metadata,
+            "token_purchase_id",
         )
 
-        if purchase_id_value:
-            purchase_id = int(purchase_id_value)
+        if purchase_id is not None:
             purchase = token_purchase_repository.get_for_update(
                 db,
                 purchase_id,
@@ -614,14 +629,15 @@ class TokenPurchaseService:
             {},
         ) or {}
 
-        purchase_id_value = metadata.get(
-            "token_purchase_id"
+        purchase_id = self._stripe_int(
+            metadata,
+            "token_purchase_id",
         )
 
-        if purchase_id_value:
+        if purchase_id is not None:
             purchase = token_purchase_repository.get_by_id(
                 db,
-                int(purchase_id_value),
+                purchase_id,
             )
         else:
             purchase = (
