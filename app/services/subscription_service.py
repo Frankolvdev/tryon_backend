@@ -1066,8 +1066,7 @@ class SubscriptionService:
             source="subscription_period_grant",
             reference_id=reference_id,
             description=(
-                f"Subscription tokens for plan "
-                f"{plan.key}; invoice {reference_id}"
+                f"Tokens incluidos en el plan {plan.name}"
             ),
         )
 

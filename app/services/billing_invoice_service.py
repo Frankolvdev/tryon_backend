@@ -389,6 +389,24 @@ class BillingInvoiceService:
                 invoice_metadata,
             )
 
+        existing_invoice = None
+        if provider_invoice_id:
+            existing_invoice = (
+                billing_invoice_repository.get_by_provider_invoice_id(
+                    db,
+                    provider_invoice_id,
+                )
+            )
+            if (
+                not payment
+                and existing_invoice
+                and existing_invoice.billing_payment_id
+            ):
+                payment = billing_payment_repository.get_by_id(
+                    db,
+                    existing_invoice.billing_payment_id,
+                )
+
         invoice_status = (
             self._stripe_value(
                 stripe_invoice,
@@ -437,7 +455,12 @@ class BillingInvoiceService:
             billing_reason=billing_reason,
         )
 
-        if not payment and payment_intent_id:
+        if not payment:
+            payment_metadata = {
+                **invoice_metadata,
+                "provider_invoice_id": provider_invoice_id,
+                "billing_reason": billing_reason,
+            }
             payment = BillingPayment(
                 user_id=user_id,
                 billing_customer_id=(
@@ -464,7 +487,7 @@ class BillingInvoiceService:
                 provider_payment_intent_id=payment_intent_id,
                 description=description,
                 metadata_json=self._serialize(
-                    invoice_metadata
+                    payment_metadata
                 ),
                 paid_at=(
                     utc_now()
