@@ -76,6 +76,7 @@ class BillingService:
             "customer.subscription.updated": self._subscription_changed,
             "customer.subscription.deleted": self._subscription_changed,
             "invoice.paid": self._invoice_paid,
+            "invoice.payment_succeeded": self._invoice_paid,
             "invoice.payment_failed": self._invoice_payment_failed,
             "invoice.voided": self._invoice_changed,
             "invoice.marked_uncollectible": self._invoice_changed,
@@ -237,6 +238,21 @@ class BillingService:
                     db,
                     stripe_invoice=event_object,
                 )
+
+        billing_reason = self._value(
+            event_object,
+            "billing_reason",
+        )
+        is_subscription_invoice = bool(
+            billing_reason
+            and str(billing_reason).startswith("subscription")
+        )
+
+        if is_subscription_invoice and not invoice.user_subscription_id:
+            raise ValueError(
+                "Paid subscription invoice could not be linked to "
+                "an internal subscription."
+            )
 
         if invoice.user_subscription_id:
             subscription = (

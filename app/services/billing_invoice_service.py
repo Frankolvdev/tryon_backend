@@ -78,9 +78,34 @@ class BillingInvoiceService:
             )
             or {}
         )
-        return self._stripe_id(
+        parent_subscription = self._stripe_id(
             self._stripe_value(details, "subscription")
         )
+        if parent_subscription:
+            return parent_subscription
+
+        lines = self._stripe_value(stripe_invoice, "lines", {}) or {}
+        line_data = self._stripe_value(lines, "data", []) or []
+        for line in line_data:
+            direct_line_subscription = self._stripe_id(
+                self._stripe_value(line, "subscription")
+            )
+            if direct_line_subscription:
+                return direct_line_subscription
+
+            line_parent = self._stripe_value(line, "parent", {}) or {}
+            item_details = self._stripe_value(
+                line_parent,
+                "subscription_item_details",
+                {},
+            ) or {}
+            line_subscription = self._stripe_id(
+                self._stripe_value(item_details, "subscription")
+            )
+            if line_subscription:
+                return line_subscription
+
+        return None
 
     def payment_intent_id(
         self,
