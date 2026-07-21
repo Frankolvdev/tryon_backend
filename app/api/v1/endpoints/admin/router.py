@@ -6,6 +6,7 @@ from app.api.v1.endpoints.admin import (
     activity,
     analytics,
     anti_abuse_operations,
+    ai_providers,
     api_keys,
     audit,
     audit_entries,
@@ -65,6 +66,11 @@ from app.api.v1.endpoints.admin import (
 )
 
 admin_router = APIRouter()
+
+admin_router.include_router(
+    ai_providers.router,
+    tags=["Admin - AI Providers"],
+)
 
 admin_router.include_router(
     account_security.router,
