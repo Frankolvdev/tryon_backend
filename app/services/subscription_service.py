@@ -959,7 +959,7 @@ class SubscriptionService:
             db,
             subscription_id=provider_subscription_id,
         )
-        return self.sync_from_stripe_subscription(
+        return self.sync_from_stripe_object(
             db,
             stripe_subscription=stripe_subscription,
         )
