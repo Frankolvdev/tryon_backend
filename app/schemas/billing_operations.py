@@ -50,3 +50,16 @@ class BillingJobsCatalogItem(BaseModel):
 
 class BillingJobsCatalogResponse(BaseModel):
     jobs: list[BillingJobsCatalogItem]
+
+class BillingOperationsOverview(BaseModel):
+    active_subscriptions: int
+    subscriptions_needing_attention: int
+    pending_token_purchases: int
+    failed_token_purchases: int
+    failed_billing_events: int
+    open_invoices: int
+    failed_payments: int
+    succeeded_revenue_amount: float
+    refunded_amount: float
+    currency: str
+    generated_at: datetime

@@ -8,17 +8,32 @@ from app.schemas.billing_operations import (
     BillingJobResult,
     BillingJobRunRequest,
     BillingJobsCatalogResponse,
+    BillingOperationsOverview,
     BillingValidationResponse,
 )
 from app.services.audit_service import audit_service
 from app.services.billing_job_service import (
     billing_job_service,
 )
+from app.services.billing_operations_overview_service import (
+    billing_operations_overview_service,
+)
 from app.services.billing_validation_service import (
     billing_validation_service,
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/billing/overview",
+    response_model=BillingOperationsOverview,
+)
+def get_billing_operations_overview(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return billing_operations_overview_service.get(db)
 
 
 @router.get(
