@@ -20,16 +20,13 @@ from app.middleware.i18n_middleware import I18nMiddleware
 from app.middleware.rate_limit_middleware import (
     RateLimitMiddleware,
 )
+from app.middleware.security_headers_middleware import SecurityHeadersMiddleware
 
 
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    debug=getattr(
-        settings,
-        "DEBUG",
-        False,
-    ),
+    debug=settings.APP_DEBUG,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
@@ -61,6 +58,8 @@ cors_origins = getattr(
     [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:3003",
+        "http://127.0.0.1:3003",
     ],
 )
 
@@ -105,6 +104,11 @@ app.add_middleware(
 # 3. AbuseDetectionMiddleware
 # 4. CORSMiddleware
 # ---------------------------------------------------------------------------
+
+app.add_middleware(
+    SecurityHeadersMiddleware,
+    production=settings.APP_ENV.lower() == "production",
+)
 
 app.add_middleware(
     AbuseDetectionMiddleware,
