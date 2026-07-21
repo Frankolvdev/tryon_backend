@@ -74,6 +74,8 @@ class BillingCouponService:
             valid_from=coupon.valid_from,
             valid_until=coupon.valid_until,
             is_active=coupon.is_active,
+            applies_to=self._parse(coupon.metadata_json).get("applies_to", "all"),
+            eligible_item_ids=self._parse(coupon.metadata_json).get("eligible_item_ids", []),
             metadata=self._parse(coupon.metadata_json),
             created_at=coupon.created_at,
             updated_at=coupon.updated_at,
@@ -168,7 +170,11 @@ class BillingCouponService:
                 "valid_from": data.valid_from,
                 "valid_until": data.valid_until,
                 "is_active": data.is_active,
-                "metadata_json": self._serialize(data.metadata),
+                "metadata_json": self._serialize({
+                    **data.metadata,
+                    "applies_to": data.applies_to,
+                    "eligible_item_ids": data.eligible_item_ids,
+                }),
             },
         )
 
@@ -202,10 +208,15 @@ class BillingCouponService:
             if field in values:
                 final_data[field] = values[field]
 
-        if "metadata" in values:
-            final_data["metadata_json"] = self._serialize(
-                values["metadata"]
-            )
+        if any(key in values for key in ["metadata", "applies_to", "eligible_item_ids"]):
+            merged_metadata = self._parse(coupon.metadata_json)
+            if "metadata" in values and values["metadata"] is not None:
+                merged_metadata.update(values["metadata"])
+            if "applies_to" in values:
+                merged_metadata["applies_to"] = values["applies_to"]
+            if "eligible_item_ids" in values:
+                merged_metadata["eligible_item_ids"] = values["eligible_item_ids"] or []
+            final_data["metadata_json"] = self._serialize(merged_metadata)
 
         updated = billing_coupon_repository.update(
             db,
@@ -373,6 +384,8 @@ class BillingCouponService:
         *,
         code: str,
         purchase_amount: Decimal | None = None,
+        purchase_type: str | None = None,
+        item_id: int | None = None,
     ) -> BillingCouponValidationResponse:
         coupon = billing_coupon_repository.get_by_code(
             db,
@@ -433,17 +446,35 @@ class BillingCouponService:
                 ),
             )
 
+        metadata = self._parse(coupon.metadata_json)
+        applies_to = metadata.get("applies_to", "all")
+        eligible_item_ids = metadata.get("eligible_item_ids", [])
+        requested_scope = {"plan": "plans", "token_package": "token_packages"}.get(purchase_type)
+
+        if requested_scope and applies_to not in ("all", requested_scope):
+            return BillingCouponValidationResponse(valid=False, coupon=self._response(coupon), message="Coupon does not apply to this purchase type.")
+
+        if item_id is not None and eligible_item_ids and item_id not in eligible_item_ids:
+            return BillingCouponValidationResponse(valid=False, coupon=self._response(coupon), message="Coupon does not apply to the selected item.")
+
         if not coupon.stripe_promotion_code_id:
             return BillingCouponValidationResponse(
-                valid=False,
-                coupon=self._response(coupon),
+                valid=False, coupon=self._response(coupon),
                 message="Coupon is not synchronized with Stripe.",
             )
 
+        discount_amount = None
+        final_amount = purchase_amount
+        if purchase_amount is not None:
+            if coupon.discount_type == CouponDiscountType.PERCENTAGE.value:
+                discount_amount = (purchase_amount * (coupon.percentage_off or Decimal("0")) / Decimal("100"))
+            else:
+                discount_amount = min(purchase_amount, coupon.amount_off or Decimal("0"))
+            final_amount = max(Decimal("0"), purchase_amount - discount_amount)
+
         return BillingCouponValidationResponse(
-            valid=True,
-            coupon=self._response(coupon),
-            message="Coupon is valid.",
+            valid=True, coupon=self._response(coupon), message="Coupon is valid.",
+            discount_amount=discount_amount, final_amount=final_amount,
         )
 
 

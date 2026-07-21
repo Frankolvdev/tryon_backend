@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -49,6 +49,8 @@ class BillingCouponCreate(BaseModel):
     valid_until: datetime | None = None
 
     is_active: bool = True
+    applies_to: Literal["all", "plans", "token_packages"] = "all"
+    eligible_item_ids: list[int] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -119,6 +121,8 @@ class BillingCouponUpdate(BaseModel):
     valid_from: datetime | None = None
     valid_until: datetime | None = None
     is_active: bool | None = None
+    applies_to: Literal["all", "plans", "token_packages"] | None = None
+    eligible_item_ids: list[int] | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -150,6 +154,8 @@ class BillingCouponResponse(BaseModel):
     valid_until: datetime | None
     is_active: bool
 
+    applies_to: Literal["all", "plans", "token_packages"]
+    eligible_item_ids: list[int]
     metadata: dict[str, Any]
 
     created_at: datetime
@@ -175,6 +181,8 @@ class BillingCouponSyncResponse(BaseModel):
 class BillingCouponValidationRequest(BaseModel):
     code: str = Field(min_length=2, max_length=100)
     purchase_amount: Decimal | None = Field(default=None, ge=0)
+    purchase_type: Literal["plan", "token_package"] | None = None
+    item_id: int | None = Field(default=None, ge=1)
 
 
 class BillingCouponValidationResponse(BaseModel):

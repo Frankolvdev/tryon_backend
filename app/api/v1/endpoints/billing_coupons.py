@@ -25,4 +25,6 @@ def validate_billing_coupon(
         db,
         code=data.code,
         purchase_amount=data.purchase_amount,
+        purchase_type=data.purchase_type,
+        item_id=data.item_id,
     )
