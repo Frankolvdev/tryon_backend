@@ -5,22 +5,43 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.common.enums import PricingOperationType, QualityMode, TryOnItemType
 
 
+class CommercialSettingsResponse(BaseModel):
+    token_value_usd: float = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+
+
+class CommercialSettingsUpdate(BaseModel):
+    token_value_usd: float = Field(gt=0, le=1000)
+    currency: str = Field(min_length=3, max_length=3)
+
+
+class CommercialPricePreviewRequest(BaseModel):
+    average_execution_cost_usd: float = Field(ge=0)
+    desired_profit_percent: float = Field(ge=0, le=10000)
+
+
+class CommercialPricePreviewResponse(BaseModel):
+    average_execution_cost_usd: float
+    desired_profit_percent: float
+    token_value_usd: float
+    currency: str
+    final_price_usd: float
+    required_tokens: int
+    effective_margin_percent: float
+
+
 class PricingRuleCreate(BaseModel):
     operation_type: PricingOperationType = PricingOperationType.TRYON
     item_type: TryOnItemType
     quality_mode: QualityMode = QualityMode.STANDARD
-    tokens_cost: int = Field(gt=0)
-    estimated_gpu_seconds: int = Field(default=30, ge=0)
-    estimated_gpu_cost_cents: int = Field(default=1, ge=0)
-    margin_percent: int = Field(default=70, ge=0)
+    average_execution_cost_usd: float = Field(ge=0)
+    desired_profit_percent: float = Field(default=70, ge=0, le=10000)
     is_active: bool = True
 
 
 class PricingRuleUpdate(BaseModel):
-    tokens_cost: int | None = Field(default=None, gt=0)
-    estimated_gpu_seconds: int | None = Field(default=None, ge=0)
-    estimated_gpu_cost_cents: int | None = Field(default=None, ge=0)
-    margin_percent: int | None = Field(default=None, ge=0)
+    average_execution_cost_usd: float | None = Field(default=None, ge=0)
+    desired_profit_percent: float | None = Field(default=None, ge=0, le=10000)
     is_active: bool | None = None
 
 
@@ -29,10 +50,13 @@ class PricingRuleResponse(BaseModel):
     operation_type: PricingOperationType
     item_type: TryOnItemType
     quality_mode: QualityMode
-    tokens_cost: int
-    estimated_gpu_seconds: int
-    estimated_gpu_cost_cents: int
-    margin_percent: int
+    average_execution_cost_usd: float
+    desired_profit_percent: float
+    final_price_usd: float
+    required_tokens: int
+    effective_margin_percent: float
+    token_value_usd: float
+    currency: str
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -45,5 +69,5 @@ class PricingEstimateResponse(BaseModel):
     item_type: TryOnItemType
     quality_mode: QualityMode
     tokens_cost: int
-    estimated_gpu_seconds: int
-    estimated_gpu_cost_cents: int
+    final_price_usd: float
+    currency: str

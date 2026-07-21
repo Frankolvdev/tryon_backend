@@ -16,16 +16,13 @@ def get_tryon_price_estimate(
     db: Session = Depends(get_db),
 ):
     rule = pricing_service.get_tryon_price(
-        db,
-        item_type=item_type,
-        quality_mode=quality_mode,
+        db, item_type=item_type, quality_mode=quality_mode
     )
-
     return PricingEstimateResponse(
         operation_type=rule.operation_type,
         item_type=rule.item_type,
         quality_mode=rule.quality_mode,
-        tokens_cost=rule.tokens_cost,
-        estimated_gpu_seconds=rule.estimated_gpu_seconds,
-        estimated_gpu_cost_cents=rule.estimated_gpu_cost_cents,
+        tokens_cost=rule.required_tokens,
+        final_price_usd=rule.final_price_usd,
+        currency=rule.currency,
     )

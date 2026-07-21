@@ -182,6 +182,30 @@ class DefaultSettingsService:
                 sort_order=30,
             ),
 
+            # COMMERCIAL ECONOMY
+            SystemSettingCreate(
+                category=SettingCategory.PRICING,
+                key="commercial_token_value_usd",
+                label="Value of 1 Token (USD)",
+                description="Single global USD value used to calculate all commercial token prices.",
+                value_type=SettingValueType.FLOAT,
+                value=0.10,
+                default_value=0.10,
+                is_public=True,
+                sort_order=10,
+            ),
+            SystemSettingCreate(
+                category=SettingCategory.PRICING,
+                key="commercial_currency",
+                label="Commercial Currency",
+                description="ISO 4217 currency used by the commercial module.",
+                value_type=SettingValueType.STRING,
+                value="USD",
+                default_value="USD",
+                is_public=True,
+                sort_order=20,
+            ),
+
             # RUNPOD
             SystemSettingCreate(
                 category=SettingCategory.RUNPOD,
