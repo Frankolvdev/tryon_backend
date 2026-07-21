@@ -32,6 +32,11 @@ class PricingService:
         setting = system_setting_repository.get_by_key(db, CURRENCY_KEY)
         return str(setting.value_string if setting else DEFAULT_CURRENCY).upper()
 
+    def price_for_tokens(self, db: Session, tokens: int) -> tuple[float, str]:
+        normalized_tokens = max(int(tokens), 0)
+        amount = normalized_tokens * self._token_value(db)
+        return round(amount, 2), self._currency(db)
+
     def get_commercial_settings(self, db: Session) -> CommercialSettingsResponse:
         return CommercialSettingsResponse(
             token_value_usd=self._token_value(db),

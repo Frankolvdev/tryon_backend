@@ -9,45 +9,91 @@ from app.models.user import User
 from app.repositories.token_package_repository import token_package_repository
 from app.repositories.token_transaction_repository import token_transaction_repository
 from app.repositories.user_repository import user_repository
-from app.schemas.token import TokenPackageCreate, TokenPackageUpdate
+from app.schemas.token import TokenPackageCreate, TokenPackageResponse, TokenPackageUpdate
+from app.services.pricing_service import pricing_service
 
 
 class TokenService:
+    def _package_response(self, db: Session, package: TokenPackage) -> TokenPackageResponse:
+        calculated_price, currency = pricing_service.price_for_tokens(
+            db, package.tokens_amount
+        )
+        calculated_cents = int(round(calculated_price * 100))
+        return TokenPackageResponse(
+            id=package.id,
+            name=package.name,
+            description=package.description,
+            tokens_amount=package.tokens_amount,
+            price_cents=package.price_cents,
+            calculated_price_cents=calculated_cents,
+            commercial_token_value=pricing_service._token_value(db),
+            price_is_automatic=True,
+            currency=currency.lower(),
+            stripe_price_id=package.stripe_price_id,
+            is_active=package.is_active,
+            created_at=package.created_at,
+        )
+
     def get_balance(self, user: User) -> int:
         return user.token_balance
 
-    def list_public_packages(self, db: Session) -> list[TokenPackage]:
-        return token_package_repository.list_active(db)
+    def list_public_packages(self, db: Session) -> list[TokenPackageResponse]:
+        return [
+            self._package_response(db, item)
+            for item in token_package_repository.list_active(db)
+        ]
 
-    def list_admin_packages(self, db: Session) -> list[TokenPackage]:
-        return token_package_repository.list_all(db)
+    def list_admin_packages(self, db: Session) -> list[TokenPackageResponse]:
+        return [
+            self._package_response(db, item)
+            for item in token_package_repository.list_all(db)
+        ]
 
     def create_package(
         self,
         db: Session,
         data: TokenPackageCreate,
-    ) -> TokenPackage:
-        return token_package_repository.create(
-            db,
-            data=data.model_dump(),
+    ) -> TokenPackageResponse:
+        calculated_price, currency = pricing_service.price_for_tokens(
+            db, data.tokens_amount
         )
+        package = token_package_repository.create(
+            db,
+            data={
+                **data.model_dump(exclude={"price_cents", "currency"}),
+                "price_cents": int(round(calculated_price * 100)),
+                "currency": currency.lower(),
+            },
+        )
+        return self._package_response(db, package)
 
     def update_package(
         self,
         db: Session,
         package_id: int,
         data: TokenPackageUpdate,
-    ) -> TokenPackage:
+    ) -> TokenPackageResponse:
         package_obj = token_package_repository.get_by_id(db, package_id)
 
         if not package_obj:
             raise NotFoundException("Token package not found.")
 
-        return token_package_repository.update(
+        update_data = data.model_dump(
+            exclude_unset=True,
+            exclude={"price_cents", "currency"},
+        )
+        final_tokens = int(update_data.get("tokens_amount", package_obj.tokens_amount))
+        calculated_price, currency = pricing_service.price_for_tokens(
+            db, final_tokens
+        )
+        update_data["price_cents"] = int(round(calculated_price * 100))
+        update_data["currency"] = currency.lower()
+        package = token_package_repository.update(
             db,
             db_obj=package_obj,
-            data=data.model_dump(exclude_unset=True),
+            data=update_data,
         )
+        return self._package_response(db, package)
 
     def get_user_transactions(
         self,

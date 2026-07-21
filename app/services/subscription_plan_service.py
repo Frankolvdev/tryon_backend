@@ -19,6 +19,7 @@ from app.schemas.subscription_plan import (
     SubscriptionPlanUpdate,
 )
 from app.services.integration_service import integration_service
+from app.services.pricing_service import pricing_service
 from app.services.stripe_client_service import stripe_client_service
 
 
@@ -56,8 +57,12 @@ class SubscriptionPlanService:
 
     def _to_response(
         self,
+        db: Session,
         plan: SubscriptionPlan,
     ) -> SubscriptionPlanResponse:
+        calculated_price, _ = pricing_service.price_for_tokens(
+            db, plan.tokens_per_period
+        )
         return SubscriptionPlanResponse(
             id=plan.id,
             key=plan.key,
@@ -66,6 +71,9 @@ class SubscriptionPlanService:
             billing_interval=plan.billing_interval,
             currency=plan.currency,
             price_amount=plan.price_amount,
+            calculated_price_amount=Decimal(str(calculated_price)),
+            commercial_token_value=Decimal(str(pricing_service._token_value(db))),
+            price_is_automatic=True,
             tokens_per_period=plan.tokens_per_period,
             max_generations_per_period=plan.max_generations_per_period,
             priority=plan.priority,
@@ -117,7 +125,7 @@ class SubscriptionPlanService:
         db: Session,
         plan_id: int,
     ) -> SubscriptionPlanResponse:
-        return self._to_response(self.get_plan(db, plan_id))
+        return self._to_response(db, self.get_plan(db, plan_id))
 
     def list_admin_plans(
         self,
@@ -155,7 +163,7 @@ class SubscriptionPlanService:
         )
 
         return SubscriptionPlanListResponse(
-            items=[self._to_response(item) for item in items],
+            items=[self._to_response(db, item) for item in items],
             total=total,
             skip=skip,
             limit=limit,
@@ -176,7 +184,7 @@ class SubscriptionPlanService:
             ),
         )
 
-        return [self._to_response(item) for item in items]
+        return [self._to_response(db, item) for item in items]
 
     def create_plan(
         self,
@@ -194,6 +202,9 @@ class SubscriptionPlanService:
                 "Subscription plan key already exists."
             )
 
+        calculated_price, calculated_currency = pricing_service.price_for_tokens(
+            db, data.tokens_per_period
+        )
         plan = subscription_plan_repository.create(
             db,
             data={
@@ -201,8 +212,8 @@ class SubscriptionPlanService:
                 "name": data.name,
                 "description": data.description,
                 "billing_interval": data.billing_interval.value,
-                "currency": data.currency.upper(),
-                "price_amount": data.price_amount,
+                "currency": calculated_currency,
+                "price_amount": Decimal(str(calculated_price)),
                 "tokens_per_period": data.tokens_per_period,
                 "max_generations_per_period": (
                     data.max_generations_per_period
@@ -216,7 +227,7 @@ class SubscriptionPlanService:
             },
         )
 
-        return self._to_response(plan)
+        return self._to_response(db, plan)
 
     def update_plan(
         self,
@@ -233,7 +244,6 @@ class SubscriptionPlanService:
         for field in [
             "name",
             "description",
-            "price_amount",
             "tokens_per_period",
             "max_generations_per_period",
             "priority",
@@ -255,6 +265,13 @@ class SubscriptionPlanService:
         if "currency" in update_data and update_data["currency"]:
             final_data["currency"] = update_data["currency"].upper()
 
+        final_tokens = int(final_data.get("tokens_per_period", plan.tokens_per_period))
+        calculated_price, calculated_currency = pricing_service.price_for_tokens(
+            db, final_tokens
+        )
+        final_data["price_amount"] = Decimal(str(calculated_price))
+        final_data["currency"] = calculated_currency
+
         if "features" in update_data:
             final_data["features_json"] = self._serialize_json(
                 update_data["features"]
@@ -271,7 +288,7 @@ class SubscriptionPlanService:
             data=final_data,
         )
 
-        return self._to_response(updated)
+        return self._to_response(db, updated)
 
     def set_active(
         self,
@@ -316,7 +333,7 @@ class SubscriptionPlanService:
             except Exception:
                 pass
 
-        return self._to_response(plan)
+        return self._to_response(db, plan)
 
     def delete_plan(
         self,
@@ -525,7 +542,7 @@ class SubscriptionPlanService:
         )
 
         return SubscriptionPlanSyncResponse(
-            plan=self._to_response(plan),
+            plan=self._to_response(db, plan),
             stripe_product_id=plan.stripe_product_id,
             stripe_price_id=plan.stripe_price_id,
             price_replaced=price_replaced,

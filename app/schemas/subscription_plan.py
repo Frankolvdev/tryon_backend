@@ -24,7 +24,7 @@ class SubscriptionPlanCreate(BaseModel):
         max_length=3,
     )
 
-    price_amount: Decimal = Field(ge=0)
+    price_amount: Decimal | None = Field(default=None, ge=0)
 
     tokens_per_period: int = Field(default=0, ge=0)
     max_generations_per_period: int | None = Field(default=None, ge=1)
@@ -110,6 +110,9 @@ class SubscriptionPlanResponse(BaseModel):
     billing_interval: BillingInterval
     currency: str
     price_amount: Decimal
+    calculated_price_amount: Decimal
+    commercial_token_value: Decimal
+    price_is_automatic: bool = True
 
     tokens_per_period: int
     max_generations_per_period: int | None

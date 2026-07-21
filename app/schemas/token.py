@@ -9,7 +9,7 @@ class TokenPackageCreate(BaseModel):
     name: str
     description: str | None = None
     tokens_amount: int = Field(gt=0)
-    price_cents: int = Field(gt=0)
+    price_cents: int | None = Field(default=None, gt=0)
     currency: str = "usd"
     stripe_price_id: str | None = None
     is_active: bool = True
@@ -31,6 +31,9 @@ class TokenPackageResponse(BaseModel):
     description: str | None
     tokens_amount: int
     price_cents: int
+    calculated_price_cents: int
+    commercial_token_value: float
+    price_is_automatic: bool = True
     currency: str
     stripe_price_id: str | None
     is_active: bool
