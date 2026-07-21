@@ -15,6 +15,7 @@ from app.schemas.simulated_engine import (
     SimulatedEngineSettingsUpdate,
     SimulatedEngineTestResponse,
 )
+from app.services.default_settings_service import default_settings_service
 from app.services.storage_service import storage_service
 
 
@@ -31,7 +32,31 @@ class SimulatedEngineService:
     def _setting(self, db: Session, name: str):
         return system_setting_repository.get_by_key(db, KEYS[name])
 
+    def _ensure_settings(self, db: Session) -> None:
+        missing = [
+            key
+            for key in KEYS.values()
+            if system_setting_repository.get_by_key(db, key) is None
+        ]
+        if not missing:
+            return
+
+        default_settings_service.seed_defaults(db)
+        db.flush()
+
+        unresolved = [
+            key
+            for key in missing
+            if system_setting_repository.get_by_key(db, key) is None
+        ]
+        if unresolved:
+            raise NotFoundException(
+                "Unable to initialize simulated engine settings: "
+                + ", ".join(unresolved)
+            )
+
     def get_settings(self, db: Session) -> SimulatedEngineSettingsResponse:
+        self._ensure_settings(db)
         enabled = self._setting(db, "enabled")
         mode = self._setting(db, "execution_mode")
         delay = self._setting(db, "delay_seconds")
@@ -46,6 +71,7 @@ class SimulatedEngineService:
         )
 
     def update_settings(self, db: Session, data: SimulatedEngineSettingsUpdate) -> SimulatedEngineSettingsResponse:
+        self._ensure_settings(db)
         values = {
             "enabled": {"value_boolean": data.enabled},
             "execution_mode": {"value_string": data.execution_mode},
@@ -53,15 +79,13 @@ class SimulatedEngineService:
             "failure_rate_percent": {"value_float": data.failure_rate_percent},
             "copy_person_image_as_result": {"value_boolean": data.copy_person_image_as_result},
         }
-        missing = []
         for name, payload in values.items():
             setting = self._setting(db, name)
-            if not setting:
-                missing.append(KEYS[name])
-                continue
+            if setting is None:
+                raise NotFoundException(
+                    f"Simulated engine setting is unavailable: {KEYS[name]}"
+                )
             system_setting_repository.update(db, db_obj=setting, data=payload)
-        if missing:
-            raise NotFoundException("Missing simulated engine settings. Seed default settings first: " + ", ".join(missing))
         return self.get_settings(db)
 
     def test(self, db: Session) -> SimulatedEngineTestResponse:

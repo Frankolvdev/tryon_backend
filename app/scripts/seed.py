@@ -21,6 +21,7 @@ from app.db.database import SessionLocal
 from app.models.integration_config import IntegrationConfig
 from app.models.user import User
 from app.models.user_account_security import UserAccountSecurity
+from app.services.default_settings_service import default_settings_service
 from app.services.integration_service import integration_service
 
 
@@ -485,6 +486,12 @@ def run_seed() -> None:
         )
 
         superadmin = seed_superadmin(db)
+        settings_result = default_settings_service.seed_defaults(db)
+        print(
+            "[SEED] System settings: "
+            f"{settings_result['created']} created, "
+            f"{settings_result['skipped']} existing"
+        )
         comfyui = (
             synchronize_comfyui_integration(
                 db,
