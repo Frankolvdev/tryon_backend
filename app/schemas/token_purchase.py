@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 from app.common.billing_enums import (
     BillingPaymentStatus,
@@ -11,10 +11,23 @@ from app.common.billing_enums import (
 
 
 class TokenPurchaseCheckoutRequest(BaseModel):
-    token_package_id: int
+    token_package_id: int | None = Field(default=None, gt=0)
+    tokens_amount: int | None = Field(default=None, ge=1)
     success_url: HttpUrl
     cancel_url: HttpUrl
     allow_promotion_codes: bool = True
+
+    @model_validator(mode="after")
+    def validate_purchase_source(self):
+        has_package = self.token_package_id is not None
+        has_custom_amount = self.tokens_amount is not None
+
+        if has_package == has_custom_amount:
+            raise ValueError(
+                "Provide exactly one of token_package_id or tokens_amount."
+            )
+
+        return self
 
 
 class TokenPurchaseCheckoutResponse(BaseModel):
@@ -28,7 +41,7 @@ class TokenPurchaseCheckoutResponse(BaseModel):
 class TokenPurchaseResponse(BaseModel):
     id: int
     user_id: int
-    token_package_id: int
+    token_package_id: int | None
     billing_payment_id: int | None
 
     status: TokenPurchaseStatus

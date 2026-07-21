@@ -46,6 +46,7 @@ from app.services.billing_customer_service import (
     billing_customer_service,
 )
 from app.services.integration_service import integration_service
+from app.services.pricing_service import pricing_service
 from app.services.stripe_client_service import (
     stripe_client_service,
 )
@@ -303,38 +304,78 @@ class TokenPurchaseService:
         user: User,
         data: TokenPurchaseCheckoutRequest,
     ) -> TokenPurchaseCheckoutResponse:
-        token_package = token_package_repository.get_by_id(
-            db,
-            data.token_package_id,
-        )
+        token_package = None
 
-        if not token_package:
-            raise NotFoundException(
-                "Token package not found."
-            )
-
-        if not token_package.is_active:
-            raise ConflictException(
-                "Token package is not active."
-            )
-
-        customer = (
-            billing_customer_service
-            .get_or_create_stripe_customer(
+        if data.token_package_id is not None:
+            token_package = token_package_repository.get_by_id(
                 db,
-                user=user,
+                data.token_package_id,
             )
-        )
 
-        currency = token_package.currency.upper()
+            if not token_package:
+                raise NotFoundException("Token package not found.")
 
-        amount = (
-            Decimal(token_package.price_cents)
-            / Decimal("100")
-        ).quantize(Decimal("0.01"))
+            if not token_package.is_active:
+                raise ConflictException("Token package is not active.")
 
-        bonus_tokens = int(
-            getattr(token_package, "bonus_tokens", 0) or 0
+            tokens_amount = int(token_package.tokens_amount)
+            bonus_tokens = int(
+                getattr(token_package, "bonus_tokens", 0) or 0
+            )
+            currency = token_package.currency.upper()
+            amount = (
+                Decimal(token_package.price_cents) / Decimal("100")
+            ).quantize(Decimal("0.01"))
+            product_name = token_package.name
+            product_description = (
+                token_package.description.strip()
+                if token_package.description
+                and token_package.description.strip()
+                else None
+            )
+            purchase_metadata = {
+                "purchase_kind": "package",
+                "token_package_name": token_package.name,
+            }
+        else:
+            tokens_amount = int(data.tokens_amount or 0)
+
+            if tokens_amount < 1:
+                raise ConflictException(
+                    "At least one token must be purchased."
+                )
+
+            calculated_amount, calculated_currency = (
+                pricing_service.price_for_tokens(db, tokens_amount)
+            )
+            amount = Decimal(str(calculated_amount)).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+
+            if amount <= Decimal("0.00"):
+                raise ConflictException(
+                    "The calculated purchase amount must be greater than zero."
+                )
+
+            currency = calculated_currency.upper()
+            bonus_tokens = 0
+            product_name = f"{tokens_amount} custom tokens"
+            product_description = (
+                "Custom token purchase calculated from the current "
+                "commercial token value."
+            )
+            purchase_metadata = {
+                "purchase_kind": "custom",
+                "custom_tokens_amount": tokens_amount,
+                "commercial_token_value": str(
+                    pricing_service._token_value(db)
+                ),
+            }
+
+        customer = billing_customer_service.get_or_create_stripe_customer(
+            db,
+            user=user,
         )
 
         payment = BillingPayment(
@@ -346,15 +387,8 @@ class TokenPurchaseService:
             currency=currency,
             amount=amount,
             refunded_amount=Decimal("0.00"),
-            description=(
-                f"Token package purchase: "
-                f"{token_package.name}"
-            ),
-            metadata_json=self._serialize_json(
-                {
-                    "token_package_id": token_package.id,
-                }
-            ),
+            description=f"Token purchase: {product_name}",
+            metadata_json=self._serialize_json(purchase_metadata),
         )
 
         db.add(payment)
@@ -362,18 +396,14 @@ class TokenPurchaseService:
 
         purchase = TokenPurchase(
             user_id=user.id,
-            token_package_id=token_package.id,
+            token_package_id=(token_package.id if token_package else None),
             billing_payment_id=payment.id,
             status=TokenPurchaseStatus.PENDING.value,
-            tokens_amount=token_package.tokens_amount,
+            tokens_amount=tokens_amount,
             bonus_tokens=bonus_tokens,
             currency=currency,
             amount=amount,
-            metadata_json=self._serialize_json(
-                {
-                    "token_package_name": token_package.name,
-                }
-            ),
+            metadata_json=self._serialize_json(purchase_metadata),
         )
 
         db.add(purchase)
@@ -383,79 +413,61 @@ class TokenPurchaseService:
 
         metadata = {
             "type": "token_purchase",
+            "purchase_kind": purchase_metadata["purchase_kind"],
             "internal_user_id": str(user.id),
             "token_purchase_id": str(purchase.id),
             "billing_payment_id": str(payment.id),
-            "token_package_id": str(token_package.id),
             "tokens_amount": str(purchase.tokens_amount),
             "bonus_tokens": str(purchase.bonus_tokens),
         }
 
-        try:
-            checkout_session = (
-                stripe_client_service.create_checkout_session(
-                    db,
-                    customer_email=None,
-                    customer_id=customer.provider_customer_id,
-                    mode="payment",
-                    line_items=[
-                        {
-                            "price_data": {
-                                "currency": currency.lower(),
-                                "product_data": {
-                                    "name": token_package.name,
-                                    **(
-                                        {
-                                            "description": token_package.description.strip(),
-                                        }
-                                        if token_package.description
-                                        and token_package.description.strip()
-                                        else {}
-                                    ),
-                                    "metadata": metadata,
-                                },
-                                "unit_amount": (
-                                    token_package.price_cents
-                                ),
-                            },
-                            "quantity": 1,
-                        }
-                    ],
-                    success_url=str(data.success_url),
-                    cancel_url=str(data.cancel_url),
-                    metadata=metadata,
-                    allow_promotion_codes=(
-                        data.allow_promotion_codes
-                    ),
-                    client_reference_id=str(purchase.id),
-                    idempotency_key=(
-                        f"token-purchase-checkout-{purchase.id}"
-                    ),
-                )
-            )
+        if token_package:
+            metadata["token_package_id"] = str(token_package.id)
 
+        try:
+            checkout_session = stripe_client_service.create_checkout_session(
+                db,
+                customer_email=None,
+                customer_id=customer.provider_customer_id,
+                mode="payment",
+                line_items=[
+                    {
+                        "price_data": {
+                            "currency": currency.lower(),
+                            "product_data": {
+                                "name": product_name,
+                                **(
+                                    {"description": product_description}
+                                    if product_description
+                                    else {}
+                                ),
+                                "metadata": metadata,
+                            },
+                            "unit_amount": self._money_to_cents(amount),
+                        },
+                        "quantity": 1,
+                    }
+                ],
+                success_url=str(data.success_url),
+                cancel_url=str(data.cancel_url),
+                metadata=metadata,
+                allow_promotion_codes=data.allow_promotion_codes,
+                client_reference_id=str(purchase.id),
+                idempotency_key=f"token-purchase-checkout-{purchase.id}",
+            )
         except Exception as error:
             purchase.status = TokenPurchaseStatus.FAILED.value
             payment.status = BillingPaymentStatus.FAILED.value
             payment.failure_message = str(error)
             payment.failed_at = utc_now()
-
             db.add(purchase)
             db.add(payment)
             db.commit()
-
             raise
 
         checkout_session_id = checkout_session.id
-
-        purchase.provider_checkout_session_id = (
-            checkout_session_id
-        )
-
-        payment.provider_checkout_session_id = (
-            checkout_session_id
-        )
-
+        purchase.provider_checkout_session_id = checkout_session_id
+        payment.provider_checkout_session_id = checkout_session_id
         db.add(purchase)
         db.add(payment)
         db.commit()
@@ -470,9 +482,7 @@ class TokenPurchaseService:
             entity_id=str(purchase.id),
             payload=metadata,
             response={
-                "checkout_session_id": (
-                    checkout_session_id
-                ),
+                "checkout_session_id": checkout_session_id,
                 "checkout_url": checkout_session.url,
             },
         )
@@ -753,6 +763,67 @@ class TokenPurchaseService:
             message="Token purchase reconciled with Stripe.",
         )
 
+    def _resolve_payment_intent_for_refund(
+        self,
+        db: Session,
+        *,
+        purchase: TokenPurchase,
+        payment: BillingPayment,
+    ) -> str | None:
+        payment_intent_id = (
+            payment.provider_payment_intent_id
+            or purchase.provider_payment_intent_id
+        )
+
+        if not payment_intent_id and purchase.provider_checkout_session_id:
+            checkout_session = stripe_client_service.retrieve_checkout_session(
+                db,
+                checkout_session_id=purchase.provider_checkout_session_id,
+            )
+            payment_intent = self._stripe_value(
+                checkout_session,
+                "payment_intent",
+            )
+            payment_intent_id = (
+                payment_intent
+                if isinstance(payment_intent, str)
+                else self._stripe_value(payment_intent, "id")
+            )
+
+        if not payment_intent_id:
+            return None
+
+        payment.provider_payment_intent_id = payment_intent_id
+        purchase.provider_payment_intent_id = payment_intent_id
+
+        try:
+            stripe_payment_intent = (
+                stripe_client_service.retrieve_payment_intent(
+                    db,
+                    payment_intent_id=payment_intent_id,
+                )
+            )
+            latest_charge = self._stripe_value(
+                stripe_payment_intent,
+                "latest_charge",
+            )
+            charge_id = (
+                latest_charge
+                if isinstance(latest_charge, str)
+                else self._stripe_value(latest_charge, "id")
+            )
+            if charge_id:
+                payment.provider_charge_id = charge_id
+        except Exception:
+            # The PaymentIntent is enough to create the refund. Charge
+            # enrichment must not block a valid refund operation.
+            pass
+
+        db.add(payment)
+        db.add(purchase)
+        db.flush()
+        return payment_intent_id
+
     def refund(
         self,
         db: Session,
@@ -785,9 +856,16 @@ class TokenPurchaseService:
                 "Billing payment not found."
             )
 
-        if not payment.provider_payment_intent_id:
+        payment_intent_id = self._resolve_payment_intent_for_refund(
+            db,
+            purchase=purchase,
+            payment=payment,
+        )
+
+        if not payment_intent_id:
             raise ConflictException(
-                "Payment has no Stripe PaymentIntent."
+                "Stripe PaymentIntent could not be resolved from the payment "
+                "or its Checkout Session. Reconcile the purchase first."
             )
 
         if payment.status not in [
@@ -821,9 +899,7 @@ class TokenPurchaseService:
         stripe_refund = (
             stripe_client_service.refund_payment_intent(
                 db,
-                payment_intent_id=(
-                    payment.provider_payment_intent_id
-                ),
+                payment_intent_id=payment_intent_id,
                 amount_cents=self._money_to_cents(
                     refund_amount
                 ),

@@ -20,9 +20,9 @@ class TokenPurchase(Base):
         index=True,
     )
 
-    token_package_id: Mapped[int] = mapped_column(
+    token_package_id: Mapped[int | None] = mapped_column(
         ForeignKey("token_packages.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
 

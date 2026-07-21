@@ -942,6 +942,21 @@ class SubscriptionService:
 
         return updated
 
+    def retrieve_and_sync_provider_subscription(
+        self,
+        db: Session,
+        *,
+        provider_subscription_id: str,
+    ) -> UserSubscription:
+        stripe_subscription = stripe_client_service.retrieve_subscription(
+            db,
+            subscription_id=provider_subscription_id,
+        )
+        return self.sync_from_stripe_subscription(
+            db,
+            stripe_subscription=stripe_subscription,
+        )
+
     def _get_subscription_for_update(
         self,
         db: Session,

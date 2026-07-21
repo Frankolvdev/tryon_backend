@@ -320,17 +320,35 @@ class BillingService:
 
         subscription = None
 
+        if not invoice.user_subscription_id:
+            provider_subscription_id = (
+                billing_invoice_service.provider_subscription_id(
+                    event_object
+                )
+            )
+
+            if provider_subscription_id:
+                stripe_subscription = (
+                    subscription_service
+                    .retrieve_and_sync_provider_subscription(
+                        db,
+                        provider_subscription_id=(
+                            provider_subscription_id
+                        ),
+                    )
+                )
+                invoice = billing_invoice_service.sync_invoice(
+                    db,
+                    stripe_invoice=event_object,
+                )
+
         if invoice.user_subscription_id:
             subscription = (
                 subscription_service
                 .grant_period_tokens_if_needed(
                     db,
-                    subscription_id=(
-                        invoice.user_subscription_id
-                    ),
-                    reference_id=(
-                        invoice.provider_invoice_id
-                    ),
+                    subscription_id=invoice.user_subscription_id,
+                    reference_id=invoice.provider_invoice_id,
                 )
             )
 

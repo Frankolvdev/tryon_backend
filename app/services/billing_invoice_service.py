@@ -45,6 +45,30 @@ class BillingInvoiceService:
 
         return getattr(obj, key, default)
 
+    def _stripe_id(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        return self._stripe_value(value, "id")
+
+    def provider_subscription_id(self, stripe_invoice: Any) -> str | None:
+        direct = self._stripe_id(
+            self._stripe_value(stripe_invoice, "subscription")
+        )
+        if direct:
+            return direct
+
+        parent = self._stripe_value(stripe_invoice, "parent", {}) or {}
+        details = self._stripe_value(
+            parent,
+            "subscription_details",
+            {},
+        ) or {}
+        return self._stripe_id(
+            self._stripe_value(details, "subscription")
+        )
+
     def _timestamp(
         self,
         value: int | float | None,
@@ -179,16 +203,9 @@ class BillingInvoiceService:
                 )
             )
 
-        subscription_id = self._stripe_value(
-            stripe_invoice,
-            "subscription",
+        subscription_id = self.provider_subscription_id(
+            stripe_invoice
         )
-
-        if not isinstance(subscription_id, str):
-            subscription_id = self._stripe_value(
-                subscription_id,
-                "id",
-            )
 
         user_subscription = None
 
