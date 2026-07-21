@@ -36,6 +36,7 @@ class JobQueueName(str, Enum):
 
 class JobExecutionMode(str, Enum):
     INTERNAL = "internal"
+    SIMULATED = "simulated"
     COMFYUI_LOCAL = "comfyui_local"
     RUNPOD_SERVERLESS = "runpod_serverless"
     EXTERNAL_API = "external_api"

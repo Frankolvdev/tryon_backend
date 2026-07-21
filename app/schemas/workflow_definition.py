@@ -12,6 +12,7 @@ from app.common.job_enums import JobExecutionMode
 
 
 ALLOWED_WORKFLOW_EXECUTION_MODES = {
+    JobExecutionMode.SIMULATED,
     JobExecutionMode.COMFYUI_LOCAL,
     JobExecutionMode.RUNPOD_SERVERLESS,
 }
@@ -73,8 +74,9 @@ class WorkflowDefinitionCreate(BaseModel):
 
         if invalid:
             raise ValueError(
-                "Workflows only support comfyui_local "
-                "and runpod_serverless execution modes."
+                "Workflows only support simulated, "
+                "comfyui_local and runpod_serverless "
+                "execution modes."
             )
 
         if len(value) != len(set(value)):
@@ -128,8 +130,9 @@ class WorkflowDefinitionUpdate(BaseModel):
 
         if invalid:
             raise ValueError(
-                "Workflows only support comfyui_local "
-                "and runpod_serverless execution modes."
+                "Workflows only support simulated, "
+                "comfyui_local and runpod_serverless "
+                "execution modes."
             )
 
         if len(value) != len(set(value)):
