@@ -187,63 +187,71 @@ class I18nMiddleware(BaseHTTPMiddleware):
             request
         )
 
-        db = SessionLocal()
+        skip_database_resolution = (
+            request.url.path
+            == "/api/v1/webhooks/stripe"
+        )
 
+        db = None
         context_token = None
+        resolved = None
 
-        try:
-            resolved = (
-                i18n_service
-                .resolved_settings(
-                    db,
-                    user_id=user_id,
-                    requested_locale=(
-                        requested_locale
-                    ),
-                    accept_language=(
-                        accept_language
-                    ),
-                )
-            )
+        if not skip_database_resolution:
+            db = SessionLocal()
 
-            if (
-                source == "automatic"
-                and user_id is not None
-            ):
-                source = "user-preference"
-
-            elif (
-                source == "automatic"
-                and accept_language
-            ):
-                source = (
-                    "accept-language"
+            try:
+                resolved = (
+                    i18n_service
+                    .resolved_settings(
+                        db,
+                        user_id=user_id,
+                        requested_locale=(
+                            requested_locale
+                        ),
+                        accept_language=(
+                            accept_language
+                        ),
+                    )
                 )
 
-            else:
-                source = (
-                    source
-                    if source
-                    != "automatic"
-                    else "default"
+                if (
+                    source == "automatic"
+                    and user_id is not None
+                ):
+                    source = "user-preference"
+
+                elif (
+                    source == "automatic"
+                    and accept_language
+                ):
+                    source = (
+                        "accept-language"
+                    )
+
+                else:
+                    source = (
+                        source
+                        if source
+                        != "automatic"
+                        else "default"
+                    )
+
+            except Exception:
+                logger.exception(
+                    "Could not resolve request locale.",
+                    extra={
+                        "requested_locale": (
+                            requested_locale
+                        ),
+                        "user_id": user_id,
+                        "path": request.url.path,
+                    },
                 )
 
-        except Exception:
-            logger.exception(
-                "Could not resolve request locale.",
-                extra={
-                    "requested_locale": (
-                        requested_locale
-                    ),
-                    "user_id": user_id,
-                    "path": request.url.path,
-                },
-            )
+                resolved = None
 
-            resolved = None
-
-        finally:
-            db.close()
+            finally:
+                db.close()
 
         if resolved is None:
             context_token = (

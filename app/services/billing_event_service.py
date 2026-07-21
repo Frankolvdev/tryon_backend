@@ -241,12 +241,23 @@ class BillingEventService:
             return result
 
         except Exception as error:
-            event.status = BillingEventStatus.FAILED.value
-            event.error_message = str(error)
+            # Always clear a failed transaction before trying to persist the
+            # webhook failure. This also releases any checked-out connection
+            # state instead of leaving the request session unusable.
+            db.rollback()
 
-            db.add(event)
-            db.commit()
-            db.refresh(event)
+            event = billing_event_repository.get_by_id(
+                db,
+                event.id,
+            )
+
+            if event is not None:
+                event.status = BillingEventStatus.FAILED.value
+                event.error_message = str(error)
+
+                db.add(event)
+                db.commit()
+                db.refresh(event)
 
             raise
 

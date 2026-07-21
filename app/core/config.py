@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     POSTGRES_USER: str = "tryon_user"
     POSTGRES_PASSWORD: str = "tryon_password"
 
+    DATABASE_POOL_SIZE: int = 20
+    DATABASE_MAX_OVERFLOW: int = 30
+    DATABASE_POOL_TIMEOUT_SECONDS: int = 10
+    DATABASE_POOL_RECYCLE_SECONDS: int = 1800
+
     REDIS_HOST: str = "127.0.0.1"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0

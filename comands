@@ -1,0 +1,7 @@
+Para simular una renovación:
+
+python -m app.scripts.simulate_subscription_renewal --subscription-id 1
+
+Para comprobar la idempotencia usando la misma referencia:
+
+python -m app.scripts.simulate_subscription_renewal --subscription-id 1 --reference-id test-invoice-001
