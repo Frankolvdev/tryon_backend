@@ -86,6 +86,29 @@ class BillingInvoiceService:
             Decimal(int(cents or 0)) / Decimal("100")
         ).quantize(Decimal("0.01"))
 
+    def _stripe_dict(self, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+
+        to_dict_recursive = getattr(value, "to_dict_recursive", None)
+        if callable(to_dict_recursive):
+            converted = to_dict_recursive()
+            return converted if isinstance(converted, dict) else {}
+
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            converted = to_dict()
+            return converted if isinstance(converted, dict) else {}
+
+        try:
+            converted = dict(value)
+        except (TypeError, ValueError, KeyError):
+            return {}
+
+        return converted if isinstance(converted, dict) else {}
+
     def _serialize(self, value: Any) -> str:
         return json.dumps(
             value or {},
@@ -429,13 +452,12 @@ class BillingInvoiceService:
                 )
             ),
             "metadata_json": self._serialize(
-                dict(
+                self._stripe_dict(
                     self._stripe_value(
                         stripe_invoice,
                         "metadata",
                         {},
                     )
-                    or {}
                 )
             ),
         }
