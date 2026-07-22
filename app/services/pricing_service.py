@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,21 @@ TOKEN_VALUE_KEY = "commercial_token_value_usd"
 CURRENCY_KEY = "commercial_currency"
 DEFAULT_TOKEN_VALUE_USD = 0.10
 DEFAULT_CURRENCY = "USD"
+
+
+@dataclass(frozen=True, slots=True)
+class PricingExecutionQuote:
+    """Immutable pricing snapshot used when creating an execution job.
+
+    The public PricingRuleResponse intentionally exposes commercial values only.
+    Job creation additionally needs the persisted technical estimates from the
+    selected rule, so this internal quote keeps both concerns separated.
+    """
+
+    rule_id: int
+    required_tokens: int
+    estimated_gpu_seconds: int
+    estimated_gpu_cost_cents: int
 
 
 class PricingService:
@@ -113,9 +129,9 @@ class PricingService:
             updated_at=rule.updated_at,
         )
 
-    def get_tryon_price(
+    def _get_active_tryon_rule(
         self, db: Session, *, item_type: TryOnItemType, quality_mode: QualityMode
-    ) -> PricingRuleResponse:
+    ) -> PricingRule:
         rule = pricing_rule_repository.get_active_rule(
             db,
             operation_type=PricingOperationType.TRYON.value,
@@ -124,7 +140,31 @@ class PricingService:
         )
         if not rule:
             raise NotFoundException("No active pricing rule found for this operation.")
+        return rule
+
+    def get_tryon_price(
+        self, db: Session, *, item_type: TryOnItemType, quality_mode: QualityMode
+    ) -> PricingRuleResponse:
+        rule = self._get_active_tryon_rule(
+            db, item_type=item_type, quality_mode=quality_mode
+        )
         return self._to_response(db, rule)
+
+    def get_tryon_execution_quote(
+        self, db: Session, *, item_type: TryOnItemType, quality_mode: QualityMode
+    ) -> PricingExecutionQuote:
+        rule = self._get_active_tryon_rule(
+            db, item_type=item_type, quality_mode=quality_mode
+        )
+        commercial_price = self._to_response(db, rule)
+        return PricingExecutionQuote(
+            rule_id=rule.id,
+            required_tokens=commercial_price.required_tokens,
+            estimated_gpu_seconds=max(int(rule.estimated_gpu_seconds or 0), 0),
+            estimated_gpu_cost_cents=max(
+                int(rule.estimated_gpu_cost_cents or 0), 0
+            ),
+        )
 
     def list_rules(self, db: Session) -> list[PricingRuleResponse]:
         return [self._to_response(db, rule) for rule in pricing_rule_repository.list_all(db)]

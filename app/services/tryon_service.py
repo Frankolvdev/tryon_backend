@@ -40,7 +40,7 @@ class TryOnService:
         if quality_mode == QualityMode.HIGH and not runtime_settings_service.high_quality_enabled(db):
             raise ForbiddenException("High quality mode is currently disabled.")
 
-        pricing_rule = pricing_service.get_tryon_price(
+        pricing_quote = pricing_service.get_tryon_execution_quote(
             db,
             item_type=item_type,
             quality_mode=quality_mode,
@@ -66,14 +66,14 @@ class TryOnService:
             user_id=user.id,
             person_image_file_id=person_file.id,
             item_image_file_id=item_file.id,
-            pricing_rule_id=pricing_rule.id,
+            pricing_rule_id=pricing_quote.rule_id,
             runpod_config_id=runpod_config.id if runpod_config else None,
             item_type=item_type.value,
             quality_mode=quality_mode.value,
             status=TryOnJobStatus.QUEUED.value,
-            tokens_cost=pricing_rule.tokens_cost,
-            estimated_gpu_seconds=pricing_rule.estimated_gpu_seconds,
-            estimated_gpu_cost_cents=pricing_rule.estimated_gpu_cost_cents,
+            tokens_cost=pricing_quote.required_tokens,
+            estimated_gpu_seconds=pricing_quote.estimated_gpu_seconds,
+            estimated_gpu_cost_cents=pricing_quote.estimated_gpu_cost_cents,
             prompt=prompt,
             comfy_workflow_name=(
                 runpod_config.comfy_workflow_name
@@ -88,7 +88,7 @@ class TryOnService:
         token_service.debit_tokens(
             db=db,
             user_id=user.id,
-            amount=pricing_rule.tokens_cost,
+            amount=pricing_quote.required_tokens,
             source="tryon",
             reference_id=str(job.id),
             description=f"Try-on job #{job.id} token consumption",
