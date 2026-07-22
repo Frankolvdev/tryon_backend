@@ -58,6 +58,43 @@ def list_generation_modules(
     )
 
 
+# Static execution-history route intentionally lives outside the
+# /generation-modules/{module_id} namespace. FastAPI matches routes in
+# declaration order, so a path such as "execution-history" would otherwise
+# be parsed as an integer module_id and return HTTP 422.
+from app.schemas.generation_module_operations import GenerationExecutionListResponse
+from app.services.generation_module_runtime_service import generation_module_runtime_service
+
+
+@router.get("/generation-module-executions", response_model=GenerationExecutionListResponse)
+def list_all_generation_module_executions(
+    module_id: int | None = Query(default=None),
+    status: str | None = Query(default=None),
+    engine: GenerationExecutionEngine | None = Query(default=None),
+    user_id: int | None = Query(default=None, ge=1),
+    search: str | None = Query(default=None),
+    created_from: datetime | None = Query(default=None),
+    created_to: datetime | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    current_admin: User = Depends(admin_guard),
+):
+    items, total = generation_module_runtime_service.list(
+        module_id=module_id,
+        status=status,
+        engine=engine.value if engine else None,
+        user_id=user_id,
+        search=search,
+        created_from=created_from,
+        created_to=created_to,
+        skip=skip,
+        limit=limit,
+    )
+    return GenerationExecutionListResponse(
+        items=items, total=total, skip=skip, limit=limit
+    )
+
+
 @router.get("/generation-modules/{module_id}", response_model=GenerationModuleResponse)
 def get_generation_module(
     module_id: int,
