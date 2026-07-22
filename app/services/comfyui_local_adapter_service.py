@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,25 @@ class ComfyUILocalAdapterService:
         output_dir = Path(local_storage_dir) / "comfyui-results"
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
+
+    def _safe_local_filename(self, filename: str) -> str:
+        original_name = Path(str(filename)).name
+        sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "_", original_name)
+        sanitized = sanitized.rstrip(" .")
+
+        if not sanitized:
+            sanitized = "comfyui-output"
+
+        reserved_names = {
+            "CON", "PRN", "AUX", "NUL",
+            *(f"COM{index}" for index in range(1, 10)),
+            *(f"LPT{index}" for index in range(1, 10)),
+        }
+        stem = Path(sanitized).stem.upper()
+        if stem in reserved_names:
+            sanitized = f"_{sanitized}"
+
+        return sanitized
 
     def _client(self, *, timeout: float | None = None) -> httpx.Client:
         limits = httpx.Limits(
@@ -403,9 +423,11 @@ class ComfyUILocalAdapterService:
 
         job_directory = self._output_root() / job_public_id
         job_directory.mkdir(parents=True, exist_ok=True)
-        original_name = Path(str(file_data["filename"])).name
+        safe_name = self._safe_local_filename(
+            str(file_data["filename"])
+        )
         destination = job_directory / (
-            f"{file_data['node_id']}-{uuid4().hex[:8]}-{original_name}"
+            f"{file_data['node_id']}-{uuid4().hex[:8]}-{safe_name}"
         )
         destination.write_bytes(content)
 
