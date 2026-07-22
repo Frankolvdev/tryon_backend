@@ -345,3 +345,51 @@ def generation_module_runtime_health(
     current_admin: User = Depends(admin_guard),
 ):
     return generation_module_runtime_service.health(db)
+
+# Versioning, import/export and execution history.
+from app.schemas.generation_module_operations import (
+    GenerationExecutionListResponse,
+    GenerationExecutionRetryRequest,
+    GenerationModuleCloneRequest,
+    GenerationModuleExportResponse,
+    GenerationModuleImportRequest,
+    GenerationModulePublishRequest,
+    GenerationModuleVersionListResponse,
+)
+from app.services.generation_module_operations_service import generation_module_operations_service
+
+
+@router.get("/generation-modules/{module_id}/versions", response_model=GenerationModuleVersionListResponse)
+def list_generation_module_versions(module_id: int, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.list_versions(db, module_id=module_id)
+
+
+@router.post("/generation-modules/{module_id}/clone", response_model=GenerationModuleResponse, status_code=201)
+def clone_generation_module(module_id: int, data: GenerationModuleCloneRequest, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.clone(db, module_id=module_id, data=data, user_id=current_admin.id)
+
+
+@router.post("/generation-modules/{module_id}/publish", response_model=GenerationModuleResponse)
+def publish_generation_module(module_id: int, data: GenerationModulePublishRequest, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.publish(db, module_id=module_id, data=data)
+
+
+@router.get("/generation-modules/{module_id}/export", response_model=GenerationModuleExportResponse)
+def export_generation_module(module_id: int, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.export(db, module_id=module_id)
+
+
+@router.post("/generation-modules/import", response_model=GenerationModuleResponse, status_code=201)
+def import_generation_module(data: GenerationModuleImportRequest, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.import_module(db, data=data, user_id=current_admin.id)
+
+
+@router.get("/generation-modules/execution-history", response_model=GenerationExecutionListResponse)
+def list_generation_module_executions(module_id: int | None = Query(default=None), status: str | None = Query(default=None), skip: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500), current_admin: User = Depends(admin_guard)):
+    items, total = generation_module_runtime_service.list(module_id=module_id, status=status, skip=skip, limit=limit)
+    return GenerationExecutionListResponse(items=items, total=total, skip=skip, limit=limit)
+
+
+@router.post("/generation-modules/executions/{execution_id}/retry", response_model=GenerationModuleExecutionResponse, status_code=202)
+def retry_generation_module_execution(execution_id: UUID, data: GenerationExecutionRetryRequest, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_runtime_service.retry(db, execution_id, engine=data.engine)

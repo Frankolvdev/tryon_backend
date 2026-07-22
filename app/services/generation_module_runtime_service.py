@@ -303,3 +303,39 @@ class GenerationModuleRuntimeService:
 
 
 generation_module_runtime_service = GenerationModuleRuntimeService()
+
+# Incremental history helpers used by AppWeb and BackOffice.
+def _runtime_list(self, *, user_id: int | None = None, module_id: int | None = None, status: str | None = None, skip: int = 0, limit: int = 100):
+    with self._lock:
+        items = list(self._items.values())
+        owners = dict(self._owners)
+    if user_id is not None:
+        items = [item for item in items if owners.get(item.id) == user_id]
+    if module_id is not None:
+        items = [item for item in items if item.module_id == module_id]
+    if status:
+        items = [item for item in items if item.status == status]
+    items.sort(key=lambda item: item.created_at, reverse=True)
+    return [item.model_copy(deep=True) for item in items[skip:skip + limit]], len(items)
+
+
+def _runtime_retry(self, db: Session, execution_id: UUID, *, user_id: int | None = None, engine=None):
+    current = self.get_for_user(execution_id, user_id=user_id) if user_id is not None else self.get(execution_id)
+    payload = GenerationModuleExecutionCreate(inputs=copy.deepcopy(current.inputs), engine=engine or current.engine)
+    return self.create(db, module_id=current.module_id, data=payload, user_id=user_id)
+
+
+def _runtime_delete(self, execution_id: UUID, *, user_id: int | None = None):
+    if user_id is not None:
+        self.get_for_user(execution_id, user_id=user_id)
+    else:
+        self.get(execution_id)
+    with self._lock:
+        self._items.pop(execution_id, None)
+        self._owners.pop(execution_id, None)
+        self._provider_refs.pop(execution_id, None)
+
+
+GenerationModuleRuntimeService.list = _runtime_list
+GenerationModuleRuntimeService.retry = _runtime_retry
+GenerationModuleRuntimeService.delete = _runtime_delete
