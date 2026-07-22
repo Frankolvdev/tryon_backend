@@ -338,3 +338,10 @@ def cancel_generation_module_execution(
     current_admin: User = Depends(admin_guard),
 ):
     return generation_module_runtime_service.cancel(execution_id)
+
+@router.get("/generation-modules/runtime/health")
+def generation_module_runtime_health(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_runtime_service.health(db)

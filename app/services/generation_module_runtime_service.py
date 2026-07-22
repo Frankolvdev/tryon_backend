@@ -3,9 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID, uuid4
@@ -15,18 +13,22 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import AppException, NotFoundException
 from app.common.generation_module_enums import GenerationExecutionEngine, GenerationModuleStepType
 from app.common.time import utc_now
+from app.db.database import SessionLocal
 from app.schemas.generation_module_runtime import (
     GenerationModuleExecutionCreate,
     GenerationModuleExecutionLog,
     GenerationModuleExecutionResponse,
     GenerationModuleStepExecution,
 )
+from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
 from app.services.generation_module_service import generation_module_service
+from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
 
 
 class GenerationModuleRuntimeService:
     def __init__(self) -> None:
         self._items: dict[UUID, GenerationModuleExecutionResponse] = {}
+        self._provider_refs: dict[UUID, dict[str, str]] = {}
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="generation-module")
 
@@ -41,8 +43,7 @@ class GenerationModuleRuntimeService:
             id=uuid4(), module_id=module.id, module_key=module.key, engine=engine,
             status="queued", progress=0, inputs=copy.deepcopy(data.inputs), context=copy.deepcopy(data.inputs),
             outputs={}, steps=[GenerationModuleStepExecution(step_key=s.key, step_name=s.name, step_type=s.step_type, status="pending") for s in sorted(module.steps, key=lambda item: item.position) if s.is_enabled],
-            logs=[GenerationModuleExecutionLog(timestamp=now, message="Execution queued.")],
-            created_at=now,
+            logs=[GenerationModuleExecutionLog(timestamp=now, message="Execution queued.")], created_at=now,
         )
         with self._lock:
             self._items[execution.id] = execution
@@ -71,10 +72,31 @@ class GenerationModuleRuntimeService:
                 return item.model_copy(deep=True)
             item.cancel_requested = True
             item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="warning", message="Cancellation requested."))
-            return item.model_copy(deep=True)
+            provider = copy.deepcopy(self._provider_refs.get(execution_id) or {})
+        if provider.get("engine") == GenerationExecutionEngine.LOCAL_DOCKER.value and provider.get("prompt_id"):
+            comfyui_local_adapter_service.cancel_prompt(prompt_id=provider["prompt_id"])
+        elif provider.get("engine") == GenerationExecutionEngine.RUNPOD_SERVERLESS.value and provider.get("provider_job_id"):
+            db = SessionLocal()
+            try:
+                runpod_serverless_adapter_service.cancel_job(db, provider_job_id=provider["provider_job_id"], endpoint_id=provider.get("endpoint_id"))
+            finally:
+                db.close()
+        return self.get(execution_id)
+
+    def health(self, db: Session) -> dict[str, Any]:
+        try:
+            runpod_health = runpod_serverless_adapter_service.health(db)
+        except Exception as exc:
+            runpod_health = {"available": False, "error": str(exc)}
+        return {
+            "local_docker": comfyui_local_adapter_service.health(),
+            "runpod_serverless": runpod_health,
+            "simulated": {"available": True},
+        }
 
     def _run(self, execution_id: UUID, module: dict[str, Any]) -> None:
         started = utc_now()
+        db = SessionLocal()
         with self._lock:
             item = self._items[execution_id]
             item.status = "running"; item.started_at = started
@@ -85,14 +107,15 @@ class GenerationModuleRuntimeService:
                 with self._lock:
                     item = self._items[execution_id]
                     if item.cancel_requested:
-                        item.status = "cancelled"; item.progress = min(item.progress, 99)
+                        item.status = "cancelled"
                         item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="warning", message="Execution cancelled."))
                         break
                     state = item.steps[index]
                     state.status = "running"; state.started_at = utc_now()
                     item.logs.append(GenerationModuleExecutionLog(timestamp=state.started_at, step_key=step["key"], message=f"Step '{step['name']}' started."))
                     context = copy.deepcopy(item.context)
-                outputs = self._execute_step(step, context, self._items[execution_id].engine)
+                    engine = item.engine
+                outputs = self._execute_step(db, execution_id, step, context, engine)
                 finished = utc_now()
                 with self._lock:
                     item = self._items[execution_id]; state = item.steps[index]
@@ -109,6 +132,10 @@ class GenerationModuleRuntimeService:
                     item.outputs = self._resolve_module_outputs(module["outputs"], item.context)
                     item.status = "completed"; item.progress = 100
                     item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), message="Execution completed."))
+        except InterruptedError as exc:
+            with self._lock:
+                item = self._items[execution_id]; item.status = "cancelled"; item.error = str(exc)
+                item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="warning", message=str(exc)))
         except Exception as exc:
             with self._lock:
                 item = self._items[execution_id]
@@ -118,39 +145,81 @@ class GenerationModuleRuntimeService:
                     running.status = "failed"; running.error = str(exc); running.finished_at = utc_now()
                 item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="error", step_key=running.step_key if running else None, message=str(exc)))
         finally:
+            db.close()
             finished = utc_now()
             with self._lock:
                 item = self._items[execution_id]; item.finished_at = finished
                 item.duration_ms = int((finished - started).total_seconds() * 1000)
+                self._provider_refs.pop(execution_id, None)
 
-    def _execute_step(self, step: dict[str, Any], context: dict[str, Any], engine: GenerationExecutionEngine) -> dict[str, Any]:
+    def _execute_step(self, db: Session, execution_id: UUID, step: dict[str, Any], context: dict[str, Any], engine: GenerationExecutionEngine) -> dict[str, Any]:
         if step["step_type"] == GenerationModuleStepType.PYTHON.value:
             return self._execute_python(step, context)
-        if step["step_type"] == GenerationModuleStepType.WORKFLOW.value:
-            return self._prepare_workflow(step, context, engine)
-        raise AppException(f"Unsupported generation module step type: {step['step_type']}")
+        if step["step_type"] != GenerationModuleStepType.WORKFLOW.value:
+            raise AppException(f"Unsupported generation module step type: {step['step_type']}")
+        workflow, configuration = self._prepare_workflow(step, context)
+        if engine == GenerationExecutionEngine.SIMULATED:
+            return {"workflow_preview": workflow, "engine": engine.value, "execution_mode": "simulated", "outputs": []}
+        timeout = int(configuration.get("timeout_seconds") or 900)
+        if engine == GenerationExecutionEngine.LOCAL_DOCKER:
+            queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow)
+            with self._lock:
+                self._provider_refs[execution_id] = {"engine": engine.value, "prompt_id": queued["prompt_id"], "client_id": queued["client_id"]}
+            result = comfyui_local_adapter_service.execute_queued_prompt(
+                prompt_id=queued["prompt_id"], client_id=queued["client_id"], job_public_id=str(execution_id),
+                timeout_seconds=timeout, download_outputs=True,
+                progress_callback=lambda progress, message, meta=None: self._provider_progress(execution_id, step["key"], progress, message),
+            )
+            return self._map_workflow_outputs(configuration, result.get("outputs") or [], result)
+        payload = {
+            "generation_module": {"step_key": step["key"], "workflow": workflow, "output_bindings": configuration.get("output_bindings", [])},
+            "inputs": context,
+        }
+        submitted = runpod_serverless_adapter_service.submit_job(db, input_data=payload)
+        with self._lock:
+            self._provider_refs[execution_id] = {"engine": engine.value, "provider_job_id": submitted["provider_job_id"], "endpoint_id": submitted["endpoint_id"]}
+        result = runpod_serverless_adapter_service.execute_submitted_job(
+            db, provider_job_id=submitted["provider_job_id"], endpoint_id=submitted["endpoint_id"], job_public_id=str(execution_id),
+            timeout_seconds=timeout, download_outputs=True,
+            progress_callback=lambda progress, message, meta=None: self._provider_progress(execution_id, step["key"], progress, message),
+            cancellation_callback=lambda: self.get(execution_id).cancel_requested,
+        )
+        files = result.get("files") or []
+        return self._map_workflow_outputs(configuration, files, result)
+
+    def _provider_progress(self, execution_id: UUID, step_key: str, progress: float, message: str) -> None:
+        with self._lock:
+            item = self._items.get(execution_id)
+            if not item:
+                return
+            item.progress = min(89, max(item.progress, int(progress * 0.85)))
+            item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), step_key=step_key, message=message))
 
     @staticmethod
-    def _prepare_workflow(step: dict[str, Any], context: dict[str, Any], engine: GenerationExecutionEngine) -> dict[str, Any]:
+    def _prepare_workflow(step: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         configuration = copy.deepcopy(step.get("configuration") or {})
         workflow = configuration.get("workflow")
         if not isinstance(workflow, dict):
             raise AppException(f"Workflow step '{step['key']}' has no workflow JSON.")
         for binding in configuration.get("input_bindings", []):
-            value = context.get(binding["module_input_key"])
-            node = workflow.get(str(binding["node_id"]))
+            source_key = binding.get("module_input_key")
+            value = context.get(source_key)
+            node = workflow.get(str(binding.get("node_id")))
             if not isinstance(node, dict):
-                raise AppException(f"Workflow node '{binding['node_id']}' was not found.")
+                raise AppException(f"Workflow node '{binding.get('node_id')}' was not found.")
             node.setdefault("inputs", {})[binding["input_field"]] = value
-        # Until Docker/RunPod connectors are enabled, workflow steps return a deterministic preview.
-        time.sleep(0.15)
-        return {
-            "workflow_preview": workflow,
-            "workflow_name": configuration.get("workflow_name") or step["name"],
-            "engine": engine.value,
-            "output_bindings": configuration.get("output_bindings", []),
-            "execution_mode": "prepared" if engine != GenerationExecutionEngine.SIMULATED else "simulated",
-        }
+        return workflow, configuration
+
+    @staticmethod
+    def _map_workflow_outputs(configuration: dict[str, Any], files: list[dict[str, Any]], raw: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {"files": files, "provider_result": raw}
+        for binding in configuration.get("output_bindings", []):
+            key = binding.get("module_output_key")
+            node_id = str(binding.get("node_id"))
+            matched = [item for item in files if str(item.get("node_id")) == node_id]
+            if key:
+                result[key] = matched[0] if len(matched) == 1 else matched
+        return result
 
     @staticmethod
     def _execute_python(step: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -178,24 +247,17 @@ class GenerationModuleRuntimeService:
                 raise AppException(f"Python step '{step['key']}' exceeded {timeout} seconds.") from exc
         if result is None:
             return {}
-        if not isinstance(result, dict):
-            return {"result": result}
-        return result
+        return result if isinstance(result, dict) else {"result": result}
 
     @staticmethod
     def _resolve_module_outputs(definitions: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any]:
         outputs: dict[str, Any] = {}
         for definition in sorted(definitions, key=lambda row: row["position"]):
-            value: Any = context
-            if definition.get("source_step_key"):
-                value = context.get(definition["source_step_key"])
+            value: Any = context.get(definition.get("source_step_key")) if definition.get("source_step_key") else context
             path = definition.get("source_path")
             if path:
                 for part in path.split("."):
-                    if isinstance(value, dict):
-                        value = value.get(part)
-                    else:
-                        value = None; break
+                    value = value.get(part) if isinstance(value, dict) else None
             if value is None:
                 value = context.get(definition["key"])
             outputs[definition["key"]] = value
