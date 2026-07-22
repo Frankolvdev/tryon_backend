@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
@@ -12,6 +12,7 @@ from app.schemas.generation_module import GenerationModuleListResponse, Generati
 from app.schemas.generation_module_runtime import GenerationModuleExecutionCreate, GenerationModuleExecutionResponse
 from app.services.generation_module_runtime_service import generation_module_runtime_service
 from app.services.generation_module_service import generation_module_service
+from app.services.audit_service import audit_service
 
 router = APIRouter()
 
@@ -61,14 +62,17 @@ def get_available_generation_module(
 def execute_available_generation_module(
     module_id: int,
     data: GenerationModuleExecutionCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(auth_guard),
 ):
     # AppWeb begins with the safe deterministic engine. Local/RunPod remain admin-controlled.
     payload = data.model_copy(update={"engine": GenerationExecutionEngine.SIMULATED})
-    return generation_module_runtime_service.create(
+    result = generation_module_runtime_service.create(
         db, module_id=module_id, data=payload, user_id=current_user.id
     )
+    audit_service.create_log(db, actor_user_id=current_user.id, action="generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started generation for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
+    return result
 
 from app.schemas.generation_module_operations import GenerationExecutionListResponse, GenerationExecutionRetryRequest
 

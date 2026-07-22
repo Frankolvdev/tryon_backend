@@ -21,6 +21,7 @@ from app.schemas.generation_module_authoring import (
 )
 from app.services.audit_service import audit_service
 from app.services.generation_module_service import generation_module_service
+from app.services.generation_module_security_service import generation_module_security_service
 from app.services.generation_module_authoring_service import (
     generation_module_authoring_service,
 )
@@ -318,10 +319,13 @@ from app.services.generation_module_runtime_service import generation_module_run
 def execute_generation_module(
     module_id: int,
     data: GenerationModuleExecutionCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_admin: User = Depends(admin_guard),
 ):
-    return generation_module_runtime_service.create(db, module_id=module_id, data=data)
+    result = generation_module_runtime_service.create(db, module_id=module_id, data=data)
+    audit_service.create_log(db, actor_user_id=current_admin.id, action="admin_generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started {result.engine.value if hasattr(result.engine, 'value') else result.engine} execution for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
+    return result
 
 
 @router.get("/generation-modules/executions/{execution_id}", response_model=GenerationModuleExecutionResponse)
@@ -345,6 +349,19 @@ def generation_module_runtime_health(
     current_admin: User = Depends(admin_guard),
 ):
     return generation_module_runtime_service.health(db)
+
+
+@router.get("/generation-modules/runtime/security")
+def generation_module_runtime_security(
+    current_admin: User = Depends(admin_guard),
+):
+    items, total = generation_module_runtime_service.list(skip=0, limit=1000)
+    return {
+        "policy": generation_module_security_service.policy(),
+        "active_executions": sum(1 for item in items if item.status in {"queued", "running"}),
+        "active_user_executions": sum(1 for item in items if item.user_id is not None and item.status in {"queued", "running"}),
+        "tracked_executions": total,
+    }
 
 # Versioning, import/export and execution history.
 from app.schemas.generation_module_operations import (

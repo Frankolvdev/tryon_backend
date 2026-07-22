@@ -23,6 +23,7 @@ from app.schemas.generation_module_runtime import (
 )
 from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
 from app.services.generation_module_service import generation_module_service
+from app.services.generation_module_security_service import generation_module_security_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
 
 
@@ -40,6 +41,8 @@ class GenerationModuleRuntimeService:
             raise AppException("The generation module is inactive.")
         self._validate_inputs(module.inputs, data.inputs)
         engine = data.engine or module.default_execution_engine
+        if user_id is not None:
+            generation_module_security_service.ensure_user_can_start(self, user_id=user_id, engine=engine)
         now = utc_now()
         execution = GenerationModuleExecutionResponse(
             id=uuid4(), module_id=module.id, module_key=module.key, user_id=user_id, engine=engine,
