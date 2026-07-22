@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     # Unified AI job orchestration. Local ComfyUI must stay serialized on a single GPU.
     GENERATION_LOCAL_WORKERS: int = 1
     GENERATION_RUNPOD_DISPATCH_WORKERS: int = 8
+    GENERATION_RUNPOD_MAX_IN_FLIGHT: int = 20
     GENERATION_SIMULATED_WORKERS: int = 2
     GENERATION_QUEUE_BLOCK_SECONDS: int = 2
     GENERATION_HEARTBEAT_SECONDS: int = 10

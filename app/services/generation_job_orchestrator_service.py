@@ -8,6 +8,7 @@ from app.common.generation_module_enums import GenerationExecutionEngine
 from app.core.config import settings
 from app.db.database import SessionLocal
 from app.services.generation_job_queue_service import generation_job_queue_service
+from app.services.ai_engine_settings_service import ai_engine_settings_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.generation_module_service import generation_module_service
 
@@ -23,6 +24,7 @@ class GenerationJobOrchestratorService:
         self._stop = threading.Event()
         self._started = False
         self._lock = threading.Lock()
+        self._runtime_settings = None
 
     def bind(self, runtime) -> None:
         self._runtime = runtime
@@ -33,9 +35,18 @@ class GenerationJobOrchestratorService:
                 return
             self._started = True
             self._stop.clear()
+            db = SessionLocal()
+            try:
+                self._runtime_settings = ai_engine_settings_service.get(db)
+            finally:
+                db.close()
+            runpod_parallelism = min(
+                self._runtime_settings.runpod_dispatch_workers,
+                self._runtime_settings.runpod_max_in_flight,
+            )
             specs = [
-                ("local", max(1, int(settings.GENERATION_LOCAL_WORKERS))),
-                ("runpod", max(1, int(settings.GENERATION_RUNPOD_DISPATCH_WORKERS))),
+                ("local", self._runtime_settings.local_parallel_executions),
+                ("runpod", runpod_parallelism),
                 ("simulated", max(1, int(settings.GENERATION_SIMULATED_WORKERS))),
             ]
             for queue_name, count in specs:
@@ -80,7 +91,7 @@ class GenerationJobOrchestratorService:
         while not self._stop.is_set():
             raw_id = generation_job_queue_service.dequeue(
                 queue_name,
-                timeout_seconds=int(settings.GENERATION_QUEUE_BLOCK_SECONDS),
+                timeout_seconds=int(self._runtime_settings.queue_block_seconds if self._runtime_settings else settings.GENERATION_QUEUE_BLOCK_SECONDS),
             )
             if not raw_id:
                 continue
@@ -104,9 +115,12 @@ class GenerationJobOrchestratorService:
             "redis_available": generation_job_queue_service.ping(),
             "queue_depths": generation_job_queue_service.depths(),
             "workers": {
-                "local": max(1, int(settings.GENERATION_LOCAL_WORKERS)),
-                "runpod_dispatch": max(1, int(settings.GENERATION_RUNPOD_DISPATCH_WORKERS)),
+                "local": (self._runtime_settings.local_parallel_executions if self._runtime_settings else max(1, int(settings.GENERATION_LOCAL_WORKERS))),
+                "runpod_dispatch": (self._runtime_settings.effective_runpod_parallelism if self._runtime_settings else max(1, int(settings.GENERATION_RUNPOD_DISPATCH_WORKERS))),
                 "simulated": max(1, int(settings.GENERATION_SIMULATED_WORKERS)),
+            },
+            "limits": {
+                "runpod_max_in_flight": (self._runtime_settings.runpod_max_in_flight if self._runtime_settings else max(1, int(settings.GENERATION_RUNPOD_MAX_IN_FLIGHT))),
             },
         }
 
