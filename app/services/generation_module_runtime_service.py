@@ -26,6 +26,8 @@ from app.services.generation_module_service import generation_module_service
 from app.services.generation_module_file_materializer_service import generation_module_file_materializer_service
 from app.services.generation_module_security_service import generation_module_security_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
+from app.services.generation_module_billing_service import generation_module_billing_service
+from app.services.generation_module_result_service import generation_module_result_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
 
 
@@ -46,11 +48,23 @@ class GenerationModuleRuntimeService:
         if user_id is not None:
             generation_module_security_service.ensure_user_can_start(self, user_id=user_id, engine=engine)
         now = utc_now()
+        execution_id = uuid4()
+        pricing = module.pricing
+        if user_id is not None and (pricing is None or not pricing.is_active):
+            raise AppException("The generation module has no active pricing rule.")
+        tokens = int(pricing.required_tokens) if pricing and user_id is not None else 0
+        if user_id is not None and tokens > 0:
+            generation_module_billing_service.charge(
+                db, user_id=user_id, execution_id=str(execution_id), module_key=module.key, tokens=tokens
+            )
         execution = GenerationModuleExecutionResponse(
-            id=uuid4(), module_id=module.id, module_key=module.key, user_id=user_id, engine=engine,
+            id=execution_id, module_id=module.id, module_key=module.key, user_id=user_id, engine=engine,
             status="queued", progress=0, inputs=copy.deepcopy(data.inputs), context=copy.deepcopy(data.inputs),
             outputs={}, steps=[GenerationModuleStepExecution(step_key=s.key, step_name=s.name, step_type=s.step_type, status="pending") for s in sorted(module.steps, key=lambda item: item.position) if s.is_enabled],
-            logs=[GenerationModuleExecutionLog(timestamp=now, message="Execution queued.")], created_at=now,
+            logs=[GenerationModuleExecutionLog(timestamp=now, message=(f"Execution queued. {tokens} tokens charged." if tokens else "Execution queued."))], created_at=now,
+            pricing_rule_id=(pricing.id if pricing else None), tokens_charged=tokens,
+            currency=(pricing.currency if pricing else None),
+            commercial_price=(pricing.final_price_usd if pricing else None),
         )
         with self._lock:
             self._items[execution.id] = execution
@@ -208,13 +222,34 @@ class GenerationModuleRuntimeService:
                     running.status = "failed"; running.error = str(exc); running.finished_at = utc_now()
                 item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="error", step_key=running.step_key if running else None, message=str(exc)))
         finally:
-            db.close()
             finished = utc_now()
             with self._lock:
                 item = self._items[execution_id]; item.finished_at = finished
                 item.duration_ms = int((finished - started).total_seconds() * 1000)
                 self._provider_refs.pop(execution_id, None)
+                should_refund = item.status in {"failed", "cancelled"} and item.user_id is not None and item.tokens_charged > 0
+                refund_reason = item.error or item.status
+            if should_refund:
+                try:
+                    refunded = generation_module_billing_service.refund(
+                        db, user_id=item.user_id, execution_id=str(item.id), module_key=item.module_key,
+                        tokens=item.tokens_charged, reason=refund_reason,
+                    )
+                    if refunded:
+                        with self._lock:
+                            item.tokens_refunded = True
+                            item.logs.append(GenerationModuleExecutionLog(
+                                timestamp=utc_now(), message=f"{item.tokens_charged} tokens refunded automatically."
+                            ))
+                except Exception as refund_error:
+                    db.rollback()
+                    with self._lock:
+                        item.logs.append(GenerationModuleExecutionLog(
+                            timestamp=utc_now(), level="error", message=f"Automatic token refund failed: {refund_error}"
+                        ))
+            with self._lock:
                 final_snapshot = item.model_copy(deep=True)
+            db.close()
             generation_module_execution_store_service.save(final_snapshot)
 
     def _execute_step(self, db: Session, execution_id: UUID, step: dict[str, Any], context: dict[str, Any], engine: GenerationExecutionEngine) -> dict[str, Any]:
@@ -259,7 +294,12 @@ class GenerationModuleRuntimeService:
                 timeout_seconds=timeout, download_outputs=True,
                 progress_callback=lambda progress, message, meta=None: self._provider_progress(execution_id, step["key"], progress, message),
             )
-            return self._map_workflow_outputs(configuration, result.get("outputs") or [], result)
+            owner_id = self.get(execution_id).user_id
+            files = generation_module_result_service.register_files(
+                db, execution_id=execution_id, user_id=owner_id, files=result.get("outputs") or []
+            )
+            result["outputs"] = files
+            return self._map_workflow_outputs(configuration, files, result)
         payload = {
             "generation_module": {"step_key": step["key"], "workflow": workflow, "output_bindings": configuration.get("output_bindings", [])},
             "inputs": context,
@@ -274,7 +314,11 @@ class GenerationModuleRuntimeService:
             progress_callback=lambda progress, message, meta=None: self._provider_progress(execution_id, step["key"], progress, message),
             cancellation_callback=lambda: self.get(execution_id).cancel_requested,
         )
-        files = result.get("files") or []
+        owner_id = self.get(execution_id).user_id
+        files = generation_module_result_service.register_files(
+            db, execution_id=execution_id, user_id=owner_id, files=result.get("files") or []
+        )
+        result["files"] = files
         return self._map_workflow_outputs(configuration, files, result)
 
     def _provider_progress(self, execution_id: UUID, step_key: str, progress: float, message: str) -> None:

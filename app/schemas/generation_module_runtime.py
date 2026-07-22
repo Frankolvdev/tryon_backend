@@ -50,3 +50,8 @@ class GenerationModuleExecutionResponse(BaseModel):
     finished_at: datetime | None = None
     duration_ms: int | None = None
     cancel_requested: bool = False
+    pricing_rule_id: int | None = None
+    tokens_charged: int = 0
+    tokens_refunded: bool = False
+    currency: str | None = None
+    commercial_price: float | None = None

@@ -78,6 +78,26 @@ class StorageService:
         except Exception:
             return False
 
+    def save_bytes(
+        self,
+        db: Session,
+        *,
+        user_id: int | None,
+        content: bytes,
+        original_filename: str,
+        content_type: str | None,
+        folder: str,
+    ) -> StorageFile:
+        if self._s3_enabled(db):
+            return self._save_upload_file_s3(
+                db=db, user_id=user_id, content=content,
+                original_filename=original_filename, content_type=content_type, folder=folder,
+            )
+        return self._save_upload_file_local(
+            db=db, user_id=user_id, content=content,
+            original_filename=original_filename, content_type=content_type, folder=folder,
+        )
+
     def save_upload_file(
         self,
         db: Session,
