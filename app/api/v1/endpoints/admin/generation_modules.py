@@ -11,8 +11,19 @@ from app.schemas.generation_module import (
     GenerationModuleResponse,
     GenerationModuleUpdate,
 )
+from app.schemas.generation_module_authoring import (
+    GenerationModuleStepsReorderRequest,
+    PythonStepCreateRequest,
+    PythonStepUpdateRequest,
+    WorkflowStepBindingsUpdate,
+    WorkflowStepImportRequest,
+    WorkflowValidationResponse,
+)
 from app.services.audit_service import audit_service
 from app.services.generation_module_service import generation_module_service
+from app.services.generation_module_authoring_service import (
+    generation_module_authoring_service,
+)
 
 router = APIRouter()
 
@@ -118,3 +129,180 @@ def delete_generation_module(
         user_agent=request.headers.get("user-agent"),
     )
     return Response(status_code=204)
+
+
+@router.post(
+    "/generation-modules/workflows/validate",
+    response_model=WorkflowValidationResponse,
+)
+def validate_generation_module_workflow(
+    workflow_json: dict,
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_authoring_service.validate_workflow(workflow_json)
+
+
+@router.post(
+    "/generation-modules/{module_id}/steps/workflow",
+    response_model=GenerationModuleResponse,
+    status_code=201,
+)
+def import_generation_module_workflow_step(
+    module_id: int,
+    data: WorkflowStepImportRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.import_workflow_step(
+        db, module_id=module_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_workflow_imported",
+        entity_type="generation_module",
+        entity_id=str(module_id),
+        description=f"Imported workflow step {data.key} into generation module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.patch(
+    "/generation-modules/{module_id}/steps/{step_id}/workflow-bindings",
+    response_model=GenerationModuleResponse,
+)
+def update_generation_module_workflow_bindings(
+    module_id: int,
+    step_id: int,
+    data: WorkflowStepBindingsUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.update_workflow_bindings(
+        db, module_id=module_id, step_id=step_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_workflow_bindings_updated",
+        entity_type="generation_module_step",
+        entity_id=str(step_id),
+        description=f"Updated workflow bindings for generation module step {step_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.post(
+    "/generation-modules/{module_id}/steps/python",
+    response_model=GenerationModuleResponse,
+    status_code=201,
+)
+def create_generation_module_python_step(
+    module_id: int,
+    data: PythonStepCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.create_python_step(
+        db, module_id=module_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_python_step_created",
+        entity_type="generation_module",
+        entity_id=str(module_id),
+        description=f"Created Python step {data.key} in generation module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.patch(
+    "/generation-modules/{module_id}/steps/{step_id}/python",
+    response_model=GenerationModuleResponse,
+)
+def update_generation_module_python_step(
+    module_id: int,
+    step_id: int,
+    data: PythonStepUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.update_python_step(
+        db, module_id=module_id, step_id=step_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_python_step_updated",
+        entity_type="generation_module_step",
+        entity_id=str(step_id),
+        description=f"Updated Python generation module step {step_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.put(
+    "/generation-modules/{module_id}/steps/reorder",
+    response_model=GenerationModuleResponse,
+)
+def reorder_generation_module_steps(
+    module_id: int,
+    data: GenerationModuleStepsReorderRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.reorder_steps(
+        db, module_id=module_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_steps_reordered",
+        entity_type="generation_module",
+        entity_id=str(module_id),
+        description=f"Reordered steps for generation module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.delete(
+    "/generation-modules/{module_id}/steps/{step_id}",
+    response_model=GenerationModuleResponse,
+)
+def delete_generation_module_step(
+    module_id: int,
+    step_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.delete_step(
+        db, module_id=module_id, step_id=step_id
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_step_deleted",
+        entity_type="generation_module_step",
+        entity_id=str(step_id),
+        description=f"Deleted generation module step {step_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
