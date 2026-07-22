@@ -54,6 +54,7 @@ class Settings(BaseSettings):
 
     GENERATION_MAX_ACTIVE_EXECUTIONS_PER_USER: int = 3
     GENERATION_MAX_HISTORY_PAGE_SIZE: int = 100
+    GENERATION_USER_ALLOWED_ENGINES: str = "simulated,local_docker,runpod_serverless"
 
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587

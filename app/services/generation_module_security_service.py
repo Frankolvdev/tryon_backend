@@ -6,9 +6,22 @@ from app.core.config import settings
 
 
 class GenerationModuleSecurityService:
+    @staticmethod
+    def _user_allowed_engines() -> list[GenerationExecutionEngine]:
+        configured = [item.strip() for item in settings.GENERATION_USER_ALLOWED_ENGINES.split(",") if item.strip()]
+        allowed: list[GenerationExecutionEngine] = []
+        for value in configured:
+            try:
+                engine = GenerationExecutionEngine(value)
+            except ValueError:
+                continue
+            if engine not in allowed:
+                allowed.append(engine)
+        return allowed or [GenerationExecutionEngine.SIMULATED]
+
     def policy(self) -> dict:
         return {
-            "user_allowed_engines": [GenerationExecutionEngine.SIMULATED.value],
+            "user_allowed_engines": [item.value for item in self._user_allowed_engines()],
             "admin_allowed_engines": [item.value for item in GenerationExecutionEngine],
             "max_active_executions_per_user": settings.GENERATION_MAX_ACTIVE_EXECUTIONS_PER_USER,
             "max_history_page_size": settings.GENERATION_MAX_HISTORY_PAGE_SIZE,
@@ -17,7 +30,7 @@ class GenerationModuleSecurityService:
         }
 
     def ensure_user_can_start(self, runtime_service, *, user_id: int, engine: GenerationExecutionEngine) -> None:
-        if engine != GenerationExecutionEngine.SIMULATED:
+        if engine not in self._user_allowed_engines():
             raise AppException("This execution engine is not available to end users.")
         items, _ = runtime_service.list(user_id=user_id, skip=0, limit=1000)
         active = sum(1 for item in items if item.status in {"queued", "running"})

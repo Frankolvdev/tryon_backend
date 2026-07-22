@@ -121,6 +121,32 @@ class GenerationModuleRuntimeService:
         persisted = generation_module_execution_store_service.get(execution_id)
         if persisted is None:
             raise NotFoundException("Generation module execution not found.")
+        if (
+            persisted.status == "failed"
+            and persisted.user_id is not None
+            and persisted.tokens_charged > 0
+            and not persisted.tokens_refunded
+            and (persisted.error or "").startswith("Execution was interrupted because the backend process restarted")
+        ):
+            db = SessionLocal()
+            try:
+                refunded = generation_module_billing_service.refund(
+                    db,
+                    user_id=persisted.user_id,
+                    execution_id=str(persisted.id),
+                    module_key=persisted.module_key,
+                    tokens=persisted.tokens_charged,
+                    reason=persisted.error or "backend restart",
+                )
+                if refunded:
+                    persisted.tokens_refunded = True
+                    persisted.logs.append(GenerationModuleExecutionLog(
+                        timestamp=utc_now(),
+                        message=f"{persisted.tokens_charged} tokens refunded after backend restart.",
+                    ))
+                    generation_module_execution_store_service.save(persisted)
+            finally:
+                db.close()
         return persisted
 
 
