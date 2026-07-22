@@ -28,6 +28,18 @@ class PricingRuleRepository(BaseRepository[PricingRule]):
 
         return db.execute(statement).scalars().first()
 
+    def get_for_generation_module(self, db: Session, module_id: int) -> PricingRule | None:
+        statement = (
+            select(PricingRule)
+            .where(PricingRule.generation_module_id == module_id)
+            .order_by(PricingRule.is_active.desc(), PricingRule.id.desc())
+        )
+        return db.execute(statement).scalars().first()
+
+    def list_for_generation_module(self, db: Session, module_id: int) -> list[PricingRule]:
+        statement = select(PricingRule).where(PricingRule.generation_module_id == module_id)
+        return list(db.execute(statement).scalars().all())
+
     def list_all(self, db: Session) -> list[PricingRule]:
         statement = select(PricingRule).order_by(PricingRule.id.desc())
         return list(db.execute(statement).scalars().all())

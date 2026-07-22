@@ -48,6 +48,15 @@ class GenerationModuleStepDefinition(BaseModel):
     output_mapping: dict[str, Any] = Field(default_factory=dict)
 
 
+class GenerationModulePricingResponse(BaseModel):
+    id: int
+    required_tokens: int
+    final_price_usd: float
+    token_value_usd: float
+    currency: str
+    is_active: bool
+
+
 class GenerationModuleCreate(BaseModel):
     key: str = Field(min_length=2, max_length=150, pattern=KEY_PATTERN)
     name: str = Field(min_length=2, max_length=255)
@@ -59,6 +68,7 @@ class GenerationModuleCreate(BaseModel):
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
     is_active: bool = True
+    pricing_rule_id: int | None = Field(default=None, ge=1)
     inputs: list[GenerationModuleInputDefinition] = Field(default_factory=list)
     outputs: list[GenerationModuleOutputDefinition] = Field(default_factory=list)
     steps: list[GenerationModuleStepDefinition] = Field(default_factory=list)
@@ -96,6 +106,7 @@ class GenerationModuleUpdate(BaseModel):
     default_execution_engine: GenerationExecutionEngine | None = None
     metadata: dict[str, Any] | None = None
     is_active: bool | None = None
+    pricing_rule_id: int | None = Field(default=None, ge=1)
     inputs: list[GenerationModuleInputDefinition] | None = None
     outputs: list[GenerationModuleOutputDefinition] | None = None
     steps: list[GenerationModuleStepDefinition] | None = None
@@ -149,6 +160,8 @@ class GenerationModuleResponse(BaseModel):
     metadata: dict[str, Any]
     is_active: bool
     created_by_user_id: int | None
+    pricing_rule_id: int | None
+    pricing: GenerationModulePricingResponse | None
     inputs: list[GenerationModuleInputResponse]
     outputs: list[GenerationModuleOutputResponse]
     steps: list[GenerationModuleStepResponse]

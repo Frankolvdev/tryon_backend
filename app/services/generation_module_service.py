@@ -11,11 +11,14 @@ from app.models.generation_module import (
     GenerationModuleStep,
 )
 from app.repositories.generation_module_repository import generation_module_repository
+from app.repositories.pricing_rule_repository import pricing_rule_repository
+from app.services.pricing_service import pricing_service
 from app.schemas.generation_module import (
     GenerationModuleCreate,
     GenerationModuleInputDefinition,
     GenerationModuleInputResponse,
     GenerationModuleListResponse,
+    GenerationModulePricingResponse,
     GenerationModuleOutputDefinition,
     GenerationModuleOutputResponse,
     GenerationModuleResponse,
@@ -86,7 +89,16 @@ class GenerationModuleService:
             updated_at=item.updated_at,
         )
 
-    def _response(self, module: GenerationModule) -> GenerationModuleResponse:
+    def _response(self, db: Session, module: GenerationModule) -> GenerationModuleResponse:
+        rule = pricing_rule_repository.get_for_generation_module(db, module.id)
+        pricing = None
+        if rule is not None:
+            quote = pricing_service._to_response(db, rule)
+            pricing = GenerationModulePricingResponse(
+                id=quote.id, required_tokens=quote.required_tokens,
+                final_price_usd=quote.final_price_usd, token_value_usd=quote.token_value_usd,
+                currency=quote.currency, is_active=quote.is_active,
+            )
         return GenerationModuleResponse(
             id=module.id,
             key=module.key,
@@ -98,6 +110,8 @@ class GenerationModuleService:
             metadata=self._parse(module.metadata_json, {}),
             is_active=module.is_active,
             created_by_user_id=module.created_by_user_id,
+            pricing_rule_id=rule.id if rule else None,
+            pricing=pricing,
             inputs=[self._input_response(item) for item in module.inputs],
             outputs=[self._output_response(item) for item in module.outputs],
             steps=[self._step_response(item) for item in module.steps],
@@ -156,7 +170,19 @@ class GenerationModuleService:
         return module
 
     def get_response(self, db: Session, *, module_id: int) -> GenerationModuleResponse:
-        return self._response(self.get(db, module_id=module_id))
+        return self._response(db, self.get(db, module_id=module_id))
+
+    def _bind_pricing_rule(self, db: Session, *, module_id: int, pricing_rule_id: int | None) -> None:
+        for current in pricing_rule_repository.list_for_generation_module(db, module_id):
+            if pricing_rule_id is None or current.id != pricing_rule_id:
+                current.generation_module_id = None
+                db.add(current)
+        if pricing_rule_id is not None:
+            selected = pricing_rule_repository.get_by_id(db, pricing_rule_id)
+            if not selected:
+                raise NotFoundException("Pricing rule not found.")
+            selected.generation_module_id = module_id
+            db.add(selected)
 
     def list_modules(
         self,
@@ -188,8 +214,9 @@ class GenerationModuleService:
             is_active=is_active,
             search=search,
         )
+        response_items = [self._response(db, item) for item in items]
         return GenerationModuleListResponse(
-            items=[self._response(item) for item in items],
+            items=response_items,
             total=total,
             skip=skip,
             limit=limit,
@@ -224,6 +251,7 @@ class GenerationModuleService:
         module.inputs = [self._input_model(module.id, item) for item in data.inputs]
         module.outputs = [self._output_model(module.id, item) for item in data.outputs]
         module.steps = [self._step_model(module.id, item) for item in data.steps]
+        self._bind_pricing_rule(db, module_id=module.id, pricing_rule_id=data.pricing_rule_id)
         db.commit()
         return self.get_response(db, module_id=module.id)
 
@@ -255,6 +283,8 @@ class GenerationModuleService:
             module.outputs.clear()
             db.flush()
             module.outputs = [self._output_model(module.id, item) for item in data.outputs]
+        if "pricing_rule_id" in data.model_fields_set:
+            self._bind_pricing_rule(db, module_id=module.id, pricing_rule_id=data.pricing_rule_id)
         if data.steps is not None:
             module.steps.clear()
             db.flush()
