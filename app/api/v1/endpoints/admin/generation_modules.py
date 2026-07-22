@@ -306,3 +306,35 @@ def delete_generation_module_step(
         user_agent=request.headers.get("user-agent"),
     )
     return result
+
+
+# Generation module test runtime
+from uuid import UUID
+from app.schemas.generation_module_runtime import GenerationModuleExecutionCreate, GenerationModuleExecutionResponse
+from app.services.generation_module_runtime_service import generation_module_runtime_service
+
+
+@router.post("/generation-modules/{module_id}/executions", response_model=GenerationModuleExecutionResponse, status_code=202)
+def execute_generation_module(
+    module_id: int,
+    data: GenerationModuleExecutionCreate,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_runtime_service.create(db, module_id=module_id, data=data)
+
+
+@router.get("/generation-modules/executions/{execution_id}", response_model=GenerationModuleExecutionResponse)
+def get_generation_module_execution(
+    execution_id: UUID,
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_runtime_service.get(execution_id)
+
+
+@router.post("/generation-modules/executions/{execution_id}/cancel", response_model=GenerationModuleExecutionResponse)
+def cancel_generation_module_execution(
+    execution_id: UUID,
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_runtime_service.cancel(execution_id)
