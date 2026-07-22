@@ -23,6 +23,7 @@ from app.schemas.generation_module_runtime import (
 )
 from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
 from app.services.generation_module_service import generation_module_service
+from app.services.generation_module_file_materializer_service import generation_module_file_materializer_service
 from app.services.generation_module_security_service import generation_module_security_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
 
@@ -208,7 +209,7 @@ class GenerationModuleRuntimeService:
             return self._execute_python(step, context)
         if step["step_type"] != GenerationModuleStepType.WORKFLOW.value:
             raise AppException(f"Unsupported generation module step type: {step['step_type']}")
-        workflow, configuration = self._prepare_workflow(step, context)
+        workflow, configuration, engine_files = self._prepare_workflow(db, execution_id, step, context, engine)
         if engine == GenerationExecutionEngine.SIMULATED:
             simulation = configuration.get("simulation") or {}
             duration_ms = max(150, min(int(simulation.get("duration_ms") or 1200), 15000))
@@ -230,14 +231,14 @@ class GenerationModuleRuntimeService:
                     "preview_url": simulation.get("preview_url"),
                 })
             result = {
-                "workflow_preview": workflow, "engine": engine.value,
+                "workflow_preview": workflow, "engine": engine.value, "materialized_inputs": engine_files,
                 "execution_mode": "simulated", "files": files,
                 "simulation": {"duration_ms": duration_ms, "checkpoints": checkpoints},
             }
             return self._map_workflow_outputs(configuration, files, result)
         timeout = int(configuration.get("timeout_seconds") or 900)
         if engine == GenerationExecutionEngine.LOCAL_DOCKER:
-            queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow)
+            queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow, extra_data={"generation_execution_id": str(execution_id), "materialized_inputs": engine_files})
             with self._lock:
                 self._provider_refs[execution_id] = {"engine": engine.value, "prompt_id": queued["prompt_id"], "client_id": queued["client_id"]}
             result = comfyui_local_adapter_service.execute_queued_prompt(
@@ -249,6 +250,7 @@ class GenerationModuleRuntimeService:
         payload = {
             "generation_module": {"step_key": step["key"], "workflow": workflow, "output_bindings": configuration.get("output_bindings", [])},
             "inputs": context,
+            "files": engine_files,
         }
         submitted = runpod_serverless_adapter_service.submit_job(db, input_data=payload)
         with self._lock:
@@ -270,20 +272,48 @@ class GenerationModuleRuntimeService:
             item.progress = min(89, max(item.progress, int(progress * 0.85)))
             item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), step_key=step_key, message=message))
 
-    @staticmethod
-    def _prepare_workflow(step: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _prepare_workflow(
+        self,
+        db: Session,
+        execution_id: UUID,
+        step: dict[str, Any],
+        context: dict[str, Any],
+        engine: GenerationExecutionEngine,
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
         configuration = copy.deepcopy(step.get("configuration") or {})
         workflow = configuration.get("workflow")
         if not isinstance(workflow, dict):
             raise AppException(f"Workflow step '{step['key']}' has no workflow JSON.")
+        materialized: list[dict[str, Any]] = []
+        cache: dict[str, dict[str, Any]] = {}
         for binding in configuration.get("input_bindings", []):
             source_key = binding.get("module_input_key")
             value = context.get(source_key)
             node = workflow.get(str(binding.get("node_id")))
             if not isinstance(node, dict):
                 raise AppException(f"Workflow node '{binding.get('node_id')}' was not found.")
+            if isinstance(value, dict) and value.get("__generation_file__"):
+                cached = cache.get(str(source_key))
+                if cached is None:
+                    if engine == GenerationExecutionEngine.LOCAL_DOCKER:
+                        cached = generation_module_file_materializer_service.materialize_local(
+                            db, execution_id=execution_id, module_input_key=str(source_key), reference=value
+                        )
+                    elif engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:
+                        cached = generation_module_file_materializer_service.materialize_runpod(
+                            db, execution_id=execution_id, module_input_key=str(source_key), reference=value
+                        )
+                    else:
+                        cached = {
+                            "module_input_key": str(source_key),
+                            "engine": "simulated",
+                            "relative_name": value.get("filename") or source_key,
+                        }
+                    cache[str(source_key)] = cached
+                    materialized.append(cached)
+                value = cached.get("relative_name") or cached.get("target_name") or cached.get("filename")
             node.setdefault("inputs", {})[binding["input_field"]] = value
-        return workflow, configuration
+        return workflow, configuration, materialized
 
     @staticmethod
     def _map_workflow_outputs(configuration: dict[str, Any], files: list[dict[str, Any]], raw: dict[str, Any]) -> dict[str, Any]:

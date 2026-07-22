@@ -100,6 +100,30 @@ class ComfyUILocalAdapterService:
                 "error": str(error),
             }
 
+    def upload_input(
+        self,
+        *,
+        content: bytes,
+        filename: str,
+        content_type: str,
+        subfolder: str = "",
+    ) -> dict[str, Any]:
+        files = {"image": (filename, content, content_type)}
+        data = {"type": "input", "overwrite": "false"}
+        if subfolder:
+            data["subfolder"] = subfolder
+        with httpx.Client(timeout=self._timeout_seconds()) as client:
+            response = client.post(
+                f"{self._base_url()}/upload/image",
+                files=files,
+                data=data,
+            )
+            response.raise_for_status()
+            result = response.json()
+        if not isinstance(result, dict) or not result.get("name"):
+            raise RuntimeError("ComfyUI did not accept the generation input file.")
+        return result
+
     def queue_prompt(
         self,
         *,
