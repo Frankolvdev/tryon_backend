@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.exception_handlers import (
     app_exception_handler,
     localized_exception_handler,
 )
+from app.api.v1.deps import get_db
 from app.api.v1.router import api_router
 from app.common.exceptions import AppException
 from app.common.localized_exceptions import (
@@ -21,6 +26,7 @@ from app.middleware.rate_limit_middleware import (
     RateLimitMiddleware,
 )
 from app.middleware.security_headers_middleware import SecurityHeadersMiddleware
+from app.services.runtime_settings_service import runtime_settings_service
 
 
 app = FastAPI(
@@ -131,6 +137,39 @@ app.include_router(
     api_router,
     prefix="/api/v1",
 )
+
+
+@app.get(
+    "/local-files/{object_key:path}",
+    include_in_schema=False,
+)
+def serve_local_file(
+    object_key: str,
+    db: Session = Depends(get_db),
+):
+    storage_root = Path(
+        runtime_settings_service.local_storage_dir(db)
+    ).resolve()
+    requested_file = (storage_root / object_key).resolve()
+
+    try:
+        requested_file.relative_to(storage_root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="File not found.",
+        ) from exc
+
+    if not requested_file.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="File not found.",
+        )
+
+    return FileResponse(
+        path=requested_file,
+        filename=requested_file.name,
+    )
 
 
 # ---------------------------------------------------------------------------
