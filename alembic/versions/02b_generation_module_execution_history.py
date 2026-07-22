@@ -1,6 +1,6 @@
 """persist generation module execution history
 
-Revision ID: 02b_generation_module_execution_history
+Revision ID: 02b_gen_exec_history
 Revises: 02a_generation_modules
 Create Date: 2026-07-21
 """
@@ -9,7 +9,7 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "02b_generation_module_execution_history"
+revision: str = "02b_gen_exec_history"
 down_revision: Union[str, Sequence[str], None] = "02a_generation_modules"
 branch_labels = None
 depends_on = None
