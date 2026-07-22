@@ -44,6 +44,7 @@ from app.models.feature_flag import FeatureFlag
 from app.models.feature_permission import (
     FeaturePermission,
 )
+from app.models.generation_module_execution import GenerationModuleExecution
 from app.models.generation_module import (
     GenerationModule,
     GenerationModuleInput,
@@ -156,6 +157,7 @@ __all__ = [
     "ExternalAiJob",
     "FeatureFlag",
     "FeaturePermission",
+    "GenerationModuleExecution",
     "GenerationModule",
     "GenerationModuleInput",
     "GenerationModuleOutput",

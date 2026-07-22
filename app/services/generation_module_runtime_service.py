@@ -25,6 +25,7 @@ from app.services.comfyui_local_adapter_service import comfyui_local_adapter_ser
 from app.services.generation_module_service import generation_module_service
 from app.services.generation_module_file_materializer_service import generation_module_file_materializer_service
 from app.services.generation_module_security_service import generation_module_security_service
+from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
 
 
@@ -54,6 +55,7 @@ class GenerationModuleRuntimeService:
         with self._lock:
             self._items[execution.id] = execution
             self._owners[execution.id] = user_id
+        generation_module_execution_store_service.save(execution)
         self._executor.submit(self._run, execution.id, module.model_dump(mode="python"))
         return self.get(execution.id)
 
@@ -100,16 +102,19 @@ class GenerationModuleRuntimeService:
     def get(self, execution_id: UUID) -> GenerationModuleExecutionResponse:
         with self._lock:
             item = self._items.get(execution_id)
-            if not item:
-                raise NotFoundException("Generation module execution not found.")
-            return item.model_copy(deep=True)
+            if item:
+                return item.model_copy(deep=True)
+        persisted = generation_module_execution_store_service.get(execution_id)
+        if persisted is None:
+            raise NotFoundException("Generation module execution not found.")
+        return persisted
 
 
     def get_for_user(self, execution_id: UUID, *, user_id: int) -> GenerationModuleExecutionResponse:
-        with self._lock:
-            if self._owners.get(execution_id) != user_id:
-                raise NotFoundException("Generation module execution not found.")
-        return self.get(execution_id)
+        item = self.get(execution_id)
+        if item.user_id != user_id:
+            raise NotFoundException("Generation module execution not found.")
+        return item
 
     def cancel_for_user(self, execution_id: UUID, *, user_id: int) -> GenerationModuleExecutionResponse:
         self.get_for_user(execution_id, user_id=user_id)
@@ -124,7 +129,9 @@ class GenerationModuleRuntimeService:
                 return item.model_copy(deep=True)
             item.cancel_requested = True
             item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="warning", message="Cancellation requested."))
+            snapshot = item.model_copy(deep=True)
             provider = copy.deepcopy(self._provider_refs.get(execution_id) or {})
+        generation_module_execution_store_service.save(snapshot)
         if provider.get("engine") == GenerationExecutionEngine.LOCAL_DOCKER.value and provider.get("prompt_id"):
             comfyui_local_adapter_service.cancel_prompt(prompt_id=provider["prompt_id"])
         elif provider.get("engine") == GenerationExecutionEngine.RUNPOD_SERVERLESS.value and provider.get("provider_job_id"):
@@ -153,6 +160,8 @@ class GenerationModuleRuntimeService:
             item = self._items[execution_id]
             item.status = "running"; item.started_at = started
             item.logs.append(GenerationModuleExecutionLog(timestamp=started, message="Execution started."))
+            running_snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(running_snapshot)
         try:
             steps = [s for s in sorted(module["steps"], key=lambda row: row["position"]) if s["is_enabled"]]
             for index, step in enumerate(steps):
@@ -178,6 +187,8 @@ class GenerationModuleRuntimeService:
                     item.context.update(outputs)
                     item.progress = int(((index + 1) / max(len(steps), 1)) * 90)
                     item.logs.append(GenerationModuleExecutionLog(timestamp=finished, step_key=step["key"], message=f"Step '{step['name']}' completed."))
+                    step_snapshot = item.model_copy(deep=True)
+                generation_module_execution_store_service.save(step_snapshot)
             with self._lock:
                 item = self._items[execution_id]
                 if item.status != "cancelled":
@@ -203,6 +214,8 @@ class GenerationModuleRuntimeService:
                 item = self._items[execution_id]; item.finished_at = finished
                 item.duration_ms = int((finished - started).total_seconds() * 1000)
                 self._provider_refs.pop(execution_id, None)
+                final_snapshot = item.model_copy(deep=True)
+            generation_module_execution_store_service.save(final_snapshot)
 
     def _execute_step(self, db: Session, execution_id: UUID, step: dict[str, Any], context: dict[str, Any], engine: GenerationExecutionEngine) -> dict[str, Any]:
         if step["step_type"] == GenerationModuleStepType.PYTHON.value:
@@ -271,6 +284,8 @@ class GenerationModuleRuntimeService:
                 return
             item.progress = min(89, max(item.progress, int(progress * 0.85)))
             item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), step_key=step_key, message=message))
+            progress_snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(progress_snapshot)
 
     def _prepare_workflow(
         self,
@@ -371,19 +386,24 @@ class GenerationModuleRuntimeService:
 
 generation_module_runtime_service = GenerationModuleRuntimeService()
 
-# Incremental history helpers used by AppWeb and BackOffice.
+# Persistent history helpers used by AppWeb and BackOffice.
 def _runtime_list(self, *, user_id: int | None = None, module_id: int | None = None, status: str | None = None, skip: int = 0, limit: int = 100):
+    persisted, _ = generation_module_execution_store_service.list(
+        user_id=user_id, module_id=module_id, status=status, skip=0, limit=10000
+    )
     with self._lock:
-        items = list(self._items.values())
-        owners = dict(self._owners)
-    if user_id is not None:
-        items = [item for item in items if owners.get(item.id) == user_id]
-    if module_id is not None:
-        items = [item for item in items if item.module_id == module_id]
-    if status:
-        items = [item for item in items if item.status == status]
-    items.sort(key=lambda item: item.created_at, reverse=True)
-    return [item.model_copy(deep=True) for item in items[skip:skip + limit]], len(items)
+        active = [item.model_copy(deep=True) for item in self._items.values()]
+    merged = {item.id: item for item in persisted}
+    for item in active:
+        if user_id is not None and item.user_id != user_id:
+            continue
+        if module_id is not None and item.module_id != module_id:
+            continue
+        if status and item.status != status:
+            continue
+        merged[item.id] = item
+    items = sorted(merged.values(), key=lambda item: item.created_at, reverse=True)
+    return items[skip:skip + limit], len(items)
 
 
 def _runtime_retry(self, db: Session, execution_id: UUID, *, user_id: int | None = None, engine=None):
@@ -401,6 +421,7 @@ def _runtime_delete(self, execution_id: UUID, *, user_id: int | None = None):
         self._items.pop(execution_id, None)
         self._owners.pop(execution_id, None)
         self._provider_refs.pop(execution_id, None)
+    generation_module_execution_store_service.delete(execution_id)
 
 
 GenerationModuleRuntimeService.list = _runtime_list
