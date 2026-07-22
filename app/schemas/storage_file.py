@@ -8,6 +8,9 @@ from app.common.enums import StorageProvider
 class StorageFileResponse(BaseModel):
     id: int
     user_id: int | None
+    user_email: str | None = None
+    user_full_name: str | None = None
+    user_role: str | None = None
     provider: StorageProvider
     bucket: str | None
     object_key: str
