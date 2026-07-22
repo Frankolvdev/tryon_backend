@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
+from app.common.responses import SuccessResponse
 from app.models.user import User
 from app.schemas.pricing import (
     CommercialPricePreviewRequest,
@@ -90,6 +91,16 @@ def update_pricing_rule(
     current_admin: User = Depends(admin_guard),
 ):
     return pricing_service.update_rule(db=db, rule_id=rule_id, data=data)
+
+
+@router.delete("/pricing-rules/{rule_id}", response_model=SuccessResponse)
+def delete_pricing_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    pricing_service.delete_rule(db=db, rule_id=rule_id)
+    return SuccessResponse(message="Pricing rule deleted successfully.")
 
 
 @router.post("/commercial-reprice", response_model=CommercialRepriceResponse)

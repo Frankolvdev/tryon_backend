@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.common.enums import PricingOperationType, QualityMode, TryOnItemType
 from app.common.exceptions import NotFoundException
+from app.models.generation_module import GenerationModule
 from app.models.pricing_rule import PricingRule
 from app.repositories.pricing_rule_repository import pricing_rule_repository
 from app.repositories.system_setting_repository import system_setting_repository
@@ -114,6 +115,7 @@ class PricingService:
         )
         return PricingRuleResponse(
             id=rule.id,
+            title=rule.title,
             operation_type=rule.operation_type,
             item_type=rule.item_type,
             quality_mode=rule.quality_mode,
@@ -179,6 +181,7 @@ class PricingService:
         rule = pricing_rule_repository.create(
             db,
             data={
+                "title": data.title.strip(),
                 "operation_type": data.operation_type.value,
                 "item_type": data.item_type.value,
                 "quality_mode": data.quality_mode.value,
@@ -219,12 +222,29 @@ class PricingService:
             "margin_percent": round(desired_profit),
             "tokens_cost": preview.required_tokens,
         }
+        if data.title is not None:
+            update_data["title"] = data.title.strip()
         if "generation_module_id" in data.model_fields_set:
             update_data["generation_module_id"] = data.generation_module_id
         if data.is_active is not None:
             update_data["is_active"] = data.is_active
         rule = pricing_rule_repository.update(db, db_obj=rule, data=update_data)
         return self._to_response(db, rule)
+
+
+    def delete_rule(self, db: Session, rule_id: int) -> None:
+        rule = pricing_rule_repository.get_by_id(db, rule_id)
+        if not rule:
+            raise NotFoundException("Pricing rule not found.")
+
+        if rule.generation_module_id is not None:
+            module = db.get(GenerationModule, rule.generation_module_id)
+            if module is not None:
+                module.is_active = False
+                db.add(module)
+
+        db.delete(rule)
+        db.commit()
 
     def reprice_catalog(self, db: Session) -> dict[str, int | float | str]:
         from decimal import Decimal

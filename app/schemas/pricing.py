@@ -31,8 +31,9 @@ class CommercialPricePreviewResponse(BaseModel):
 
 
 class PricingRuleCreate(BaseModel):
+    title: str = Field(min_length=2, max_length=255)
     operation_type: PricingOperationType = PricingOperationType.TRYON
-    item_type: TryOnItemType
+    item_type: TryOnItemType = TryOnItemType.CLOTHING
     quality_mode: QualityMode = QualityMode.STANDARD
     generation_module_id: int | None = Field(default=None, ge=1)
     average_execution_cost_usd: float = Field(ge=0)
@@ -41,6 +42,7 @@ class PricingRuleCreate(BaseModel):
 
 
 class PricingRuleUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=255)
     generation_module_id: int | None = Field(default=None, ge=1)
     average_execution_cost_usd: float | None = Field(default=None, ge=0)
     desired_profit_percent: float | None = Field(default=None, ge=0, le=10000)
@@ -49,6 +51,7 @@ class PricingRuleUpdate(BaseModel):
 
 class PricingRuleResponse(BaseModel):
     id: int
+    title: str
     operation_type: PricingOperationType
     item_type: TryOnItemType
     quality_mode: QualityMode

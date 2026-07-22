@@ -173,10 +173,17 @@ class GenerationModuleService:
         return self._response(db, self.get(db, module_id=module_id))
 
     def _bind_pricing_rule(self, db: Session, *, module_id: int, pricing_rule_id: int | None) -> None:
+        module = generation_module_repository.get_by_id(db, module_id)
         for current in pricing_rule_repository.list_for_generation_module(db, module_id):
             if pricing_rule_id is None or current.id != pricing_rule_id:
                 current.generation_module_id = None
                 db.add(current)
+        if pricing_rule_id is None:
+            if module is not None:
+                module.is_active = False
+                db.add(module)
+            return
+
         if pricing_rule_id is not None:
             selected = pricing_rule_repository.get_by_id(db, pricing_rule_id)
             if not selected:
@@ -243,7 +250,7 @@ class GenerationModuleService:
             category=data.category,
             default_execution_engine=data.default_execution_engine.value,
             metadata_json=self._serialize(data.metadata),
-            is_active=data.is_active,
+            is_active=(data.is_active and data.pricing_rule_id is not None),
             created_by_user_id=created_by_user_id,
         )
         db.add(module)
