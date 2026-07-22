@@ -49,6 +49,19 @@ def cancel_my_generation_execution(
 from app.schemas.generation_module_operations import GenerationExecutionListResponse, GenerationExecutionRetryRequest
 
 
+@router.get("/active-executions", response_model=GenerationExecutionListResponse)
+def list_my_active_generation_executions(
+    module_id: int | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=100),
+    current_user: User = Depends(auth_guard),
+):
+    items, _ = generation_module_runtime_service.list(
+        user_id=current_user.id, module_id=module_id, skip=0, limit=limit
+    )
+    active = [item for item in items if item.status in {"queued", "running"}]
+    return GenerationExecutionListResponse(items=active, total=len(active), skip=0, limit=limit)
+
+
 @router.get("/execution-history", response_model=GenerationExecutionListResponse)
 def list_my_generation_executions(module_id: int | None = Query(default=None), status: str | None = Query(default=None), skip: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100), current_user: User = Depends(auth_guard)):
     items, total = generation_module_runtime_service.list(user_id=current_user.id, module_id=module_id, status=status, skip=skip, limit=limit)
