@@ -7,7 +7,7 @@ import threading
 import time
 import tempfile
 from pathlib import Path
-from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any
 from uuid import UUID, uuid4
 
