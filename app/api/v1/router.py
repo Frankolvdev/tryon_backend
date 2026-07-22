@@ -30,6 +30,7 @@ from app.api.v1.endpoints import (
     tokens,
     tryon,
     user_mfa,
+    user_library,
     user_notifications,
     users,
     webhooks,
@@ -147,6 +148,13 @@ api_router.include_router(
     prefix="/worker-jobs",
     tags=["Worker Jobs"],
 )
+
+api_router.include_router(
+    user_library.router,
+    prefix="/user-library",
+    tags=["User Library"],
+)
+
 api_router.include_router(
     user_notifications.router,
     prefix="/user-notifications",

@@ -52,6 +52,7 @@ from app.api.v1.endpoints.admin import (
     search,
     security_blocks,
     storage,
+    user_library,
     subscription_plans,
     subscriptions,
     support,
@@ -321,3 +322,5 @@ admin_router.include_router(
     activity.router,
     tags=["Admin - Activity"],
 )
+
+admin_router.include_router(user_library.router, tags=["User Library Admin"])
