@@ -155,6 +155,8 @@ class GenerationModuleAuthoringService:
             "workflow": data.workflow_json,
             "input_bindings": [item.model_dump() for item in input_bindings],
             "output_bindings": [item.model_dump() for item in data.output_bindings],
+            "input_ports": [item.model_dump() for item in data.input_ports],
+            "output_ports": [item.model_dump() for item in data.output_ports],
         }
         db.add(
             GenerationModuleStep(
@@ -213,6 +215,10 @@ class GenerationModuleAuthoringService:
         configuration["workflow"] = workflow_json
         configuration["input_bindings"] = [item.model_dump() for item in input_bindings]
         configuration["output_bindings"] = [item.model_dump() for item in output_bindings]
+        if data.input_ports is not None:
+            configuration["input_ports"] = [item.model_dump() for item in data.input_ports]
+        if data.output_ports is not None:
+            configuration["output_ports"] = [item.model_dump() for item in data.output_ports]
         step.configuration_json = self._json(configuration)
         db.add(step)
         db.commit()
@@ -258,6 +264,8 @@ class GenerationModuleAuthoringService:
             "source_code": data.source_code,
             "entrypoint": data.entrypoint,
             "timeout_seconds": data.timeout_seconds,
+            "input_ports": [item.model_dump() for item in data.input_ports],
+            "output_ports": [item.model_dump() for item in data.output_ports],
         }
         db.add(
             GenerationModuleStep(
@@ -303,6 +311,10 @@ class GenerationModuleAuthoringService:
         configuration["entrypoint"] = entrypoint
         if data.timeout_seconds is not None:
             configuration["timeout_seconds"] = data.timeout_seconds
+        if data.input_ports is not None:
+            configuration["input_ports"] = [item.model_dump() for item in data.input_ports]
+        if data.output_ports is not None:
+            configuration["output_ports"] = [item.model_dump() for item in data.output_ports]
         step.configuration_json = self._json(configuration)
         if data.input_mapping is not None:
             step.input_mapping_json = self._json(data.input_mapping)
