@@ -313,16 +313,19 @@ def delete_generation_module_step(
 from uuid import UUID
 from app.schemas.generation_module_runtime import GenerationModuleExecutionCreate, GenerationModuleExecutionResponse
 from app.services.generation_module_runtime_service import generation_module_runtime_service
+from app.services.generation_module_upload_service import generation_module_upload_service
 
 
 @router.post("/generation-modules/{module_id}/executions", response_model=GenerationModuleExecutionResponse, status_code=202)
-def execute_generation_module(
+async def execute_generation_module(
     module_id: int,
-    data: GenerationModuleExecutionCreate,
     request: Request,
     db: Session = Depends(get_db),
     current_admin: User = Depends(admin_guard),
 ):
+    data = await generation_module_upload_service.parse_execution_request(
+        db, module_id=module_id, request=request, user_id=None
+    )
     result = generation_module_runtime_service.create(db, module_id=module_id, data=data)
     audit_service.create_log(db, actor_user_id=current_admin.id, action="admin_generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started {result.engine.value if hasattr(result.engine, 'value') else result.engine} execution for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
     return result

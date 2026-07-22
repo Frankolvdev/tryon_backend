@@ -92,6 +92,9 @@ class GenerationModuleRuntimeService:
                 raise AppException(f"Module input '{item.key}' must be boolean.")
             if item.input_type == "json" and not isinstance(value, (dict, list)):
                 raise AppException(f"Module input '{item.key}' must contain JSON data.")
+            if item.input_type in {"image", "file"}:
+                if not isinstance(value, dict) or not value.get("__generation_file__"):
+                    raise AppException(f"Module input '{item.key}' must contain an uploaded file.")
 
     def get(self, execution_id: UUID) -> GenerationModuleExecutionResponse:
         with self._lock:

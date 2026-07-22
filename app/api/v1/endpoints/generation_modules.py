@@ -11,6 +11,7 @@ from app.models.user import User
 from app.schemas.generation_module import GenerationModuleListResponse, GenerationModuleResponse
 from app.schemas.generation_module_runtime import GenerationModuleExecutionCreate, GenerationModuleExecutionResponse
 from app.services.generation_module_runtime_service import generation_module_runtime_service
+from app.services.generation_module_upload_service import generation_module_upload_service
 from app.services.generation_module_service import generation_module_service
 from app.services.audit_service import audit_service
 
@@ -59,15 +60,17 @@ def get_available_generation_module(
 
 
 @router.post("/{module_id}/executions", response_model=GenerationModuleExecutionResponse, status_code=202)
-def execute_available_generation_module(
+async def execute_available_generation_module(
     module_id: int,
-    data: GenerationModuleExecutionCreate,
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(auth_guard),
 ):
     # AppWeb begins with the safe deterministic engine. Local/RunPod remain admin-controlled.
-    payload = data.model_copy(update={"engine": GenerationExecutionEngine.SIMULATED})
+    payload = await generation_module_upload_service.parse_execution_request(
+        db, module_id=module_id, request=request, user_id=current_user.id,
+        forced_engine=GenerationExecutionEngine.SIMULATED,
+    )
     result = generation_module_runtime_service.create(
         db, module_id=module_id, data=payload, user_id=current_user.id
     )
