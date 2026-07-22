@@ -84,6 +84,25 @@ class GenerationModuleAuthoringService:
         if any(item.position == position and item.id != ignore_step_id for item in module.steps):
             raise ConflictException("A step already uses this position in the module.")
 
+
+    @staticmethod
+    def _dedupe_input_bindings(
+        bindings: list[WorkflowInputBinding],
+    ) -> list[WorkflowInputBinding]:
+        """Keep only the latest binding for each logical workflow input port."""
+        deduped: dict[tuple[str, ...], WorkflowInputBinding] = {}
+        order: list[tuple[str, ...]] = []
+        for binding in bindings:
+            key = (
+                ("port", binding.port_id)
+                if binding.port_id
+                else ("target", str(binding.node_id), binding.input_field)
+            )
+            if key not in deduped:
+                order.append(key)
+            deduped[key] = binding
+        return [deduped[key] for key in order]
+
     @staticmethod
     def _assert_bindings(
         module: GenerationModule,
@@ -92,6 +111,7 @@ class GenerationModuleAuthoringService:
         output_bindings: list[WorkflowOutputBinding],
     ) -> None:
         module_input_keys = {item.key for item in module.inputs}
+        module_output_keys = {item.key for item in module.outputs}
 
         for binding in input_bindings:
             if binding.module_input_key and binding.module_input_key not in module_input_keys:
@@ -107,6 +127,10 @@ class GenerationModuleAuthoringService:
                 )
 
         for binding in output_bindings:
+            if binding.module_output_key not in module_output_keys:
+                raise AppException(
+                    f"Module output '{binding.module_output_key}' does not exist."
+                )
             if str(binding.node_id) not in nodes:
                 raise AppException(f"Workflow node '{binding.node_id}' does not exist.")
 
@@ -122,16 +146,15 @@ class GenerationModuleAuthoringService:
             module, key=data.key, position=data.position
         )
         nodes = self._node_map(data.workflow_json)
+        input_bindings = self._dedupe_input_bindings(data.input_bindings)
         self._assert_bindings(
-            module, nodes, data.input_bindings, data.output_bindings
+            module, nodes, input_bindings, data.output_bindings
         )
         configuration = {
             "workflow_name": data.workflow_name,
             "workflow": data.workflow_json,
-            "input_bindings": [item.model_dump() for item in data.input_bindings],
+            "input_bindings": [item.model_dump() for item in input_bindings],
             "output_bindings": [item.model_dump() for item in data.output_bindings],
-            "input_ports": [item.model_dump() for item in data.input_ports],
-            "output_ports": [item.model_dump() for item in data.output_ports],
         }
         db.add(
             GenerationModuleStep(
@@ -175,6 +198,7 @@ class GenerationModuleAuthoringService:
         if output_bindings is None:
             output_bindings = [WorkflowOutputBinding(**item) for item in configuration.get("output_bindings", [])]
 
+        input_bindings = self._dedupe_input_bindings(input_bindings)
         nodes = self._node_map(workflow_json)
         self._assert_bindings(module, nodes, input_bindings, output_bindings)
 
@@ -189,10 +213,6 @@ class GenerationModuleAuthoringService:
         configuration["workflow"] = workflow_json
         configuration["input_bindings"] = [item.model_dump() for item in input_bindings]
         configuration["output_bindings"] = [item.model_dump() for item in output_bindings]
-        if data.input_ports is not None:
-            configuration["input_ports"] = [item.model_dump() for item in data.input_ports]
-        if data.output_ports is not None:
-            configuration["output_ports"] = [item.model_dump() for item in data.output_ports]
         step.configuration_json = self._json(configuration)
         db.add(step)
         db.commit()
@@ -215,8 +235,9 @@ class GenerationModuleAuthoringService:
         if not isinstance(workflow_json, dict):
             raise AppException("The workflow step has no valid workflow JSON.")
         nodes = self._node_map(workflow_json)
-        self._assert_bindings(module, nodes, data.input_bindings, data.output_bindings)
-        configuration["input_bindings"] = [item.model_dump() for item in data.input_bindings]
+        input_bindings = self._dedupe_input_bindings(data.input_bindings)
+        self._assert_bindings(module, nodes, input_bindings, data.output_bindings)
+        configuration["input_bindings"] = [item.model_dump() for item in input_bindings]
         configuration["output_bindings"] = [item.model_dump() for item in data.output_bindings]
         step.configuration_json = self._json(configuration)
         db.add(step)
@@ -237,8 +258,6 @@ class GenerationModuleAuthoringService:
             "source_code": data.source_code,
             "entrypoint": data.entrypoint,
             "timeout_seconds": data.timeout_seconds,
-            "input_ports": [item.model_dump() for item in data.input_ports],
-            "output_ports": [item.model_dump() for item in data.output_ports],
         }
         db.add(
             GenerationModuleStep(
@@ -284,10 +303,6 @@ class GenerationModuleAuthoringService:
         configuration["entrypoint"] = entrypoint
         if data.timeout_seconds is not None:
             configuration["timeout_seconds"] = data.timeout_seconds
-        if data.input_ports is not None:
-            configuration["input_ports"] = [item.model_dump() for item in data.input_ports]
-        if data.output_ports is not None:
-            configuration["output_ports"] = [item.model_dump() for item in data.output_ports]
         step.configuration_json = self._json(configuration)
         if data.input_mapping is not None:
             step.input_mapping_json = self._json(data.input_mapping)

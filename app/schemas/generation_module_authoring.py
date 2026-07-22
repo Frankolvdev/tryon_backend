@@ -5,19 +5,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.schemas.generation_module import KEY_PATTERN
 
 
-
-PORT_TYPE_PATTERN = r"^(image|images|mask|file|text|integer|float|boolean|json|metadata|auto)$"
-
-
-class GenerationNodePort(BaseModel):
-    id: str = Field(min_length=1, max_length=150, pattern=KEY_PATTERN)
-    label: str = Field(min_length=1, max_length=255)
-    data_type: str = Field(default="auto", pattern=PORT_TYPE_PATTERN)
-    node_id: str | None = Field(default=None, max_length=100)
-    field: str | None = Field(default=None, max_length=150)
-    is_required: bool = True
-
 class WorkflowInputBinding(BaseModel):
+    port_id: str | None = Field(default=None, min_length=1, max_length=150, pattern=KEY_PATTERN)
     module_input_key: str | None = Field(default=None, min_length=1, max_length=150, pattern=KEY_PATTERN)
     source_path: str | None = Field(default=None, min_length=1, max_length=300)
     node_id: str = Field(min_length=1, max_length=100)
@@ -44,8 +33,6 @@ class WorkflowStepImportRequest(BaseModel):
     workflow_json: dict[str, Any]
     input_bindings: list[WorkflowInputBinding] = Field(default_factory=list)
     output_bindings: list[WorkflowOutputBinding] = Field(default_factory=list)
-    input_ports: list[GenerationNodePort] = Field(default_factory=list)
-    output_ports: list[GenerationNodePort] = Field(default_factory=list)
     is_enabled: bool = True
 
     @field_validator("workflow_json")
@@ -78,8 +65,6 @@ class WorkflowStepUpdateRequest(BaseModel):
     workflow_json: dict[str, Any] | None = None
     input_bindings: list[WorkflowInputBinding] | None = None
     output_bindings: list[WorkflowOutputBinding] | None = None
-    input_ports: list[GenerationNodePort] | None = None
-    output_ports: list[GenerationNodePort] | None = None
     is_enabled: bool | None = None
 
     @field_validator("workflow_json")
@@ -100,8 +85,6 @@ class PythonStepCreateRequest(BaseModel):
     timeout_seconds: int = Field(default=300, ge=1, le=3600)
     input_mapping: dict[str, Any] = Field(default_factory=dict)
     output_mapping: dict[str, Any] = Field(default_factory=dict)
-    input_ports: list[GenerationNodePort] = Field(default_factory=list)
-    output_ports: list[GenerationNodePort] = Field(default_factory=list)
     is_enabled: bool = True
 
 
@@ -113,8 +96,6 @@ class PythonStepUpdateRequest(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
     input_mapping: dict[str, Any] | None = None
     output_mapping: dict[str, Any] | None = None
-    input_ports: list[GenerationNodePort] | None = None
-    output_ports: list[GenerationNodePort] | None = None
     is_enabled: bool | None = None
 
 
