@@ -34,6 +34,7 @@ from app.services.storage_service import storage_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
 from app.services.generation_job_queue_service import generation_job_queue_service
 from app.services.generation_job_orchestrator_service import generation_job_orchestrator_service
+from app.services.generation_runtime import GenerationRuntimeContext, GenerationRuntimeStepRegistry
 
 
 class GenerationModuleRuntimeService:
@@ -42,6 +43,7 @@ class GenerationModuleRuntimeService:
         self._provider_refs: dict[UUID, dict[str, str]] = {}
         self._owners: dict[UUID, int | None] = {}
         self._lock = threading.RLock()
+        self._runtime_steps = GenerationRuntimeStepRegistry(self)
 
     def create(self, db: Session, *, module_id: int, data: GenerationModuleExecutionCreate, user_id: int | None = None) -> GenerationModuleExecutionResponse:
         module = generation_module_service.get_response(db, module_id=module_id)
@@ -261,8 +263,7 @@ class GenerationModuleRuntimeService:
                     state.status = "completed"; state.finished_at = finished
                     state.duration_ms = int((finished - state.started_at).total_seconds() * 1000) if state.started_at else 0
                     state.outputs = outputs
-                    item.context[step["key"]] = outputs
-                    item.context.update(outputs)
+                    GenerationRuntimeContext.merge_step_outputs(item.context, step["key"], outputs)
                     item.progress = int(((index + 1) / max(len(steps), 1)) * 90)
                     item.logs.append(GenerationModuleExecutionLog(timestamp=finished, step_key=step["key"], message=f"Step '{step['name']}' completed."))
                     step_snapshot = item.model_copy(deep=True)
@@ -322,10 +323,16 @@ class GenerationModuleRuntimeService:
             generation_module_execution_store_service.save(final_snapshot)
 
     def _execute_step(self, db: Session, execution_id: UUID, step: dict[str, Any], context: dict[str, Any], engine: GenerationExecutionEngine) -> dict[str, Any]:
-        if step["step_type"] == GenerationModuleStepType.PYTHON.value:
-            return self._execute_python(db, execution_id, step, context)
-        if step["step_type"] != GenerationModuleStepType.WORKFLOW.value:
-            raise AppException(f"Unsupported generation module step type: {step['step_type']}")
+        return self._runtime_steps.execute(db, execution_id, step, context, engine)
+
+    def execute_workflow_step(
+        self,
+        db: Session,
+        execution_id: UUID,
+        step: dict[str, Any],
+        context: dict[str, Any],
+        engine: GenerationExecutionEngine,
+    ) -> dict[str, Any]:
         workflow, configuration, engine_files = self._prepare_workflow(db, execution_id, step, context, engine)
         if engine == GenerationExecutionEngine.SIMULATED:
             simulation = configuration.get("simulation") or {}
@@ -516,7 +523,7 @@ class GenerationModuleRuntimeService:
                 result[key] = matched[0] if len(matched) == 1 else matched
         return result
 
-    def _execute_python(
+    def execute_python_step(
         self,
         db: Session,
         execution_id: UUID,
@@ -528,16 +535,7 @@ class GenerationModuleRuntimeService:
         entrypoint = configuration.get("entrypoint") or "run"
         timeout = int(configuration.get("timeout_seconds") or 300)
 
-        mapped_inputs: dict[str, Any] = {}
-        for input_key, source_path in (step.get("input_mapping") or {}).items():
-            value: Any = context
-            for part in str(source_path or "").split("."):
-                if not part:
-                    continue
-                value = value.get(part) if isinstance(value, dict) else None
-            mapped_inputs[str(input_key)] = value
-
-        raw_inputs = mapped_inputs if mapped_inputs else copy.deepcopy(context)
+        raw_inputs = GenerationRuntimeContext.step_inputs(context, step.get("input_mapping"))
 
         # Python image ports receive real Pillow images instead of the internal
         # persisted-file reference used by the API and workflow runtime.
@@ -657,17 +655,8 @@ class GenerationModuleRuntimeService:
 
     @staticmethod
     def _resolve_module_outputs(definitions: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any]:
-        outputs: dict[str, Any] = {}
-        for definition in sorted(definitions, key=lambda row: row["position"]):
-            value: Any = context.get(definition.get("source_step_key")) if definition.get("source_step_key") else context
-            path = definition.get("source_path")
-            if path:
-                for part in path.split("."):
-                    value = value.get(part) if isinstance(value, dict) else None
-            if value is None:
-                value = context.get(definition["key"])
-            outputs[definition["key"]] = value
-        return outputs
+        return GenerationRuntimeContext.resolve_module_outputs(definitions, context)
+
 
 
 generation_module_runtime_service = GenerationModuleRuntimeService()
