@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from types import MappingProxyType
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -28,6 +28,7 @@ from app.services.generation_module_security_service import generation_module_se
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.generation_module_billing_service import generation_module_billing_service
 from app.services.generation_module_result_service import generation_module_result_service
+from app.services.storage_service import storage_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
 
 
@@ -280,7 +281,7 @@ class GenerationModuleRuntimeService:
 
     def _execute_step(self, db: Session, execution_id: UUID, step: dict[str, Any], context: dict[str, Any], engine: GenerationExecutionEngine) -> dict[str, Any]:
         if step["step_type"] == GenerationModuleStepType.PYTHON.value:
-            return self._execute_python(step, context)
+            return self._execute_python(db, execution_id, step, context)
         if step["step_type"] != GenerationModuleStepType.WORKFLOW.value:
             raise AppException(f"Unsupported generation module step type: {step['step_type']}")
         workflow, configuration, engine_files = self._prepare_workflow(db, execution_id, step, context, engine)
@@ -413,12 +414,18 @@ class GenerationModuleRuntimeService:
                 result[key] = matched[0] if len(matched) == 1 else matched
         return result
 
-    @staticmethod
-    def _execute_python(step: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    def _execute_python(
+        self,
+        db: Session,
+        execution_id: UUID,
+        step: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
         configuration = step.get("configuration") or {}
         source = configuration.get("source_code") or ""
         entrypoint = configuration.get("entrypoint") or "run"
         timeout = int(configuration.get("timeout_seconds") or 300)
+
         mapped_inputs: dict[str, Any] = {}
         for input_key, source_path in (step.get("input_mapping") or {}).items():
             value: Any = context
@@ -427,32 +434,121 @@ class GenerationModuleRuntimeService:
                     continue
                 value = value.get(part) if isinstance(value, dict) else None
             mapped_inputs[str(input_key)] = value
-        python_inputs = mapped_inputs if mapped_inputs else copy.deepcopy(context)
-        safe_builtins = MappingProxyType({
+
+        raw_inputs = mapped_inputs if mapped_inputs else copy.deepcopy(context)
+
+        # Python image ports receive real Pillow images instead of the internal
+        # persisted-file reference used by the API and workflow runtime.
+        def materialize(value: Any) -> Any:
+            if isinstance(value, dict) and value.get("__generation_file__"):
+                try:
+                    from PIL import Image
+                except ImportError as exc:
+                    raise AppException(
+                        "Pillow is required to use image inputs in Python nodes."
+                    ) from exc
+                content, _filename, _content_type = (
+                    generation_module_file_materializer_service._read_bytes(db, value)
+                )
+                image = Image.open(io.BytesIO(content))
+                image.load()
+                return image
+            if isinstance(value, dict):
+                return {key: materialize(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [materialize(item) for item in value]
+            return value
+
+        python_inputs = materialize(raw_inputs)
+
+        # CPython requires a real dict for frame builtins. MappingProxyType can
+        # trigger ``dictobject.c: bad argument to internal function`` while
+        # executing user functions, especially when an import is present.
+        allowed_import_roots = {"PIL", "math", "json", "io", "base64"}
+        real_import = __import__
+
+        def safe_import(name: str, globals=None, locals=None, fromlist=(), level=0):
+            root = name.split(".", 1)[0]
+            if root not in allowed_import_roots:
+                raise ImportError(f"Import '{name}' is not allowed in Python nodes.")
+            return real_import(name, globals, locals, fromlist, level)
+
+        safe_builtins: dict[str, Any] = {
             "len": len, "min": min, "max": max, "sum": sum, "sorted": sorted, "range": range,
             "enumerate": enumerate, "zip": zip, "str": str, "int": int, "float": float,
             "bool": bool, "dict": dict, "list": list, "tuple": tuple, "set": set,
             "abs": abs, "round": round, "any": any, "all": all, "isinstance": isinstance,
-            "Exception": Exception, "ValueError": ValueError,
-        })
+            "Exception": Exception, "ValueError": ValueError, "TypeError": TypeError,
+            "ImportError": ImportError, "__import__": safe_import,
+        }
         namespace: dict[str, Any] = {"__builtins__": safe_builtins, "json": json}
         exec(compile(source, f"generation_module_{step['key']}.py", "exec"), namespace, namespace)
         function = namespace.get(entrypoint)
         if not callable(function):
             raise AppException(f"Python entrypoint '{entrypoint}' was not found.")
+
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(function, python_inputs)
             try:
                 result = future.result(timeout=timeout)
             except FutureTimeoutError as exc:
                 raise AppException(f"Python step '{step['key']}' exceeded {timeout} seconds.") from exc
+
+        raw_result: dict[str, Any]
         if result is None:
-            raw_result: dict[str, Any] = {}
+            raw_result = {}
         else:
             raw_result = result if isinstance(result, dict) else {"result": result}
+
+        # Convert Pillow outputs back into persisted, JSON-safe generation-file
+        # references so they can be consumed by later Workflow/Python nodes.
+        def persist(value: Any, key_path: str) -> Any:
+            try:
+                from PIL import Image
+            except ImportError:
+                Image = None  # type: ignore[assignment]
+            if Image is not None and isinstance(value, Image.Image):
+                image = value
+                if image.mode not in {"RGB", "RGBA", "L"}:
+                    image = image.convert("RGBA")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                filename = f"{step['key']}-{key_path.replace('.', '-')}.png"
+                owner_id = self.get(execution_id).user_id
+                record = storage_service.save_bytes(
+                    db=db,
+                    user_id=owner_id,
+                    content=buffer.getvalue(),
+                    original_filename=filename,
+                    content_type="image/png",
+                    folder=f"generation-results/{execution_id}/python",
+                )
+                return {
+                    "__generation_file__": True,
+                    "storage_file_id": record.id,
+                    "provider": record.provider,
+                    "bucket": record.bucket,
+                    "object_key": record.object_key,
+                    "public_url": record.public_url,
+                    "filename": record.original_filename,
+                    "content_type": record.content_type,
+                    "size_bytes": record.size_bytes,
+                }
+            if isinstance(value, dict):
+                return {key: persist(item, f"{key_path}.{key}") for key, item in value.items()}
+            if isinstance(value, list):
+                return [persist(item, f"{key_path}.{index}") for index, item in enumerate(value)]
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return value
+            raise AppException(
+                f"Python output '{key_path}' returned unsupported type '{type(value).__name__}'."
+            )
+
+        raw_result = persist(raw_result, "result")
         output_mapping = step.get("output_mapping") or {}
         if not output_mapping:
             return raw_result
+
         mapped_result: dict[str, Any] = {}
         for output_key, result_path in output_mapping.items():
             value: Any = raw_result
