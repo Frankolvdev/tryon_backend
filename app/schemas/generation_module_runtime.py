@@ -62,3 +62,5 @@ class GenerationModuleExecutionResponse(BaseModel):
     provider_endpoint_id: str | None = None
     dispatch_attempts: int = 0
     heartbeat_at: datetime | None = None
+    runtime_metrics: dict[str, Any] = Field(default_factory=dict)
+    provider_metrics: dict[str, Any] = Field(default_factory=dict)

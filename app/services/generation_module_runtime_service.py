@@ -35,7 +35,11 @@ from app.services.storage_service import storage_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
 from app.services.generation_job_queue_service import generation_job_queue_service
 from app.services.generation_job_orchestrator_service import generation_job_orchestrator_service
-from app.services.generation_runtime import GenerationRuntimeContext, GenerationRuntimeStepRegistry
+from app.services.generation_runtime import (
+    GenerationRuntimeContext,
+    GenerationRuntimeStepRegistry,
+    RuntimeProviderRegistry,
+)
 
 
 class GenerationModuleRuntimeService:
@@ -340,8 +344,10 @@ class GenerationModuleRuntimeService:
                 if step.get("is_enabled")
             ),
         )
+        provider = RuntimeProviderRegistry.get(GenerationExecutionEngine.RUNPOD_SERVERLESS)
         payload = {
             "runtime_contract": "tryon.generation-runtime/v1",
+            "provider": {"key": provider.key, "remote": provider.remote},
             "execution_id": str(execution_id),
             "module": copy.deepcopy(module),
             "context": remote_context,
@@ -398,6 +404,14 @@ class GenerationModuleRuntimeService:
             remote_context = output.get("context")
             if isinstance(remote_context, dict):
                 item.context = self._normalize_remote_files(remote_context, result.get("files") or [])
+            item.runtime_metrics = copy.deepcopy(output.get("metrics") or {})
+            item.provider_metrics = {
+                "provider": str(result.get("provider") or "runpod_serverless"),
+                "execution_time_ms": result.get("execution_time"),
+                "delay_time_ms": result.get("delay_time"),
+                "provider_job_id": result.get("provider_job_id"),
+                "endpoint_id": result.get("endpoint_id"),
+            }
             item.status = "completed"
             item.progress = 100
             item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), message="Remote Generation Runtime completed the entire module in one RunPod job."))

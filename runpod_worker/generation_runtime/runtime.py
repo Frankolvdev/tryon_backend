@@ -17,6 +17,7 @@ import httpx
 from PIL import Image
 
 from .context import GenerationRuntimeContext
+from .metrics import RuntimeMetricsCollector
 
 
 class GenerationRuntime:
@@ -36,6 +37,7 @@ class GenerationRuntime:
             raise ValueError("Generation module payload is missing.")
         steps = [step for step in sorted(module.get("steps") or [], key=lambda row: row.get("position", 0)) if step.get("is_enabled")]
         states: list[dict[str, Any]] = []
+        metrics = RuntimeMetricsCollector()
         for index, step in enumerate(steps):
             started = time.monotonic()
             key = str(step.get("key") or f"step-{index + 1}")
@@ -50,14 +52,18 @@ class GenerationRuntime:
                 else:
                     raise ValueError(f"Unsupported generation module step type: {step_type}")
                 GenerationRuntimeContext.merge_step_outputs(context, key, outputs)
-                states.append({"step_key": key, "status": "completed", "duration_ms": int((time.monotonic()-started)*1000), "outputs": self._externalize(outputs)})
+                duration_ms = int((time.monotonic()-started)*1000)
+                metrics.add_step(step_key=key, step_type=step_type, duration_ms=duration_ms, status="completed")
+                states.append({"step_key": key, "step_type": step_type, "status": "completed", "duration_ms": duration_ms, "outputs": self._externalize(outputs)})
                 if progress:
                     progress(((index + 1) / max(len(steps), 1)) * 100, f"Step '{key}' completed.")
             except Exception as exc:
-                states.append({"step_key": key, "status": "failed", "duration_ms": int((time.monotonic()-started)*1000), "outputs": {}, "error": str(exc)})
-                return {"runtime_contract": self.CONTRACT, "status": "failed", "error": str(exc), "steps": states}
+                duration_ms = int((time.monotonic()-started)*1000)
+                metrics.add_step(step_key=key, step_type=str(step.get("step_type") or ""), duration_ms=duration_ms, status="failed")
+                states.append({"step_key": key, "step_type": str(step.get("step_type") or ""), "status": "failed", "duration_ms": duration_ms, "outputs": {}, "error": str(exc)})
+                return {"runtime_contract": self.CONTRACT, "status": "failed", "error": str(exc), "steps": states, "metrics": metrics.snapshot()}
         outputs = GenerationRuntimeContext.resolve_module_outputs(module.get("outputs") or [], context)
-        return {"runtime_contract": self.CONTRACT, "status": "completed", "steps": states, "outputs": self._externalize(outputs)}
+        return {"runtime_contract": self.CONTRACT, "status": "completed", "steps": states, "outputs": self._externalize(outputs), "context": self._externalize(context), "metrics": metrics.snapshot()}
 
     def _materialize(self, value: Any, directory: Path) -> Any:
         if isinstance(value, dict) and value.get("__generation_file__"):
