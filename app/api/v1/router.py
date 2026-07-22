@@ -13,6 +13,7 @@ from app.api.v1.endpoints import (
     billing_history,
     email_change,
     feature_flags,
+    generation_modules,
     health,
     i18n,
     job_progress,
@@ -125,6 +126,11 @@ api_router.include_router(
     tryon.router,
     prefix="/tryon",
     tags=["Try-On"],
+)
+api_router.include_router(
+    generation_modules.router,
+    prefix="/generation-modules",
+    tags=["Generation Modules"],
 )
 api_router.include_router(
     background_jobs.router,

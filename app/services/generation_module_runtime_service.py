@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from types import MappingProxyType
 from typing import Any
@@ -29,10 +30,11 @@ class GenerationModuleRuntimeService:
     def __init__(self) -> None:
         self._items: dict[UUID, GenerationModuleExecutionResponse] = {}
         self._provider_refs: dict[UUID, dict[str, str]] = {}
+        self._owners: dict[UUID, int | None] = {}
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="generation-module")
 
-    def create(self, db: Session, *, module_id: int, data: GenerationModuleExecutionCreate) -> GenerationModuleExecutionResponse:
+    def create(self, db: Session, *, module_id: int, data: GenerationModuleExecutionCreate, user_id: int | None = None) -> GenerationModuleExecutionResponse:
         module = generation_module_service.get_response(db, module_id=module_id)
         if not module.is_active:
             raise AppException("The generation module is inactive.")
@@ -40,13 +42,14 @@ class GenerationModuleRuntimeService:
         engine = data.engine or module.default_execution_engine
         now = utc_now()
         execution = GenerationModuleExecutionResponse(
-            id=uuid4(), module_id=module.id, module_key=module.key, engine=engine,
+            id=uuid4(), module_id=module.id, module_key=module.key, user_id=user_id, engine=engine,
             status="queued", progress=0, inputs=copy.deepcopy(data.inputs), context=copy.deepcopy(data.inputs),
             outputs={}, steps=[GenerationModuleStepExecution(step_key=s.key, step_name=s.name, step_type=s.step_type, status="pending") for s in sorted(module.steps, key=lambda item: item.position) if s.is_enabled],
             logs=[GenerationModuleExecutionLog(timestamp=now, message="Execution queued.")], created_at=now,
         )
         with self._lock:
             self._items[execution.id] = execution
+            self._owners[execution.id] = user_id
         self._executor.submit(self._run, execution.id, module.model_dump(mode="python"))
         return self.get(execution.id)
 
@@ -62,6 +65,17 @@ class GenerationModuleRuntimeService:
             if not item:
                 raise NotFoundException("Generation module execution not found.")
             return item.model_copy(deep=True)
+
+
+    def get_for_user(self, execution_id: UUID, *, user_id: int) -> GenerationModuleExecutionResponse:
+        with self._lock:
+            if self._owners.get(execution_id) != user_id:
+                raise NotFoundException("Generation module execution not found.")
+        return self.get(execution_id)
+
+    def cancel_for_user(self, execution_id: UUID, *, user_id: int) -> GenerationModuleExecutionResponse:
+        self.get_for_user(execution_id, user_id=user_id)
+        return self.cancel(execution_id)
 
     def cancel(self, execution_id: UUID) -> GenerationModuleExecutionResponse:
         with self._lock:
@@ -91,7 +105,7 @@ class GenerationModuleRuntimeService:
         return {
             "local_docker": comfyui_local_adapter_service.health(),
             "runpod_serverless": runpod_health,
-            "simulated": {"available": True},
+            "simulated": {"available": True, "mode": "deterministic", "supports_cancel": True, "supports_progress": True},
         }
 
     def _run(self, execution_id: UUID, module: dict[str, Any]) -> None:
@@ -159,7 +173,31 @@ class GenerationModuleRuntimeService:
             raise AppException(f"Unsupported generation module step type: {step['step_type']}")
         workflow, configuration = self._prepare_workflow(step, context)
         if engine == GenerationExecutionEngine.SIMULATED:
-            return {"workflow_preview": workflow, "engine": engine.value, "execution_mode": "simulated", "outputs": []}
+            simulation = configuration.get("simulation") or {}
+            duration_ms = max(150, min(int(simulation.get("duration_ms") or 1200), 15000))
+            checkpoints = max(2, min(int(simulation.get("checkpoints") or 6), 30))
+            for checkpoint in range(1, checkpoints + 1):
+                if self.get(execution_id).cancel_requested:
+                    raise InterruptedError("Simulated execution cancelled.")
+                time.sleep(duration_ms / checkpoints / 1000)
+                self._provider_progress(
+                    execution_id, step["key"], checkpoint / checkpoints,
+                    f"Simulated workflow progress {int(checkpoint / checkpoints * 100)}%.",
+                )
+            files = []
+            for binding in configuration.get("output_bindings", []):
+                files.append({
+                    "node_id": str(binding.get("node_id")),
+                    "type": "simulated",
+                    "filename": f"simulated-{execution_id}-{binding.get('module_output_key') or 'output'}.png",
+                    "preview_url": simulation.get("preview_url"),
+                })
+            result = {
+                "workflow_preview": workflow, "engine": engine.value,
+                "execution_mode": "simulated", "files": files,
+                "simulation": {"duration_ms": duration_ms, "checkpoints": checkpoints},
+            }
+            return self._map_workflow_outputs(configuration, files, result)
         timeout = int(configuration.get("timeout_seconds") or 900)
         if engine == GenerationExecutionEngine.LOCAL_DOCKER:
             queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow)

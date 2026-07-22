@@ -35,6 +35,7 @@ class GenerationModuleExecutionResponse(BaseModel):
     id: UUID
     module_id: int
     module_key: str
+    user_id: int | None = None
     engine: GenerationExecutionEngine
     status: Literal["queued", "running", "completed", "failed", "cancelled"]
     progress: int = Field(ge=0, le=100)
