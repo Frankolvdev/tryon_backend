@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import io
 import json
@@ -243,6 +244,9 @@ class GenerationModuleRuntimeService:
             running_snapshot = item.model_copy(deep=True)
         generation_module_execution_store_service.save(running_snapshot)
         try:
+            if running_snapshot.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:
+                self._run_remote_module(db, execution_id, module)
+                return
             steps = [s for s in sorted(module["steps"], key=lambda row: row["position"]) if s["is_enabled"]]
             for index, step in enumerate(steps):
                 with self._lock:
@@ -321,6 +325,132 @@ class GenerationModuleRuntimeService:
                 final_snapshot = item.model_copy(deep=True)
             db.close()
             generation_module_execution_store_service.save(final_snapshot)
+
+    def _run_remote_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
+        """Dispatch an entire generation module as one RunPod Serverless job."""
+        with self._lock:
+            current = self._items[execution_id].model_copy(deep=True)
+
+        remote_context = self._serialize_remote_value(db, current.context)
+        timeout = max(
+            60,
+            sum(
+                int((step.get("configuration") or {}).get("timeout_seconds") or 300)
+                for step in module.get("steps", [])
+                if step.get("is_enabled")
+            ),
+        )
+        payload = {
+            "runtime_contract": "tryon.generation-runtime/v1",
+            "execution_id": str(execution_id),
+            "module": copy.deepcopy(module),
+            "context": remote_context,
+        }
+        submitted = runpod_serverless_adapter_service.submit_job(db, input_data=payload)
+        with self._lock:
+            item = self._items[execution_id]
+            self._provider_refs[execution_id] = {
+                "engine": GenerationExecutionEngine.RUNPOD_SERVERLESS.value,
+                "provider_job_id": submitted["provider_job_id"],
+                "endpoint_id": submitted["endpoint_id"],
+            }
+            item.provider_job_id = submitted["provider_job_id"]
+            item.provider_endpoint_id = submitted["endpoint_id"]
+            item.provider_status = str(submitted.get("status") or "IN_QUEUE")
+            item.dispatch_attempts += 1
+            generation_module_execution_store_service.save(item.model_copy(deep=True))
+
+        result = runpod_serverless_adapter_service.execute_submitted_job(
+            db,
+            provider_job_id=submitted["provider_job_id"],
+            endpoint_id=submitted["endpoint_id"],
+            job_public_id=str(execution_id),
+            timeout_seconds=timeout,
+            download_outputs=True,
+            progress_callback=lambda progress, message, meta=None: self._remote_module_progress(
+                execution_id, progress, message, meta or {}
+            ),
+            cancellation_callback=lambda: self.get(execution_id).cancel_requested,
+        )
+        output = result.get("output")
+        if not isinstance(output, dict):
+            raise RuntimeError("RunPod Generation Runtime returned an invalid output payload.")
+        if output.get("runtime_contract") != "tryon.generation-runtime/v1":
+            raise RuntimeError("RunPod worker does not support the required Generation Runtime contract.")
+        if output.get("status") != "completed":
+            raise RuntimeError(str(output.get("error") or "Remote Generation Runtime failed."))
+
+        remote_steps = output.get("steps") or []
+        with self._lock:
+            item = self._items[execution_id]
+            for index, remote_step in enumerate(remote_steps):
+                if index >= len(item.steps) or not isinstance(remote_step, dict):
+                    continue
+                state = item.steps[index]
+                state.status = str(remote_step.get("status") or state.status)
+                state.duration_ms = int(remote_step.get("duration_ms") or 0)
+                state.outputs = self._normalize_remote_files(remote_step.get("outputs") or {}, result.get("files") or [])
+                state.error = remote_step.get("error")
+            normalized_outputs = self._normalize_remote_files(output.get("outputs") or {}, result.get("files") or [])
+            item.outputs = self._persist_final_outputs(
+                db, execution_id=execution_id, user_id=item.user_id, outputs=normalized_outputs
+            )
+            remote_context = output.get("context")
+            if isinstance(remote_context, dict):
+                item.context = self._normalize_remote_files(remote_context, result.get("files") or [])
+            item.status = "completed"
+            item.progress = 100
+            item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), message="Remote Generation Runtime completed the entire module in one RunPod job."))
+
+    def _remote_module_progress(self, execution_id: UUID, progress: float, message: str, meta: dict[str, Any]) -> None:
+        with self._lock:
+            item = self._items.get(execution_id)
+            if not item:
+                return
+            normalized = min(max(float(progress), 0.0), 100.0)
+            item.progress = min(95, max(item.progress, int(normalized * 0.95)))
+            item.heartbeat_at = utc_now()
+            item.provider_status = str(meta.get("provider_status") or "IN_PROGRESS")
+            item.logs.append(GenerationModuleExecutionLog(timestamp=item.heartbeat_at, message=message))
+            snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(snapshot)
+
+    def _serialize_remote_value(self, db: Session, value: Any) -> Any:
+        if self._is_generation_file_reference(value):
+            content, filename, content_type = generation_module_file_materializer_service._read_bytes(db, value)
+            return {
+                "__generation_file__": True,
+                "transport": "base64",
+                "filename": filename,
+                "content_type": content_type,
+                "size_bytes": len(content),
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            }
+        if isinstance(value, dict):
+            return {key: self._serialize_remote_value(db, item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._serialize_remote_value(db, item) for item in value]
+        return value
+
+    def _normalize_remote_files(self, value: Any, downloaded: list[dict[str, Any]]) -> Any:
+        by_source = {str(item.get("source_url")): item for item in downloaded if item.get("source_url")}
+        by_filename = {str(item.get("filename")): item for item in downloaded if item.get("filename")}
+        if isinstance(value, dict) and value.get("__generation_file__"):
+            source_url = value.get("url") or value.get("download_url") or value.get("source_url")
+            matched = by_source.get(str(source_url)) if source_url else None
+            if matched is None and value.get("filename"):
+                matched = by_filename.get(str(value.get("filename")))
+            normalized = dict(matched or value)
+            normalized["__generation_file__"] = True
+            if normalized.get("local_path") and not normalized.get("storage_file_id"):
+                normalized["temporary"] = True
+            normalized.pop("content_base64", None)
+            return normalized
+        if isinstance(value, dict):
+            return {key: self._normalize_remote_files(item, downloaded) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._normalize_remote_files(item, downloaded) for item in value]
+        return value
 
     def _execute_step(self, db: Session, execution_id: UUID, step: dict[str, Any], context: dict[str, Any], engine: GenerationExecutionEngine) -> dict[str, Any]:
         return self._runtime_steps.execute(db, execution_id, step, context, engine)
