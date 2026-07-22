@@ -16,6 +16,7 @@ from app.schemas.generation_module_authoring import (
     PythonStepCreateRequest,
     PythonStepUpdateRequest,
     WorkflowStepBindingsUpdate,
+    WorkflowStepUpdateRequest,
     WorkflowStepImportRequest,
     WorkflowValidationResponse,
 )
@@ -172,6 +173,34 @@ def import_generation_module_workflow_step(
 
 
 @router.patch(
+    "/generation-modules/{module_id}/steps/{step_id}/workflow",
+    response_model=GenerationModuleResponse,
+)
+def update_generation_module_workflow_step(
+    module_id: int,
+    step_id: int,
+    data: WorkflowStepUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.update_workflow_step(
+        db, module_id=module_id, step_id=step_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_workflow_step_updated",
+        entity_type="generation_module_step",
+        entity_id=str(step_id),
+        description=f"Updated workflow generation module step {step_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.patch(
     "/generation-modules/{module_id}/steps/{step_id}/workflow-bindings",
     response_model=GenerationModuleResponse,
 )
@@ -313,19 +342,16 @@ def delete_generation_module_step(
 from uuid import UUID
 from app.schemas.generation_module_runtime import GenerationModuleExecutionCreate, GenerationModuleExecutionResponse
 from app.services.generation_module_runtime_service import generation_module_runtime_service
-from app.services.generation_module_upload_service import generation_module_upload_service
 
 
 @router.post("/generation-modules/{module_id}/executions", response_model=GenerationModuleExecutionResponse, status_code=202)
-async def execute_generation_module(
+def execute_generation_module(
     module_id: int,
+    data: GenerationModuleExecutionCreate,
     request: Request,
     db: Session = Depends(get_db),
     current_admin: User = Depends(admin_guard),
 ):
-    data = await generation_module_upload_service.parse_execution_request(
-        db, module_id=module_id, request=request, user_id=None
-    )
     result = generation_module_runtime_service.create(db, module_id=module_id, data=data)
     audit_service.create_log(db, actor_user_id=current_admin.id, action="admin_generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started {result.engine.value if hasattr(result.engine, 'value') else result.engine} execution for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
     return result

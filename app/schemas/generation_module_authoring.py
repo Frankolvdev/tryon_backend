@@ -50,6 +50,23 @@ class WorkflowStepBindingsUpdate(BaseModel):
     output_bindings: list[WorkflowOutputBinding] = Field(default_factory=list)
 
 
+class WorkflowStepUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    workflow_name: str | None = Field(default=None, max_length=255)
+    workflow_json: dict[str, Any] | None = None
+    input_bindings: list[WorkflowInputBinding] | None = None
+    output_bindings: list[WorkflowOutputBinding] | None = None
+    is_enabled: bool | None = None
+
+    @field_validator("workflow_json")
+    @classmethod
+    def workflow_must_not_be_empty(cls, value: dict[str, Any] | None):
+        if value is not None and not value:
+            raise ValueError("The ComfyUI workflow cannot be empty.")
+        return value
+
+
 class PythonStepCreateRequest(BaseModel):
     key: str = Field(min_length=1, max_length=150, pattern=KEY_PATTERN)
     name: str = Field(min_length=1, max_length=255)

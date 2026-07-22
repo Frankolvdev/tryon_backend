@@ -15,6 +15,7 @@ from app.schemas.generation_module_authoring import (
     WorkflowInputBinding,
     WorkflowOutputBinding,
     WorkflowStepBindingsUpdate,
+    WorkflowStepUpdateRequest,
     WorkflowStepImportRequest,
     WorkflowValidationResponse,
 )
@@ -149,6 +150,50 @@ class GenerationModuleAuthoringService:
                 output_mapping_json="{}",
             )
         )
+        db.commit()
+        return generation_module_service.get_response(db, module_id=module.id)
+
+    def update_workflow_step(
+        self,
+        db: Session,
+        *,
+        module_id: int,
+        step_id: int,
+        data: WorkflowStepUpdateRequest,
+    ) -> GenerationModuleResponse:
+        module = generation_module_service.get(db, module_id=module_id)
+        step = self._step(module, step_id)
+        if step.step_type != GenerationModuleStepType.WORKFLOW.value:
+            raise AppException("The selected step is not a workflow step.")
+
+        configuration = self._load(step.configuration_json, {})
+        workflow_json = data.workflow_json if data.workflow_json is not None else configuration.get("workflow")
+        if not isinstance(workflow_json, dict) or not workflow_json:
+            raise AppException("The workflow step has no valid workflow JSON.")
+
+        input_bindings = data.input_bindings
+        if input_bindings is None:
+            input_bindings = [WorkflowInputBinding(**item) for item in configuration.get("input_bindings", [])]
+        output_bindings = data.output_bindings
+        if output_bindings is None:
+            output_bindings = [WorkflowOutputBinding(**item) for item in configuration.get("output_bindings", [])]
+
+        nodes = self._node_map(workflow_json)
+        self._assert_bindings(module, nodes, input_bindings, output_bindings)
+
+        if data.name is not None:
+            step.name = data.name
+        if "description" in data.model_fields_set:
+            step.description = data.description
+        if data.is_enabled is not None:
+            step.is_enabled = data.is_enabled
+        if "workflow_name" in data.model_fields_set:
+            configuration["workflow_name"] = data.workflow_name
+        configuration["workflow"] = workflow_json
+        configuration["input_bindings"] = [item.model_dump() for item in input_bindings]
+        configuration["output_bindings"] = [item.model_dump() for item in output_bindings]
+        step.configuration_json = self._json(configuration)
+        db.add(step)
         db.commit()
         return generation_module_service.get_response(db, module_id=module.id)
 
