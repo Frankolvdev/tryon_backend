@@ -23,6 +23,20 @@ class GenerationModuleInputDefinition(BaseModel):
     default_value: Any | None = None
     validation: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def validate_rules(self):
+        rules = self.validation
+        if self.input_type == GenerationModuleInputType.SELECT:
+            options = rules.get("options")
+            if not isinstance(options, list) or not options:
+                raise ValueError("Select inputs require a non-empty validation.options list.")
+        for key in ("min_length", "max_length"):
+            if key in rules and (not isinstance(rules[key], int) or rules[key] < 0):
+                raise ValueError(f"validation.{key} must be a non-negative integer.")
+        if "min" in rules and "max" in rules and rules["min"] > rules["max"]:
+            raise ValueError("validation.min cannot be greater than validation.max.")
+        return self
+
 
 class GenerationModuleOutputDefinition(BaseModel):
     key: str = Field(min_length=1, max_length=150, pattern=KEY_PATTERN)

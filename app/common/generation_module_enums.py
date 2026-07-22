@@ -16,6 +16,8 @@ class GenerationModuleInputType(str, Enum):
     IMAGE = "image"
     FILE = "file"
     TEXT = "text"
+    TEXTAREA = "textarea"
+    SELECT = "select"
     INTEGER = "integer"
     FLOAT = "float"
     BOOLEAN = "boolean"

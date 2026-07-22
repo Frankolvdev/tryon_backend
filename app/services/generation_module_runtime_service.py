@@ -58,9 +58,40 @@ class GenerationModuleRuntimeService:
 
     @staticmethod
     def _validate_inputs(definitions: list[Any], values: dict[str, Any]) -> None:
+        allowed_keys = {item.key for item in definitions}
+        unknown = sorted(set(values) - allowed_keys)
+        if unknown:
+            raise AppException(f"Unknown module inputs: {', '.join(unknown)}.")
         for item in definitions:
-            if item.is_required and item.key not in values and item.default_value is None:
+            value = values.get(item.key, item.default_value)
+            if item.is_required and (value is None or value == ""):
                 raise AppException(f"Required module input '{item.key}' is missing.")
+            if value is None:
+                continue
+            rules = item.validation or {}
+            if item.input_type in {"integer", "float"}:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise AppException(f"Module input '{item.key}' must be numeric.")
+                if "min" in rules and value < rules["min"]:
+                    raise AppException(f"Module input '{item.key}' is below its minimum.")
+                if "max" in rules and value > rules["max"]:
+                    raise AppException(f"Module input '{item.key}' exceeds its maximum.")
+            if item.input_type in {"text", "textarea"}:
+                if not isinstance(value, str):
+                    raise AppException(f"Module input '{item.key}' must be text.")
+                if "min_length" in rules and len(value) < rules["min_length"]:
+                    raise AppException(f"Module input '{item.key}' is shorter than allowed.")
+                if "max_length" in rules and len(value) > rules["max_length"]:
+                    raise AppException(f"Module input '{item.key}' is longer than allowed.")
+            if item.input_type == "select":
+                options = rules.get("options") or []
+                allowed = {str(option.get("value")) if isinstance(option, dict) else str(option) for option in options}
+                if str(value) not in allowed:
+                    raise AppException(f"Module input '{item.key}' has an invalid option.")
+            if item.input_type == "boolean" and not isinstance(value, bool):
+                raise AppException(f"Module input '{item.key}' must be boolean.")
+            if item.input_type == "json" and not isinstance(value, (dict, list)):
+                raise AppException(f"Module input '{item.key}' must contain JSON data.")
 
     def get(self, execution_id: UUID) -> GenerationModuleExecutionResponse:
         with self._lock:
