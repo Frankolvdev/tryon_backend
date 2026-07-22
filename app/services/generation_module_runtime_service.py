@@ -5,6 +5,8 @@ import io
 import json
 import threading
 import time
+import tempfile
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any
 from uuid import UUID, uuid4
@@ -233,7 +235,10 @@ class GenerationModuleRuntimeService:
             with self._lock:
                 item = self._items[execution_id]
                 if item.status != "cancelled":
-                    item.outputs = self._resolve_module_outputs(module["outputs"], item.context)
+                    resolved_outputs = self._resolve_module_outputs(module["outputs"], item.context)
+                    item.outputs = self._persist_final_outputs(
+                        db, execution_id=execution_id, user_id=item.user_id, outputs=resolved_outputs
+                    )
                     item.status = "completed"; item.progress = 100
                     item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), message="Execution completed."))
         except InterruptedError as exc:
@@ -322,9 +327,7 @@ class GenerationModuleRuntimeService:
                 progress_callback=lambda progress, message, meta=None: self._provider_progress(execution_id, step["key"], progress, message),
             )
             owner_id = self.get(execution_id).user_id
-            files = generation_module_result_service.register_files(
-                db, execution_id=execution_id, user_id=owner_id, files=result.get("outputs") or []
-            )
+            files = self._mark_temporary_files(result.get("outputs") or [])
             result["outputs"] = files
             return self._map_workflow_outputs(configuration, files, result)
         payload = {
@@ -342,9 +345,7 @@ class GenerationModuleRuntimeService:
             cancellation_callback=lambda: self.get(execution_id).cancel_requested,
         )
         owner_id = self.get(execution_id).user_id
-        files = generation_module_result_service.register_files(
-            db, execution_id=execution_id, user_id=owner_id, files=result.get("files") or []
-        )
+        files = self._mark_temporary_files(result.get("files") or [])
         result["files"] = files
         return self._map_workflow_outputs(configuration, files, result)
 
@@ -380,7 +381,7 @@ class GenerationModuleRuntimeService:
             node = workflow.get(str(binding.get("node_id")))
             if not isinstance(node, dict):
                 raise AppException(f"Workflow node '{binding.get('node_id')}' was not found.")
-            if isinstance(value, dict) and value.get("__generation_file__"):
+            if isinstance(value, dict) and self._is_generation_file_reference(value):
                 cached = cache.get(str(source_key))
                 if cached is None:
                     if engine == GenerationExecutionEngine.LOCAL_DOCKER:
@@ -402,6 +403,55 @@ class GenerationModuleRuntimeService:
                 value = cached.get("relative_name") or cached.get("target_name") or cached.get("filename")
             node.setdefault("inputs", {})[binding["input_field"]] = value
         return workflow, configuration, materialized
+
+
+    @staticmethod
+    def _is_generation_file_reference(value: Any) -> bool:
+        return isinstance(value, dict) and bool(
+            value.get("__generation_file__")
+            or value.get("storage_file_id")
+            or value.get("local_path")
+        )
+
+    @staticmethod
+    def _mark_temporary_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        marked: list[dict[str, Any]] = []
+        for item in files:
+            enriched = dict(item)
+            if enriched.get("local_path") or enriched.get("storage_file_id"):
+                enriched["__generation_file__"] = True
+                if not enriched.get("storage_file_id"):
+                    enriched["temporary"] = True
+            marked.append(enriched)
+        return marked
+
+    def _persist_final_outputs(
+        self,
+        db: Session,
+        *,
+        execution_id: UUID,
+        user_id: int | None,
+        outputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        def persist(value: Any) -> Any:
+            if self._is_generation_file_reference(value):
+                if value.get("storage_file_id"):
+                    final = dict(value)
+                else:
+                    registered = generation_module_result_service.register_files(
+                        db, execution_id=execution_id, user_id=user_id, files=[dict(value)]
+                    )
+                    final = registered[0] if registered else dict(value)
+                final.pop("temporary", None)
+                final["__generation_file__"] = True
+                return final
+            if isinstance(value, dict):
+                return {key: persist(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [persist(item) for item in value]
+            return value
+
+        return {key: persist(value) for key, value in outputs.items()}
 
     @staticmethod
     def _map_workflow_outputs(configuration: dict[str, Any], files: list[dict[str, Any]], raw: dict[str, Any]) -> dict[str, Any]:
@@ -440,16 +490,18 @@ class GenerationModuleRuntimeService:
         # Python image ports receive real Pillow images instead of the internal
         # persisted-file reference used by the API and workflow runtime.
         def materialize(value: Any) -> Any:
-            if isinstance(value, dict) and value.get("__generation_file__"):
+            if isinstance(value, dict) and self._is_generation_file_reference(value):
                 try:
                     from PIL import Image
                 except ImportError as exc:
                     raise AppException(
                         "Pillow is required to use image inputs in Python nodes."
                     ) from exc
-                content, _filename, _content_type = (
+                content, _filename, content_type = (
                     generation_module_file_materializer_service._read_bytes(db, value)
                 )
+                if not str(content_type or "").startswith("image/"):
+                    return value
                 image = Image.open(io.BytesIO(content))
                 image.load()
                 return image
@@ -514,25 +566,17 @@ class GenerationModuleRuntimeService:
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
                 filename = f"{step['key']}-{key_path.replace('.', '-')}.png"
-                owner_id = self.get(execution_id).user_id
-                record = storage_service.save_bytes(
-                    db=db,
-                    user_id=owner_id,
-                    content=buffer.getvalue(),
-                    original_filename=filename,
-                    content_type="image/png",
-                    folder=f"generation-results/{execution_id}/python",
-                )
+                runtime_dir = Path(tempfile.gettempdir()) / "tryon-generation-runtime" / str(execution_id)
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                local_path = runtime_dir / filename
+                local_path.write_bytes(buffer.getvalue())
                 return {
                     "__generation_file__": True,
-                    "storage_file_id": record.id,
-                    "provider": record.provider,
-                    "bucket": record.bucket,
-                    "object_key": record.object_key,
-                    "public_url": record.public_url,
-                    "filename": record.original_filename,
-                    "content_type": record.content_type,
-                    "size_bytes": record.size_bytes,
+                    "temporary": True,
+                    "local_path": str(local_path),
+                    "filename": filename,
+                    "content_type": "image/png",
+                    "size_bytes": local_path.stat().st_size,
                 }
             if isinstance(value, dict):
                 return {key: persist(item, f"{key_path}.{key}") for key, item in value.items()}

@@ -27,9 +27,18 @@ class GenerationModuleFileMaterializerService:
         return f"{stem}{suffix}"
 
     def _read_bytes(self, db: Session, reference: dict[str, Any]) -> tuple[bytes, str, str]:
+        local_path = reference.get("local_path")
+        if local_path:
+            source = Path(str(local_path))
+            if not source.is_file():
+                raise NotFoundException("The temporary generation file is missing.")
+            filename = self._safe_name(reference.get("filename") or source.name, fallback="runtime-input")
+            content_type = reference.get("content_type") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            return source.read_bytes(), filename, content_type
+
         storage_file_id = reference.get("storage_file_id")
         if not storage_file_id:
-            raise AppException("Generation file reference is missing storage_file_id.")
+            raise AppException("Generation file reference is missing storage_file_id or local_path.")
         stored = storage_file_repository.get_by_id(db, int(storage_file_id))
         if stored is None:
             raise NotFoundException("Generation input file was not found.")
