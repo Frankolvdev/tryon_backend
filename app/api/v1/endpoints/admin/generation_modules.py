@@ -25,6 +25,7 @@ from app.schemas.generation_module_authoring import (
 from app.services.audit_service import audit_service
 from app.services.generation_module_service import generation_module_service
 from app.services.generation_module_security_service import generation_module_security_service
+from app.services.generation_module_upload_service import generation_module_upload_service
 from app.services.generation_module_authoring_service import (
     generation_module_authoring_service,
 )
@@ -360,14 +361,21 @@ from app.services.generation_module_runtime_service import generation_module_run
 
 
 @router.post("/generation-modules/{module_id}/executions", response_model=GenerationModuleExecutionResponse, status_code=202)
-def execute_generation_module(
+async def execute_generation_module(
     module_id: int,
-    data: GenerationModuleExecutionCreate,
     request: Request,
     db: Session = Depends(get_db),
     current_admin: User = Depends(admin_guard),
 ):
-    result = generation_module_runtime_service.create(db, module_id=module_id, data=data)
+    # Administrative tests deliberately have no billable user owner.
+    # Files are still materialized normally, but runtime creation receives
+    # user_id=None so token validation and token charging are both skipped.
+    data = await generation_module_upload_service.parse_execution_request(
+        db, module_id=module_id, request=request, user_id=None
+    )
+    result = generation_module_runtime_service.create(
+        db, module_id=module_id, data=data, user_id=None
+    )
     audit_service.create_log(db, actor_user_id=current_admin.id, action="admin_generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started {result.engine.value if hasattr(result.engine, 'value') else result.engine} execution for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
     return result
 
