@@ -22,6 +22,7 @@ from app.repositories.billing_invoice_repository import (
 from app.repositories.billing_payment_repository import (
     billing_payment_repository,
 )
+from app.repositories.token_purchase_repository import token_purchase_repository
 from app.schemas.billing_history import (
     BillingInvoiceDocumentResponse,
     BillingInvoiceHistoryListResponse,
@@ -569,14 +570,28 @@ class BillingHistoryService:
                 "Billing payment not found."
             )
 
-        if (
-            payment.payment_type
-            == BillingPaymentType.TOKEN_PURCHASE.value
-        ):
+        if payment.payment_type == BillingPaymentType.TOKEN_PURCHASE.value:
+            purchase = token_purchase_repository.get_by_billing_payment_id(db, payment.id)
+            if not purchase:
+                db.rollback()
+                raise NotFoundException("Token purchase linked to payment not found.")
             db.rollback()
-            raise ConflictException(
-                "Token purchases must be refunded "
-                "through the token purchase refund endpoint."
+            from app.schemas.token_purchase import TokenPurchaseRefundRequest
+            from app.services.token_purchase_service import token_purchase_service
+            token_result = token_purchase_service.refund(
+                db,
+                purchase_id=purchase.id,
+                data=TokenPurchaseRefundRequest(
+                    amount=data.amount, reason=data.reason, remove_tokens=data.remove_tokens
+                ),
+            )
+            refreshed = self.get_payment_response(db, payment_id=payment.id)
+            return BillingPaymentRefundResponse(
+                payment=refreshed,
+                stripe_refund_id=token_result.stripe_refund_id,
+                refunded_amount=token_result.refunded_amount,
+                fully_refunded=refreshed.status == BillingPaymentStatus.REFUNDED.value,
+                message="Token purchase refunded successfully from Payments.",
             )
 
         if not payment.provider_payment_intent_id:

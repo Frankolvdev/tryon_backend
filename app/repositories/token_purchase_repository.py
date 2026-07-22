@@ -33,6 +33,15 @@ class TokenPurchaseRepository(BaseRepository[TokenPurchase]):
 
         return db.execute(statement).scalar_one_or_none()
 
+
+    def get_by_billing_payment_id(
+        self, db: Session, billing_payment_id: int
+    ) -> TokenPurchase | None:
+        statement = select(TokenPurchase).where(
+            TokenPurchase.billing_payment_id == billing_payment_id
+        )
+        return db.execute(statement).scalar_one_or_none()
+
     def get_for_update(
         self,
         db: Session,

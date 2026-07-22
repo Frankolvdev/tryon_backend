@@ -110,6 +110,19 @@ class TokenService:
             limit=limit,
         )
 
+    def get_admin_transactions(
+        self,
+        db: Session,
+        *,
+        user_id: int | None = None,
+        transaction_type: str | None = None,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> list[TokenTransaction]:
+        return token_transaction_repository.list_all_filtered(
+            db, user_id=user_id, transaction_type=transaction_type, skip=skip, limit=limit
+        )
+
     def credit_tokens(
         self,
         db: Session,

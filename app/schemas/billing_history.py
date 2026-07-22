@@ -102,6 +102,7 @@ class BillingPaymentRefundRequest(BaseModel):
         default="requested_by_customer",
         pattern=r"^(duplicate|fraudulent|requested_by_customer)$",
     )
+    remove_tokens: bool = True
 
 
 class BillingPaymentRefundResponse(BaseModel):
