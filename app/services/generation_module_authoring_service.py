@@ -10,6 +10,7 @@ from app.models.generation_module import GenerationModule, GenerationModuleStep
 from app.schemas.generation_module import GenerationModuleResponse
 from app.schemas.generation_module_authoring import (
     GenerationModuleStepsReorderRequest,
+    PythonSourceAnalysisResponse,
     PythonStepCreateRequest,
     PythonStepUpdateRequest,
     WorkflowInputBinding,
@@ -221,6 +222,56 @@ class GenerationModuleAuthoringService:
         db.add(step)
         db.commit()
         return generation_module_service.get_response(db, module_id=module.id)
+
+    @staticmethod
+    def analyze_python_source(
+        source_code: str, entrypoint: str
+    ) -> PythonSourceAnalysisResponse:
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError as exc:
+            return PythonSourceAnalysisResponse(
+                valid=False,
+                entrypoint_found=False,
+                warnings=[f"Syntax error on line {exc.lineno}: {exc.msg}"],
+            )
+
+        function = next(
+            (node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == entrypoint),
+            None,
+        )
+        warnings: list[str] = []
+        input_keys: set[str] = set()
+        output_keys: set[str] = set()
+
+        if function is None:
+            warnings.append(f"Entrypoint '{entrypoint}' was not found.")
+        else:
+            for node in ast.walk(function):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+                    if isinstance(node.func.value, ast.Name) and node.func.value.id == "inputs" and node.args:
+                        key = node.args[0]
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                            input_keys.add(key.value)
+                if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "inputs":
+                    key = node.slice
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                        input_keys.add(key.value)
+                if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+                    for key in node.value.keys:
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                            output_keys.add(key.value)
+
+        if function is not None and not output_keys:
+            warnings.append("No static dictionary outputs were detected; dynamic returns remain supported.")
+
+        return PythonSourceAnalysisResponse(
+            valid=True,
+            entrypoint_found=function is not None,
+            input_keys=sorted(input_keys),
+            output_keys=sorted(output_keys),
+            warnings=warnings,
+        )
 
     def create_python_step(
         self,

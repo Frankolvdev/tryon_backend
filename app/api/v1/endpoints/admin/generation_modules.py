@@ -13,6 +13,8 @@ from app.schemas.generation_module import (
 )
 from app.schemas.generation_module_authoring import (
     GenerationModuleStepsReorderRequest,
+    PythonSourceAnalysisRequest,
+    PythonSourceAnalysisResponse,
     PythonStepCreateRequest,
     PythonStepUpdateRequest,
     WorkflowStepBindingsUpdate,
@@ -226,6 +228,19 @@ def update_generation_module_workflow_bindings(
         user_agent=request.headers.get("user-agent"),
     )
     return result
+
+
+@router.post(
+    "/generation-modules/python/analyze",
+    response_model=PythonSourceAnalysisResponse,
+)
+def analyze_generation_module_python_source(
+    data: PythonSourceAnalysisRequest,
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_authoring_service.analyze_python_source(
+        data.source_code, data.entrypoint
+    )
 
 
 @router.post(

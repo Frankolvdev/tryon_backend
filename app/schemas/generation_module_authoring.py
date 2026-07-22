@@ -91,6 +91,19 @@ class PythonStepUpdateRequest(BaseModel):
     is_enabled: bool | None = None
 
 
+class PythonSourceAnalysisRequest(BaseModel):
+    source_code: str = Field(min_length=1)
+    entrypoint: str = Field(default="run", min_length=1, max_length=100)
+
+
+class PythonSourceAnalysisResponse(BaseModel):
+    valid: bool
+    entrypoint_found: bool
+    input_keys: list[str] = Field(default_factory=list)
+    output_keys: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class StepReorderItem(BaseModel):
     step_id: int = Field(gt=0)
     position: int = Field(ge=0)
