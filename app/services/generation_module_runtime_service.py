@@ -419,6 +419,15 @@ class GenerationModuleRuntimeService:
         source = configuration.get("source_code") or ""
         entrypoint = configuration.get("entrypoint") or "run"
         timeout = int(configuration.get("timeout_seconds") or 300)
+        mapped_inputs: dict[str, Any] = {}
+        for input_key, source_path in (step.get("input_mapping") or {}).items():
+            value: Any = context
+            for part in str(source_path or "").split("."):
+                if not part:
+                    continue
+                value = value.get(part) if isinstance(value, dict) else None
+            mapped_inputs[str(input_key)] = value
+        python_inputs = mapped_inputs if mapped_inputs else copy.deepcopy(context)
         safe_builtins = MappingProxyType({
             "len": len, "min": min, "max": max, "sum": sum, "sorted": sorted, "range": range,
             "enumerate": enumerate, "zip": zip, "str": str, "int": int, "float": float,
@@ -432,14 +441,27 @@ class GenerationModuleRuntimeService:
         if not callable(function):
             raise AppException(f"Python entrypoint '{entrypoint}' was not found.")
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(function, copy.deepcopy(context))
+            future = executor.submit(function, python_inputs)
             try:
                 result = future.result(timeout=timeout)
             except FutureTimeoutError as exc:
                 raise AppException(f"Python step '{step['key']}' exceeded {timeout} seconds.") from exc
         if result is None:
-            return {}
-        return result if isinstance(result, dict) else {"result": result}
+            raw_result: dict[str, Any] = {}
+        else:
+            raw_result = result if isinstance(result, dict) else {"result": result}
+        output_mapping = step.get("output_mapping") or {}
+        if not output_mapping:
+            return raw_result
+        mapped_result: dict[str, Any] = {}
+        for output_key, result_path in output_mapping.items():
+            value: Any = raw_result
+            for part in str(result_path or output_key).split("."):
+                if not part:
+                    continue
+                value = value.get(part) if isinstance(value, dict) else None
+            mapped_result[str(output_key)] = value
+        return mapped_result
 
     @staticmethod
     def _resolve_module_outputs(definitions: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any]:
