@@ -621,9 +621,17 @@ class GenerationModuleRuntimeService:
 generation_module_runtime_service = GenerationModuleRuntimeService()
 
 # Persistent history helpers used by AppWeb and BackOffice.
-def _runtime_list(self, *, user_id: int | None = None, module_id: int | None = None, status: str | None = None, skip: int = 0, limit: int = 100):
+def _runtime_list(self, *, user_id: int | None = None, module_id: int | None = None, status: str | None = None, engine: str | None = None, search: str | None = None, created_from=None, created_to=None, skip: int = 0, limit: int = 100):
     persisted, _ = generation_module_execution_store_service.list(
-        user_id=user_id, module_id=module_id, status=status, skip=0, limit=10000
+        user_id=user_id,
+        module_id=module_id,
+        status=status,
+        engine=engine,
+        search=search,
+        created_from=created_from,
+        created_to=created_to,
+        skip=0,
+        limit=10000,
     )
     with self._lock:
         active = [item.model_copy(deep=True) for item in self._items.values()]
@@ -635,6 +643,16 @@ def _runtime_list(self, *, user_id: int | None = None, module_id: int | None = N
             continue
         if status and item.status != status:
             continue
+        if engine and str(item.engine.value if hasattr(item.engine, "value") else item.engine) != engine:
+            continue
+        if created_from is not None and item.created_at < created_from:
+            continue
+        if created_to is not None and item.created_at > created_to:
+            continue
+        if search:
+            haystack = " ".join([str(item.id), item.module_key, str(item.engine), item.status, item.error or ""]).lower()
+            if search.strip().lower() not in haystack:
+                continue
         merged[item.id] = item
     items = sorted(merged.values(), key=lambda item: item.created_at, reverse=True)
     return items[skip:skip + limit], len(items)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
-from sqlalchemy import desc
+from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
 from app.common.time import utc_now
@@ -88,6 +88,10 @@ class GenerationModuleExecutionStoreService:
         user_id: int | None = None,
         module_id: int | None = None,
         status: str | None = None,
+        engine: str | None = None,
+        search: str | None = None,
+        created_from=None,
+        created_to=None,
         skip: int = 0,
         limit: int = 100,
     ) -> tuple[list[GenerationModuleExecutionResponse], int]:
@@ -100,6 +104,21 @@ class GenerationModuleExecutionStoreService:
                 query = query.filter(GenerationModuleExecution.generation_module_id == module_id)
             if status:
                 query = query.filter(GenerationModuleExecution.status == status)
+            if engine:
+                query = query.filter(GenerationModuleExecution.engine == engine)
+            if created_from is not None:
+                query = query.filter(GenerationModuleExecution.created_at >= created_from)
+            if created_to is not None:
+                query = query.filter(GenerationModuleExecution.created_at <= created_to)
+            if search:
+                term = f"%{search.strip()}%"
+                query = query.filter(or_(
+                    GenerationModuleExecution.public_id.ilike(term),
+                    GenerationModuleExecution.module_key.ilike(term),
+                    GenerationModuleExecution.engine.ilike(term),
+                    GenerationModuleExecution.status.ilike(term),
+                    GenerationModuleExecution.error_message.ilike(term),
+                ))
             total = query.count()
             rows = query.order_by(desc(GenerationModuleExecution.created_at)).offset(skip).limit(limit).all()
             return [self._response(row) for row in rows], total

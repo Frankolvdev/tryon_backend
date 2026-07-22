@@ -1,3 +1,4 @@
+from datetime import datetime
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 
@@ -454,8 +455,29 @@ def import_generation_module(data: GenerationModuleImportRequest, db: Session = 
 
 
 @router.get("/generation-modules/execution-history", response_model=GenerationExecutionListResponse)
-def list_generation_module_executions(module_id: int | None = Query(default=None), status: str | None = Query(default=None), skip: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500), current_admin: User = Depends(admin_guard)):
-    items, total = generation_module_runtime_service.list(module_id=module_id, status=status, skip=skip, limit=limit)
+def list_generation_module_executions(
+    module_id: int | None = Query(default=None),
+    user_id: int | None = Query(default=None, ge=1),
+    status: str | None = Query(default=None),
+    engine: str | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=200),
+    created_from: datetime | None = Query(default=None),
+    created_to: datetime | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    current_admin: User = Depends(admin_guard),
+):
+    items, total = generation_module_runtime_service.list(
+        module_id=module_id,
+        user_id=user_id,
+        status=status,
+        engine=engine,
+        search=search,
+        created_from=created_from,
+        created_to=created_to,
+        skip=skip,
+        limit=limit,
+    )
     return GenerationExecutionListResponse(items=items, total=total, skip=skip, limit=limit)
 
 
