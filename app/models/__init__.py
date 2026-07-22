@@ -44,6 +44,12 @@ from app.models.feature_flag import FeatureFlag
 from app.models.feature_permission import (
     FeaturePermission,
 )
+from app.models.generation_module import (
+    GenerationModule,
+    GenerationModuleInput,
+    GenerationModuleOutput,
+    GenerationModuleStep,
+)
 from app.models.i18n_locale import I18nLocale
 from app.models.i18n_translation import (
     I18nTranslation,
@@ -150,6 +156,10 @@ __all__ = [
     "ExternalAiJob",
     "FeatureFlag",
     "FeaturePermission",
+    "GenerationModule",
+    "GenerationModuleInput",
+    "GenerationModuleOutput",
+    "GenerationModuleStep",
     "I18nLocale",
     "I18nTranslation",
     "IntegrationConfig",

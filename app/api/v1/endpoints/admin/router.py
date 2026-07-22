@@ -31,6 +31,7 @@ from app.api.v1.endpoints.admin import (
     default_settings,
     external_ai_jobs,
     feature_flags,
+    generation_modules,
     i18n,
     integrations,
     integrations_extra,
@@ -171,6 +172,10 @@ admin_router.include_router(
 admin_router.include_router(
     workflow_definitions.router,
     tags=["Admin - Workflow Definitions"],
+)
+admin_router.include_router(
+    generation_modules.router,
+    tags=["Admin - Generation Modules"],
 )
 admin_router.include_router(
     cache.router,

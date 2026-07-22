@@ -117,6 +117,7 @@ class PricingService:
             operation_type=rule.operation_type,
             item_type=rule.item_type,
             quality_mode=rule.quality_mode,
+            generation_module_id=rule.generation_module_id,
             average_execution_cost_usd=average_cost,
             desired_profit_percent=desired_profit,
             final_price_usd=preview.final_price_usd,
@@ -181,6 +182,7 @@ class PricingService:
                 "operation_type": data.operation_type.value,
                 "item_type": data.item_type.value,
                 "quality_mode": data.quality_mode.value,
+                "generation_module_id": data.generation_module_id,
                 "tokens_cost": preview.required_tokens,
                 "estimated_gpu_seconds": 0,
                 "estimated_gpu_cost_cents": round(data.average_execution_cost_usd * 100),
@@ -217,6 +219,8 @@ class PricingService:
             "margin_percent": round(desired_profit),
             "tokens_cost": preview.required_tokens,
         }
+        if "generation_module_id" in data.model_fields_set:
+            update_data["generation_module_id"] = data.generation_module_id
         if data.is_active is not None:
             update_data["is_active"] = data.is_active
         rule = pricing_rule_repository.update(db, db_obj=rule, data=update_data)

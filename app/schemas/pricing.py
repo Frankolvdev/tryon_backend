@@ -34,12 +34,14 @@ class PricingRuleCreate(BaseModel):
     operation_type: PricingOperationType = PricingOperationType.TRYON
     item_type: TryOnItemType
     quality_mode: QualityMode = QualityMode.STANDARD
+    generation_module_id: int | None = Field(default=None, ge=1)
     average_execution_cost_usd: float = Field(ge=0)
     desired_profit_percent: float = Field(default=70, ge=0, le=10000)
     is_active: bool = True
 
 
 class PricingRuleUpdate(BaseModel):
+    generation_module_id: int | None = Field(default=None, ge=1)
     average_execution_cost_usd: float | None = Field(default=None, ge=0)
     desired_profit_percent: float | None = Field(default=None, ge=0, le=10000)
     is_active: bool | None = None
@@ -50,6 +52,7 @@ class PricingRuleResponse(BaseModel):
     operation_type: PricingOperationType
     item_type: TryOnItemType
     quality_mode: QualityMode
+    generation_module_id: int | None
     average_execution_cost_usd: float
     desired_profit_percent: float
     final_price_usd: float

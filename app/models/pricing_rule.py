@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.common.enums import PricingOperationType, QualityMode, TryOnItemType
@@ -31,6 +31,12 @@ class PricingRule(Base):
         String(50),
         default=QualityMode.STANDARD.value,
         nullable=False,
+        index=True,
+    )
+
+    generation_module_id: Mapped[int | None] = mapped_column(
+        ForeignKey("generation_modules.id", ondelete="SET NULL"),
+        nullable=True,
         index=True,
     )
 
