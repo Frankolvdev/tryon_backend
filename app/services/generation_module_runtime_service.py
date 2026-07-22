@@ -372,8 +372,10 @@ class GenerationModuleRuntimeService:
         materialized: list[dict[str, Any]] = []
         cache: dict[str, dict[str, Any]] = {}
         for binding in configuration.get("input_bindings", []):
-            source_key = binding.get("module_input_key")
-            value = context.get(source_key)
+            source_key = binding.get("source_path") or binding.get("module_input_key")
+            value = context
+            for part in str(source_key or "").split("."):
+                value = value.get(part) if isinstance(value, dict) else None
             node = workflow.get(str(binding.get("node_id")))
             if not isinstance(node, dict):
                 raise AppException(f"Workflow node '{binding.get('node_id')}' was not found.")

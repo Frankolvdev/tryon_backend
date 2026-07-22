@@ -6,9 +6,16 @@ from app.schemas.generation_module import KEY_PATTERN
 
 
 class WorkflowInputBinding(BaseModel):
-    module_input_key: str = Field(min_length=1, max_length=150, pattern=KEY_PATTERN)
+    module_input_key: str | None = Field(default=None, min_length=1, max_length=150, pattern=KEY_PATTERN)
+    source_path: str | None = Field(default=None, min_length=1, max_length=300)
     node_id: str = Field(min_length=1, max_length=100)
     input_field: str = Field(min_length=1, max_length=150)
+
+    @model_validator(mode="after")
+    def require_source(self):
+        if not self.module_input_key and not self.source_path:
+            raise ValueError("Either module_input_key or source_path is required.")
+        return self
 
 
 class WorkflowOutputBinding(BaseModel):
@@ -36,9 +43,9 @@ class WorkflowStepImportRequest(BaseModel):
 
     @model_validator(mode="after")
     def binding_keys_must_be_unique(self):
-        input_keys = [item.module_input_key for item in self.input_bindings]
-        if len(input_keys) != len(set(input_keys)):
-            raise ValueError("A module input can only be bound once in a workflow step.")
+        input_targets = [(item.node_id, item.input_field) for item in self.input_bindings]
+        if len(input_targets) != len(set(input_targets)):
+            raise ValueError("A workflow input target can only be bound once.")
         output_keys = [item.module_output_key for item in self.output_bindings]
         if len(output_keys) != len(set(output_keys)):
             raise ValueError("A module output can only be bound once in a workflow step.")
@@ -89,19 +96,6 @@ class PythonStepUpdateRequest(BaseModel):
     input_mapping: dict[str, Any] | None = None
     output_mapping: dict[str, Any] | None = None
     is_enabled: bool | None = None
-
-
-class PythonSourceAnalysisRequest(BaseModel):
-    source_code: str = Field(min_length=1)
-    entrypoint: str = Field(default="run", min_length=1, max_length=100)
-
-
-class PythonSourceAnalysisResponse(BaseModel):
-    valid: bool
-    entrypoint_found: bool
-    input_keys: list[str] = Field(default_factory=list)
-    output_keys: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
 
 
 class StepReorderItem(BaseModel):
