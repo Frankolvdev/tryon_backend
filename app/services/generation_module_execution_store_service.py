@@ -61,24 +61,9 @@ class GenerationModuleExecutionStoreService:
             )
             if row is None:
                 return None
-            response = self._response(row)
-            if response.status in {"queued", "running"}:
-                response.status = "failed"
-                response.error = "Execution was interrupted because the backend process restarted. Retry the execution."
-                response.finished_at = utc_now()
-                response.logs.append(
-                    GenerationModuleExecutionLog(
-                        timestamp=response.finished_at,
-                        level="error",
-                        message=response.error,
-                    )
-                )
-                response.duration_ms = (
-                    int((response.finished_at - response.started_at).total_seconds() * 1000)
-                    if response.started_at else response.duration_ms
-                )
-                self.save(response)
-            return response
+            # Pending executions are recovered by the unified orchestrator.
+            # Reading status must never convert durable queued/running jobs into failures.
+            return self._response(row)
         finally:
             db.close()
 

@@ -55,3 +55,10 @@ class GenerationModuleExecutionResponse(BaseModel):
     tokens_refunded: bool = False
     currency: str | None = None
     commercial_price: float | None = None
+    queue_name: str | None = None
+    queue_position: int | None = None
+    provider_status: str | None = None
+    provider_job_id: str | None = None
+    provider_endpoint_id: str | None = None
+    dispatch_attempts: int = 0
+    heartbeat_at: datetime | None = None

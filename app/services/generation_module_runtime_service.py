@@ -7,7 +7,7 @@ import threading
 import time
 import tempfile
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -32,6 +32,8 @@ from app.services.generation_module_billing_service import generation_module_bil
 from app.services.generation_module_result_service import generation_module_result_service
 from app.services.storage_service import storage_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
+from app.services.generation_job_queue_service import generation_job_queue_service
+from app.services.generation_job_orchestrator_service import generation_job_orchestrator_service
 
 
 class GenerationModuleRuntimeService:
@@ -40,7 +42,6 @@ class GenerationModuleRuntimeService:
         self._provider_refs: dict[UUID, dict[str, str]] = {}
         self._owners: dict[UUID, int | None] = {}
         self._lock = threading.RLock()
-        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="generation-module")
 
     def create(self, db: Session, *, module_id: int, data: GenerationModuleExecutionCreate, user_id: int | None = None) -> GenerationModuleExecutionResponse:
         module = generation_module_service.get_response(db, module_id=module_id)
@@ -72,9 +73,26 @@ class GenerationModuleRuntimeService:
         with self._lock:
             self._items[execution.id] = execution
             self._owners[execution.id] = user_id
+        execution.queue_name = generation_job_queue_service.queue_name(engine)
+        execution.provider_status = "queued_for_dispatch"
         generation_module_execution_store_service.save(execution)
-        self._executor.submit(self._run, execution.id, module.model_dump(mode="python"))
+        generation_job_orchestrator_service.submit(execution.id, engine=engine)
+        execution.queue_position = generation_job_queue_service.position(execution.id, engine=engine)
+        generation_module_execution_store_service.save(execution)
         return self.get(execution.id)
+
+    def attach_persisted(self, execution: GenerationModuleExecutionResponse) -> None:
+        with self._lock:
+            self._items[execution.id] = execution.model_copy(deep=True)
+            self._owners[execution.id] = execution.user_id
+
+    @staticmethod
+    def recovery_log() -> GenerationModuleExecutionLog:
+        return GenerationModuleExecutionLog(
+            timestamp=utc_now(),
+            level="warning",
+            message="Execution recovered after backend restart and returned to its provider queue.",
+        )
 
     @staticmethod
     def _validate_inputs(definitions: list[Any], values: dict[str, Any]) -> None:
@@ -166,14 +184,27 @@ class GenerationModuleRuntimeService:
     def cancel(self, execution_id: UUID) -> GenerationModuleExecutionResponse:
         with self._lock:
             item = self._items.get(execution_id)
+        if not item:
+            item = generation_module_execution_store_service.get(execution_id)
             if not item:
                 raise NotFoundException("Generation module execution not found.")
+            self.attach_persisted(item)
+        with self._lock:
+            item = self._items[execution_id]
             if item.status in {"completed", "failed", "cancelled"}:
                 return item.model_copy(deep=True)
             item.cancel_requested = True
             item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="warning", message="Cancellation requested."))
+            was_queued = item.status == "queued"
+            if was_queued:
+                item.status = "cancelled"
+                item.finished_at = utc_now()
+                item.provider_status = "cancelled_before_dispatch"
+                item.logs.append(GenerationModuleExecutionLog(timestamp=item.finished_at, level="warning", message="Queued execution cancelled before dispatch."))
             snapshot = item.model_copy(deep=True)
             provider = copy.deepcopy(self._provider_refs.get(execution_id) or {})
+        if was_queued:
+            generation_job_queue_service.remove(execution_id, engine=snapshot.engine)
         generation_module_execution_store_service.save(snapshot)
         if provider.get("engine") == GenerationExecutionEngine.LOCAL_DOCKER.value and provider.get("prompt_id"):
             comfyui_local_adapter_service.cancel_prompt(prompt_id=provider["prompt_id"])
@@ -194,6 +225,7 @@ class GenerationModuleRuntimeService:
             "local_docker": comfyui_local_adapter_service.health(),
             "runpod_serverless": runpod_health,
             "simulated": {"available": True, "mode": "deterministic", "supports_cancel": True, "supports_progress": True},
+            "orchestrator": generation_job_orchestrator_service.status(),
         }
 
     def _run(self, execution_id: UUID, module: dict[str, Any]) -> None:
@@ -202,7 +234,10 @@ class GenerationModuleRuntimeService:
         with self._lock:
             item = self._items[execution_id]
             item.status = "running"; item.started_at = started
-            item.logs.append(GenerationModuleExecutionLog(timestamp=started, message="Execution started."))
+            item.queue_position = None
+            item.provider_status = "running_local" if item.engine == GenerationExecutionEngine.LOCAL_DOCKER else ("dispatching_to_runpod" if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS else "running_simulation")
+            item.heartbeat_at = started
+            item.logs.append(GenerationModuleExecutionLog(timestamp=started, message="Execution started by the unified provider worker."))
             running_snapshot = item.model_copy(deep=True)
         generation_module_execution_store_service.save(running_snapshot)
         try:
@@ -258,6 +293,8 @@ class GenerationModuleRuntimeService:
             with self._lock:
                 item = self._items[execution_id]; item.finished_at = finished
                 item.duration_ms = int((finished - started).total_seconds() * 1000)
+                item.heartbeat_at = finished
+                item.provider_status = "COMPLETED" if item.status == "completed" else item.status.upper()
                 self._provider_refs.pop(execution_id, None)
                 should_refund = item.status in {"failed", "cancelled"} and item.user_id is not None and item.tokens_charged > 0
                 refund_reason = item.error or item.status
@@ -321,6 +358,10 @@ class GenerationModuleRuntimeService:
             queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow, extra_data={"generation_execution_id": str(execution_id), "materialized_inputs": engine_files})
             with self._lock:
                 self._provider_refs[execution_id] = {"engine": engine.value, "prompt_id": queued["prompt_id"], "client_id": queued["client_id"]}
+                item = self._items[execution_id]
+                item.provider_job_id = queued["prompt_id"]
+                item.provider_status = "comfyui_queued"
+                generation_module_execution_store_service.save(item.model_copy(deep=True))
             result = comfyui_local_adapter_service.execute_queued_prompt(
                 prompt_id=queued["prompt_id"], client_id=queued["client_id"], job_public_id=str(execution_id),
                 timeout_seconds=timeout, download_outputs=True,
@@ -338,6 +379,12 @@ class GenerationModuleRuntimeService:
         submitted = runpod_serverless_adapter_service.submit_job(db, input_data=payload)
         with self._lock:
             self._provider_refs[execution_id] = {"engine": engine.value, "provider_job_id": submitted["provider_job_id"], "endpoint_id": submitted["endpoint_id"]}
+            item = self._items[execution_id]
+            item.provider_job_id = submitted["provider_job_id"]
+            item.provider_endpoint_id = submitted["endpoint_id"]
+            item.provider_status = str(submitted.get("status") or "IN_QUEUE")
+            item.dispatch_attempts += 1
+            generation_module_execution_store_service.save(item.model_copy(deep=True))
         result = runpod_serverless_adapter_service.execute_submitted_job(
             db, provider_job_id=submitted["provider_job_id"], endpoint_id=submitted["endpoint_id"], job_public_id=str(execution_id),
             timeout_seconds=timeout, download_outputs=True,
@@ -355,7 +402,12 @@ class GenerationModuleRuntimeService:
             if not item:
                 return
             item.progress = min(89, max(item.progress, int(progress * 0.85)))
-            item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), step_key=step_key, message=message))
+            item.heartbeat_at = utc_now()
+            if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:
+                item.provider_status = "IN_PROGRESS"
+            elif item.engine == GenerationExecutionEngine.LOCAL_DOCKER:
+                item.provider_status = "comfyui_running"
+            item.logs.append(GenerationModuleExecutionLog(timestamp=item.heartbeat_at, step_key=step_key, message=message))
             progress_snapshot = item.model_copy(deep=True)
         generation_module_execution_store_service.save(progress_snapshot)
 
@@ -619,6 +671,7 @@ class GenerationModuleRuntimeService:
 
 
 generation_module_runtime_service = GenerationModuleRuntimeService()
+generation_job_orchestrator_service.bind(generation_module_runtime_service)
 
 # Persistent history helpers used by AppWeb and BackOffice.
 def _runtime_list(self, *, user_id: int | None = None, module_id: int | None = None, status: str | None = None, engine: str | None = None, search: str | None = None, created_from=None, created_to=None, skip: int = 0, limit: int = 100):

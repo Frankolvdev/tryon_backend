@@ -27,6 +27,7 @@ from app.middleware.rate_limit_middleware import (
 )
 from app.middleware.security_headers_middleware import SecurityHeadersMiddleware
 from app.services.runtime_settings_service import runtime_settings_service
+from app.services.generation_job_orchestrator_service import generation_job_orchestrator_service
 
 
 app = FastAPI(
@@ -170,6 +171,16 @@ def serve_local_file(
         path=requested_file,
         filename=requested_file.name,
     )
+
+
+@app.on_event("startup")
+def start_generation_orchestrator() -> None:
+    generation_job_orchestrator_service.start()
+
+
+@app.on_event("shutdown")
+def stop_generation_orchestrator() -> None:
+    generation_job_orchestrator_service.stop()
 
 
 # ---------------------------------------------------------------------------
