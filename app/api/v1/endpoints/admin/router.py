@@ -47,6 +47,7 @@ from app.api.v1.endpoints.admin import (
     rbac,
     reports,
     runpod,
+    runtime_builder,
     scheduler,
     simulated_engine,
     search,
@@ -68,6 +69,12 @@ from app.api.v1.endpoints.admin import (
 )
 
 admin_router = APIRouter()
+
+
+admin_router.include_router(
+    runtime_builder.router,
+    tags=["Admin - Runtime Builder"],
+)
 
 admin_router.include_router(
     ai_providers.router,
