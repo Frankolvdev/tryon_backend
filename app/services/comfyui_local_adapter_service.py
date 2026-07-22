@@ -426,9 +426,13 @@ class ComfyUILocalAdapterService:
         safe_name = self._safe_local_filename(
             str(file_data["filename"])
         )
-        destination = job_directory / (
-            f"{file_data['node_id']}-{uuid4().hex[:8]}-{safe_name}"
+        safe_node_id = self._safe_local_filename(
+            str(file_data.get("node_id") or "node")
         )
+        final_filename = self._safe_local_filename(
+            f"{safe_node_id}-{uuid4().hex[:8]}-{safe_name}"
+        )
+        destination = job_directory / final_filename
         destination.write_bytes(content)
 
         local_storage_root = Path(
