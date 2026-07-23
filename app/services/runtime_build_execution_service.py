@@ -54,16 +54,15 @@ class RuntimeBuildExecutionService:
         try:
             build=db.get(RuntimeBuilderBuild,build_id); cfg=db.get(RuntimeBuilderConfig,build.runtime_config_id)
             build.status="building"; build.started_at=utc_now(); RuntimeBuildExecutionService._append(db,build,"[runtime-builder] Preparando contexto reproducible...","preparing",5)
-            generated=RuntimeBuilderService.generate(cfg)
-            ctx=ROOT/f"build-{build.id}-{build.version}"; shutil.rmtree(ctx,ignore_errors=True); ctx.mkdir(parents=True)
-            (ctx/'Dockerfile').write_text(generated['dockerfile'],encoding='utf-8')
-            rb=ctx/'runtime-builder'; rb.mkdir(); (rb/'entrypoint.sh').write_text(generated['entrypoint'],encoding='utf-8')
-            for name,key in [('runtime-manifest.json','runtime_manifest'),('custom-nodes.lock.json','custom_nodes_lock'),('models-manifest.json','models_manifest')]: (ctx/name).write_text(json.dumps(generated[key],indent=2),encoding='utf-8')
-            (ctx/'.env.example').write_text(generated['env_example'],encoding='utf-8')
-            source=Path('runpod_worker').resolve()
-            if not source.exists(): raise RuntimeError("No existe runpod_worker en la raíz del backend.")
-            shutil.copytree(source,ctx/'runpod_worker')
-            build.context_path=str(ctx); RuntimeBuildExecutionService._append(db,build,f"[runtime-builder] Contexto: {ctx}","building",12)
+            if not cfg.export_directory:
+                raise RuntimeError("Primero genera el runtime autocontenido; no existe un directorio de exportación guardado.")
+            ctx = Path(cfg.export_directory).expanduser().resolve()
+            if not ctx.exists() or not ctx.is_dir():
+                raise RuntimeError(f"El directorio de exportación guardado no existe: {ctx}")
+            if not (ctx / "Dockerfile").is_file():
+                raise RuntimeError(f"La exportación no contiene Dockerfile: {ctx}")
+            build.context_path=str(ctx)
+            RuntimeBuildExecutionService._append(db,build,f"[runtime-builder] Usando exportación persistida: {ctx}","building",12)
             cmd=['docker','build','--platform',cfg.target_platform,'-t',build.image_tag,'-f',str(ctx/'Dockerfile'),str(ctx)]
             proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
             for line in proc.stdout or []:

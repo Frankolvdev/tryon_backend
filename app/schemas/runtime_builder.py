@@ -58,6 +58,14 @@ class RuntimeBuilderConfigUpdate(BaseModel):
     environment_variables: list[RuntimeEnvironmentVariable] = Field(default_factory=list)
     volumes: list[RuntimeVolume] = Field(default_factory=list)
     notes: str | None = None
+    source_comfyui_path: str | None = Field(default=None, max_length=2000)
+    workflow_filename: str | None = Field(default=None, max_length=500)
+    workflow_json: dict | None = None
+    last_index_summary: dict | None = None
+    export_directory: str | None = Field(default=None, max_length=2000)
+    last_export_archive: str | None = Field(default=None, max_length=2000)
+    last_export_manifest: dict | None = None
+    last_exported_at: datetime | None = None
     is_active: bool = True
 
 
@@ -141,6 +149,7 @@ class RuntimeWorkflowAnalysisRequest(BaseModel):
 class RuntimeWorkflowResolveRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
     workflow: dict
+    workflow_filename: str | None = Field(default=None, max_length=500)
 
 
 class RuntimeIntelligenceIndexRequest(BaseModel):

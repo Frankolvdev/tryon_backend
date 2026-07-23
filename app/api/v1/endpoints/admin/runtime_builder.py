@@ -82,15 +82,27 @@ def import_apply(payload:RuntimeImportApplyRequest,db:Session=Depends(get_db)):
     return RuntimeImportService.apply_report(db,get_or_create(db),payload.report,payload.selection)
 
 @router.post('/import/resolve-workflow')
-def import_resolve_workflow(payload: RuntimeWorkflowResolveRequest):
-    try: return RuntimeImportService.resolve_workflow(payload.path,payload.workflow)
+def import_resolve_workflow(payload: RuntimeWorkflowResolveRequest, db: Session = Depends(get_db)):
+    try:
+        result = RuntimeImportService.resolve_workflow(payload.path, payload.workflow)
+        config = get_or_create(db)
+        config.source_comfyui_path = payload.path
+        config.workflow_json = payload.workflow
+        config.workflow_filename = payload.workflow_filename
+        db.add(config); db.commit()
+        return result
     except ValueError as exc: raise HTTPException(422,str(exc))
 
 
 @router.post('/intelligence/index')
-def intelligence_index(payload: RuntimeIntelligenceIndexRequest):
+def intelligence_index(payload: RuntimeIntelligenceIndexRequest, db: Session = Depends(get_db)):
     try:
-        return RuntimeIntelligenceService.build_index(payload.path)
+        result = RuntimeIntelligenceService.build_index(payload.path)
+        config = get_or_create(db)
+        config.source_comfyui_path = payload.path
+        config.last_index_summary = result.get("summary") or {}
+        db.add(config); db.commit()
+        return result
     except ValueError as exc:
         raise HTTPException(422, str(exc))
 
@@ -106,7 +118,16 @@ def intelligence_search(payload: RuntimeIntelligenceSearchRequest):
 @router.post('/context/generate', response_model=RuntimeContextGenerateResponse)
 def generate_runtime_context(payload: RuntimeContextGenerateRequest, db: Session = Depends(get_db)):
     try:
-        return RuntimeContextGeneratorService.generate(get_or_create(db), payload)
+        config = get_or_create(db)
+        result = RuntimeContextGeneratorService.generate(config, payload)
+        config.source_comfyui_path = payload.comfyui_path
+        config.export_directory = result["output_directory"]
+        config.last_export_archive = result["archive_path"]
+        config.last_export_manifest = result.get("manifest") or {}
+        from app.common.time import utc_now
+        config.last_exported_at = utc_now()
+        db.add(config); db.commit()
+        return result
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     except OSError as exc:

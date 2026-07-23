@@ -1,0 +1,179 @@
+{
+  "nodes": [
+    {
+      "name": "Anomalous_Model_Browser",
+      "repository": "https://github.com/DemonGatanjieu/Anomalous_Model_Browser",
+      "commit": "cf2866dc1094e5f783f2fe77a719429b1d8d6f75",
+      "enabled": true,
+      "install_requirements": false
+    },
+    {
+      "name": "basic_data_handling",
+      "repository": "https://github.com/ltdrdata/ComfyUI-Manager",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "blender-in-comfyui",
+      "repository": "https://github.com/JayLyu/blender-in-comfyui",
+      "commit": "7f626ced25cdd7dc3cfe429450472bea3cd792b3",
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "caching_to_not_waste",
+      "repository": "https://github.com/alastor-666-1933/caching_to_not_waste",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui-art-venture",
+      "repository": "https://github.com/user-attachments/assets",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyUI-blender-wrapper",
+      "repository": "https://github.com/IRCSS/comfyUI-blender-wrapper",
+      "commit": "17b1ed102dc77df7ccdf08ca50dbecfdf1299131",
+      "enabled": true,
+      "install_requirements": false
+    },
+    {
+      "name": "comfyui-detail-daemon",
+      "repository": "https://github.com/user-attachments/assets",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "ComfyUI-Easy-Use",
+      "repository": "https://github.com/yolain/ComfyUI-Easy-Use",
+      "commit": "81c510c06e18dffd4f43518644fc35964c9168ca",
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui-enricos-nodes",
+      "repository": "https://github.com/erosDiffusion/ComfyUI-enricos-nodes.git",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "ComfyUI-GGUF",
+      "repository": "https://github.com/ggerganov/llama.cpp",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui-image-saver",
+      "repository": "https://github.com/giriss/comfy-image-saver",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui-impact-pack",
+      "repository": "https://github.com/facebookresearch/sam2",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui-inpaint-nodes",
+      "repository": "https://github.com/lllyasviel/Fooocus",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui-logic",
+      "repository": "https://github.com/comfyanonymous/ComfyUI",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "ComfyUI-Manager",
+      "repository": "https://github.com/ltdrdata/ComfyUI-Manager",
+      "commit": "f41365abe95723d078ce2946e82dfb7bc6e9d9c7",
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui-mxtoolkit",
+      "repository": "https://github.com/Smirnov75/comfyui-mxtoolkit",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui_fill-nodes",
+      "repository": "https://github.com/filliptm/ComfyUI_Fill-Nodes",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui_layerstyle",
+      "repository": "https://github.com/chflame163/ComfyUI_LayerStyle_Advance",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "comfyui_sunxAI_facetools",
+      "repository": "https://github.com/Comfy-Org/cookiecutter-comfy-extension",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "ComfyUI_VintageEffect",
+      "repository": "https://github.com/brucew4yn3rp/ComfyUI_VintageEffect",
+      "commit": "9f7c52c992a3ca7b9498799291fae2ccc53360d2",
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "execute-python",
+      "repository": "https://github.com/mozhaa/ComfyUI-Execute-Python",
+      "commit": "f6a4a844eb72601dcd9766b10dfd7148415dffbc",
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "RES4LYF",
+      "repository": "https://github.com/ClownsharkBatwing/RES4LYF",
+      "commit": "419de2d7c78f415dde9aa352a7231820ebfc17a4",
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "scale-image-to-total-pixels-advanced",
+      "repository": "https://github.com/comfyanonymous/ComfyUI",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "tbg-sam3",
+      "repository": "https://github.com/Ltamann/ComfyUI-TBG-SAM3",
+      "commit": "f6155bfb6deddf55172ade7c104973d52d100527",
+      "enabled": true,
+      "install_requirements": true
+    },
+    {
+      "name": "was-ns",
+      "repository": "https://github.com/comfyanonymous/ComfyUI",
+      "commit": null,
+      "enabled": true,
+      "install_requirements": true
+    }
+  ]
+}
