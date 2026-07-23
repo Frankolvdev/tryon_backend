@@ -141,3 +141,11 @@ class RuntimeWorkflowAnalysisRequest(BaseModel):
 class RuntimeWorkflowResolveRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
     workflow: dict
+
+
+class RuntimeIntelligenceIndexRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+
+class RuntimeIntelligenceSearchRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+    query: str = Field(default="", max_length=255)

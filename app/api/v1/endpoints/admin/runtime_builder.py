@@ -4,10 +4,11 @@ from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
 from app.services.runtime_import_service import RuntimeImportService
+from app.services.runtime_intelligence_service import RuntimeIntelligenceService
 router=APIRouter(prefix="/runtime-builder",dependencies=[Depends(admin_guard)])
 
 def get_or_create(db):
@@ -80,6 +81,22 @@ def import_apply(payload:RuntimeImportApplyRequest,db:Session=Depends(get_db)):
     return RuntimeImportService.apply_report(db,get_or_create(db),payload.report,payload.selection)
 
 @router.post('/import/resolve-workflow')
-def import_resolve_workflow(payload:RuntimeWorkflowResolveRequest):
+def import_resolve_workflow(payload:RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest):
     try: return RuntimeImportService.resolve_workflow(payload.path,payload.workflow)
     except ValueError as exc: raise HTTPException(422,str(exc))
+
+
+@router.post('/intelligence/index')
+def intelligence_index(payload: RuntimeIntelligenceIndexRequest):
+    try:
+        return RuntimeIntelligenceService.build_index(payload.path)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+@router.post('/intelligence/search')
+def intelligence_search(payload: RuntimeIntelligenceSearchRequest):
+    try:
+        index = RuntimeIntelligenceService.build_index(payload.path)
+        return {"items": RuntimeIntelligenceService.search(index, payload.query), "summary": index["summary"]}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
