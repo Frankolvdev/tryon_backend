@@ -4,7 +4,7 @@ from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
 from app.services.runtime_import_service import RuntimeImportService
@@ -72,9 +72,14 @@ async def import_upload(file:UploadFile=File(...)):
     except ValueError as exc: raise HTTPException(422,str(exc))
 
 @router.post('/import/analyze-workflow')
-def import_analyze_workflow(payload:RuntimeWorkflowAnalysisRequest):
+def import_analyze_workflow(payload:RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest):
     return RuntimeImportService.analyze_workflow(payload.workflow,payload.report)
 
 @router.post('/import/apply',response_model=RuntimeBuilderConfigResponse)
 def import_apply(payload:RuntimeImportApplyRequest,db:Session=Depends(get_db)):
     return RuntimeImportService.apply_report(db,get_or_create(db),payload.report,payload.selection)
+
+@router.post('/import/resolve-workflow')
+def import_resolve_workflow(payload:RuntimeWorkflowResolveRequest):
+    try: return RuntimeImportService.resolve_workflow(payload.path,payload.workflow)
+    except ValueError as exc: raise HTTPException(422,str(exc))

@@ -137,3 +137,7 @@ class RuntimeImportApplyRequest(BaseModel):
 class RuntimeWorkflowAnalysisRequest(BaseModel):
     workflow: dict
     report: dict | None = None
+
+class RuntimeWorkflowResolveRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+    workflow: dict
