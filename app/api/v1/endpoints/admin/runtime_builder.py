@@ -81,7 +81,7 @@ def import_apply(payload:RuntimeImportApplyRequest,db:Session=Depends(get_db)):
     return RuntimeImportService.apply_report(db,get_or_create(db),payload.report,payload.selection)
 
 @router.post('/import/resolve-workflow')
-def import_resolve_workflow(payload:RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest):
+def import_resolve_workflow(payload: RuntimeWorkflowResolveRequest):
     try: return RuntimeImportService.resolve_workflow(payload.path,payload.workflow)
     except ValueError as exc: raise HTTPException(422,str(exc))
 

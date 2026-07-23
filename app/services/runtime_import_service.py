@@ -313,6 +313,35 @@ class RuntimeImportService:
         folders=[f for f in sorted(custom_root.iterdir() if custom_root.exists() else []) if f.is_dir() and not f.name.startswith(('.', '__'))]
         for folder in folders:
             for cls in RuntimeImportService._read_node_classes(folder): class_to_folder.setdefault(cls,folder)
+
+        # Consult the Intelligence Index directly. The previous MegaZIP exposed an
+        # index endpoint, but the workflow resolver did not consume its result.
+        # Building the static index here keeps resolution deterministic and also
+        # supports Pinokio installations with more than one custom_nodes folder.
+        intelligence_by_name: dict[str, dict[str, Any]] = {}
+        intelligence_summary: dict[str, Any] = {}
+        try:
+            from app.services.runtime_intelligence_service import RuntimeIntelligenceService
+            intelligence = RuntimeIntelligenceService.build_index(str(selected))
+            intelligence_summary = intelligence.get('summary') or {}
+            for item in intelligence.get('classes') or []:
+                if not isinstance(item, dict):
+                    continue
+                public_name = str(item.get('class_type') or '').strip()
+                display_name = str(item.get('display_name') or '').strip()
+                python_class = str(item.get('python_class') or '').strip()
+                for alias in (public_name, display_name, python_class):
+                    if alias:
+                        intelligence_by_name.setdefault(alias.casefold(), item)
+                source_file = item.get('source_file')
+                if public_name and source_file:
+                    source_path = Path(str(source_file)).resolve()
+                    provider_path = Path(str(item.get('source_path') or source_path.parent)).resolve()
+                    class_to_folder.setdefault(public_name, provider_path)
+                    if display_name:
+                        class_to_folder.setdefault(display_name, provider_path)
+        except Exception as exc:
+            intelligence_summary = {'error': str(exc)}
         for cls,meta in runtime_catalog.items():
             if cls=='__error__' or not isinstance(meta,dict) or not meta.get('file'): continue
             try: file_path=Path(meta['file']).resolve()
@@ -322,15 +351,34 @@ class RuntimeImportService:
                 if rel.parts: class_to_folder[cls]=custom_root/rel.parts[0]
             except ValueError: core_classes.add(cls)
         required_folders={}; unresolved_classes=[]; resolved_classes=[]
+        virtual_workflow_nodes = {'getnode', 'setnode', 'reroute', 'note'}
         for cls in class_types:
             folder=class_to_folder.get(cls)
+            intel = intelligence_by_name.get(cls.casefold())
+            # Some extensions create a deterministic class name by appending a
+            # SHA-256 suffix (for example ExecutePython<64 hex chars>).
+            if intel is None:
+                normalized = re.sub(r'[0-9a-f]{64}$', '', cls, flags=re.IGNORECASE).casefold()
+                intel = intelligence_by_name.get(normalized)
+                if intel is None and normalized:
+                    intel = next((value for key, value in intelligence_by_name.items() if key == normalized or key.startswith(normalized)), None)
+            if folder is None and intel and intel.get('source_file'):
+                source_file = Path(str(intel['source_file'])).resolve()
+                candidate = Path(str(intel.get('source_path') or source_file.parent)).resolve()
+                folder = candidate
             if folder:
-                required_folders[folder.name]=folder; resolved_classes.append({'class_type':cls,'provider':'custom','provider_name':folder.name,'confidence':'runtime' if cls in runtime_catalog else 'static'})
+                required_folders[str(folder).casefold()]=folder
+                resolved_classes.append({'class_type':cls,'provider':'custom','provider_name':str(intel.get('provider') if intel else folder.name),'confidence':'intelligence-index' if intel else ('runtime' if cls in runtime_catalog else 'static')})
+            elif intel:
+                resolved_classes.append({'class_type':cls,'provider':'custom','provider_name':str(intel.get('provider') or 'Custom Node'),'confidence':'intelligence-index'})
+            elif cls.casefold() in virtual_workflow_nodes:
+                resolved_classes.append({'class_type':cls,'provider':'workflow','provider_name':'ComfyUI Frontend / Extension','confidence':'workflow-virtual'})
             elif cls in core_classes or cls in runtime_catalog or cls in MODEL_INPUT_RULES:
                 resolved_classes.append({'class_type':cls,'provider':'core','provider_name':'ComfyUI Core','confidence':'runtime' if cls in runtime_catalog else 'knowledge-base'})
             else: unresolved_classes.append(cls)
         required_nodes=[]; dependencies_by_name={}; node_warnings=[]
-        for name,folder in sorted(required_folders.items()):
+        for _folder_key,folder in sorted(required_folders.items(), key=lambda item: str(item[1]).lower()):
+            name=folder.name
             node_repo,node_commit=RuntimeImportService._git_info(folder); inferred=node_repo or RuntimeImportService._infer_repo(folder)
             matched=sorted(cls for cls in class_types if class_to_folder.get(cls)==folder)
             if not inferred: node_warnings.append(f'{name}: se detectó localmente, pero no se encontró repositorio.')
@@ -359,7 +407,7 @@ class RuntimeImportService:
         weighted_total=max(1,len(class_types)+len(reference_records)+4)
         weighted_ok=(len(class_types)-len(unresolved_classes))+(len(reference_records)-len(set(missing_models)))+sum(bool(python.get(k)) for k in ('python','torch','cuda','gpu'))
         score=max(0,min(100,round(weighted_ok/weighted_total*100)))
-        return {'source_type':source,'selected_path':str(selected),'comfyui_path':str(comfy),'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),'torch_cuda_version':python.get('cuda'),'gpu_name':python.get('gpu'),'python_candidates':python.get('candidate_attempts',[]),'workflow':{'node_count':len(workflow_nodes),'class_types':class_types,'referenced_models':referenced},'resolved_classes':resolved_classes,'core_classes':[r['class_type'] for r in resolved_classes if r['provider']=='core'],'custom_nodes':required_nodes,'models':required_models,'python_dependencies':list(dependencies_by_name.values()),'environment_variables':[],'volumes':[{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],'unresolved_classes':unresolved_classes,'missing_models':sorted(set(missing_models)),'ambiguous_models':sorted(set(ambiguous_models)),'warnings':warnings,'summary':{'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),'core_classes':sum(1 for r in resolved_classes if r['provider']=='core'),'resolved_custom_classes':sum(1 for r in resolved_classes if r['provider']=='custom'),'required_custom_nodes':len(required_nodes),'required_models':len(required_models),'referenced_models':len(reference_records),'missing_models':len(set(missing_models)),'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),'installed_custom_nodes':len(folders),'installed_models':total_models,'runtime_catalog_classes':max(0,len(runtime_catalog)-int('__error__' in runtime_catalog)),'knowledge_base_rules':len(MODEL_INPUT_RULES),'compatibility_score':score}}
+        return {'source_type':source,'selected_path':str(selected),'comfyui_path':str(comfy),'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),'torch_cuda_version':python.get('cuda'),'gpu_name':python.get('gpu'),'python_candidates':python.get('candidate_attempts',[]),'workflow':{'node_count':len(workflow_nodes),'class_types':class_types,'referenced_models':referenced},'resolved_classes':resolved_classes,'core_classes':[r['class_type'] for r in resolved_classes if r['provider']=='core'],'custom_nodes':required_nodes,'models':required_models,'python_dependencies':list(dependencies_by_name.values()),'environment_variables':[],'volumes':[{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],'unresolved_classes':unresolved_classes,'missing_models':sorted(set(missing_models)),'ambiguous_models':sorted(set(ambiguous_models)),'warnings':warnings,'summary':{'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),'core_classes':sum(1 for r in resolved_classes if r['provider']=='core'),'resolved_custom_classes':sum(1 for r in resolved_classes if r['provider']=='custom'),'required_custom_nodes':len(required_nodes),'required_models':len(required_models),'referenced_models':len(reference_records),'missing_models':len(set(missing_models)),'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),'installed_custom_nodes':len(folders),'installed_models':total_models,'runtime_catalog_classes':max(0,len(runtime_catalog)-int('__error__' in runtime_catalog)),'knowledge_base_rules':len(MODEL_INPUT_RULES),'intelligence_index_classes':int(intelligence_summary.get('classes') or 0),'intelligence_index_providers':int(intelligence_summary.get('providers') or 0),'compatibility_score':score}}
 
     @staticmethod
     def scan_path(path: str, include_all_models: bool = True) -> dict[str, Any]:
