@@ -58,11 +58,16 @@ class RuntimeBuilderConfigUpdate(BaseModel):
     environment_variables: list[RuntimeEnvironmentVariable] = Field(default_factory=list)
     volumes: list[RuntimeVolume] = Field(default_factory=list)
     notes: str | None = None
+    project_key: str = Field(default="tryon", min_length=1, max_length=120)
+    module_type: str = Field(default="tryon", min_length=1, max_length=120)
+    container_workdir: str = Field(default="/app", min_length=1, max_length=1000)
     source_comfyui_path: str | None = Field(default=None, max_length=2000)
     workflow_filename: str | None = Field(default=None, max_length=500)
     workflow_json: dict | None = None
     last_index_summary: dict | None = None
+    export_root_directory: str | None = Field(default=None, max_length=2000)
     export_directory: str | None = Field(default=None, max_length=2000)
+    workspace_status: str = Field(default="draft", max_length=64)
     last_export_archive: str | None = Field(default=None, max_length=2000)
     last_export_manifest: dict | None = None
     last_exported_at: datetime | None = None
@@ -75,6 +80,17 @@ class RuntimeBuilderConfigResponse(RuntimeBuilderConfigUpdate):
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
+
+
+class RuntimeWorkspaceUpdate(BaseModel):
+    source_comfyui_path: str | None = Field(default=None, max_length=2000)
+    workflow_filename: str | None = Field(default=None, max_length=500)
+    workflow_json: dict | None = None
+    container_workdir: str | None = Field(default=None, min_length=1, max_length=1000)
+    export_root_directory: str | None = Field(default=None, max_length=2000)
+    export_directory: str | None = Field(default=None, max_length=2000)
+    project_key: str | None = Field(default=None, min_length=1, max_length=120)
+    module_type: str | None = Field(default=None, min_length=1, max_length=120)
 
 class RuntimeValidationIssue(BaseModel):
     level: Literal["error", "warning", "info"]

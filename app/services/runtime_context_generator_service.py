@@ -50,8 +50,8 @@ class RuntimeContextGeneratorService:
     @staticmethod
     def generate(config: RuntimeBuilderConfig, payload: Any) -> dict[str,Any]:
         comfy=RuntimeContextGeneratorService._find_comfyui(payload.comfyui_path)
-        base=Path(payload.output_directory).expanduser().resolve() if payload.output_directory else Path(os.getenv("RUNTIME_EXPORTS_DIR","runtime_exports")).resolve()
-        output=base/f"{RuntimeContextGeneratorService._safe(config.name)}-{RuntimeContextGeneratorService._safe(config.runtime_version)}"
+        base=Path(payload.output_directory).expanduser().resolve() if payload.output_directory else (Path(config.export_root_directory).expanduser().resolve() if config.export_root_directory else Path(os.getenv("RUNTIME_EXPORTS_DIR","runtime_exports")).resolve())
+        output=base/f"{RuntimeContextGeneratorService._safe(config.project_key or config.name)}-{RuntimeContextGeneratorService._safe(config.runtime_version)}"
         if output.exists():
             if not payload.overwrite: raise ValueError(f"El directorio de salida ya existe: {output}. Activa sobrescribir para reemplazarlo.")
             shutil.rmtree(output)
@@ -77,20 +77,37 @@ class RuntimeContextGeneratorService:
             record.update({"included":bool(payload.copy_custom_nodes),"source_path":str(source),"context_path":f"custom_nodes/{source.name}"}); node_manifest.append(record)
         deps=[d for d in (config.python_dependencies or []) if d.get("enabled",True)]
         requirements="\n".join(f"{d['package']}{'=='+d['version'] if d.get('version') else ''}" for d in deps)+( "\n" if deps else "")
-        manifest={"contract":"tryon.runtime-context/v2","generated_at":datetime.now(timezone.utc).isoformat(),"runtime":generated["runtime_manifest"],"source_comfyui":str(comfy),"copy_mode":{"models":payload.copy_models,"custom_nodes":payload.copy_custom_nodes},"models":model_manifest,"custom_nodes":node_manifest,"summary":{"models_copied":models_copied,"custom_nodes_copied":nodes_copied,"bytes_copied":total,"warnings":len(warnings)}}
+        manifest={"contract":"tryon.runtime-context/v2","generated_at":datetime.now(timezone.utc).isoformat(),"runtime":generated["runtime_manifest"],"project_key":config.project_key,"module_type":config.module_type,"container_workdir":config.container_workdir,"source_comfyui":str(comfy),"copy_mode":{"models":payload.copy_models,"custom_nodes":payload.copy_custom_nodes},"models":model_manifest,"custom_nodes":node_manifest,"summary":{"models_copied":models_copied,"custom_nodes_copied":nodes_copied,"bytes_copied":total,"warnings":len(warnings)}}
         health='import json, urllib.request\nwith urllib.request.urlopen("http://127.0.0.1:8188/system_stats", timeout=10) as r:\n    print(json.dumps({"ok": r.status == 200}))\n'
-        files={"Dockerfile":RuntimeContextGeneratorService._dockerfile(config,payload.copy_models,payload.copy_custom_nodes),"requirements.txt":requirements,"runtime.json":json.dumps(generated["runtime_manifest"],indent=2,ensure_ascii=False),"manifest.json":json.dumps(manifest,indent=2,ensure_ascii=False),"models-manifest.json":json.dumps({"models":model_manifest},indent=2,ensure_ascii=False),"custom-nodes.lock.json":json.dumps({"nodes":node_manifest},indent=2,ensure_ascii=False),".env.example":generated["env_example"],"scripts/startup.sh":generated["entrypoint"],"scripts/healthcheck.py":health,".dockerignore":"**/.git\n**/__pycache__\n**/*.pyc\n.venv\nnode_modules\n"}
+        workdir=(config.container_workdir or "/app").rstrip("/")
+        startup=f"""#!/usr/bin/env bash
+set -euo pipefail
+python3 {workdir}/ComfyUI/main.py --listen 0.0.0.0 --port 8188 &
+COMFY_PID=$!
+for _ in $(seq 1 180); do
+  curl -fsS http://127.0.0.1:8188/system_stats >/dev/null && break
+  sleep 1
+done
+if [ -f {workdir}/tryon/runpod_worker/handler.py ]; then
+  python3 {workdir}/tryon/runpod_worker/handler.py
+else
+  wait $COMFY_PID
+fi
+"""
+        files={"Dockerfile":RuntimeContextGeneratorService._dockerfile(config,payload.copy_models,payload.copy_custom_nodes),"requirements.txt":requirements,"runtime.json":json.dumps(generated["runtime_manifest"],indent=2,ensure_ascii=False),"manifest.json":json.dumps(manifest,indent=2,ensure_ascii=False),"models-manifest.json":json.dumps({"models":model_manifest},indent=2,ensure_ascii=False),"custom-nodes.lock.json":json.dumps({"nodes":node_manifest},indent=2,ensure_ascii=False),".env.example":generated["env_example"],"scripts/startup.sh":startup,"scripts/healthcheck.py":health,".dockerignore":"**/.git\n**/__pycache__\n**/*.pyc\n.venv\nnode_modules\n"}
         for relative,content in files.items():
             destination=output/relative; destination.parent.mkdir(parents=True,exist_ok=True); destination.write_text(content,encoding="utf-8",newline="\n")
         archive=shutil.make_archive(str(output),"zip",root_dir=output)
-        return {"success":True,"output_directory":str(output),"archive_path":archive,"models_copied":models_copied,"custom_nodes_copied":nodes_copied,"bytes_copied":total,"files_generated":sorted(files),"warnings":warnings,"manifest":manifest}
+        return {"success":True,"export_root_directory":str(base),"output_directory":str(output),"archive_path":archive,"models_copied":models_copied,"custom_nodes_copied":nodes_copied,"bytes_copied":total,"files_generated":sorted(files),"warnings":warnings,"manifest":manifest}
 
     @staticmethod
     def _dockerfile(config: RuntimeBuilderConfig, models: bool, nodes: bool) -> str:
-        lines=[f"FROM nvidia/cuda:{config.cuda_version}-cudnn-runtime-ubuntu22.04","ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1","RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv git curl ffmpeg libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*",f"RUN git clone {config.comfyui_repository} /opt/ComfyUI"]
-        if config.comfyui_commit: lines.append(f"RUN git -C /opt/ComfyUI checkout {config.comfyui_commit}")
-        lines += [f"RUN pip3 install --index-url {config.pytorch_index_url} torch torchvision torchaudio","RUN pip3 install -r /opt/ComfyUI/requirements.txt","COPY requirements.txt /tmp/runtime-requirements.txt","RUN if [ -s /tmp/runtime-requirements.txt ]; then pip3 install -r /tmp/runtime-requirements.txt; fi"]
-        if nodes: lines += ["COPY custom_nodes/ /opt/ComfyUI/custom_nodes/","RUN find /opt/ComfyUI/custom_nodes -name requirements.txt -print0 | xargs -0 -r -n1 pip3 install -r"]
-        if models: lines.append("COPY models/ /opt/ComfyUI/models/")
-        lines += ["COPY scripts/ /opt/tryon/scripts/","RUN chmod +x /opt/tryon/scripts/startup.sh","WORKDIR /opt/ComfyUI","HEALTHCHECK --interval=30s --timeout=10s --start-period=120s CMD python3 /opt/tryon/scripts/healthcheck.py || exit 1","ENTRYPOINT [\"/opt/tryon/scripts/startup.sh\"]"]
+        workdir=(config.container_workdir or "/app").rstrip("/")
+        comfy_target=f"{workdir}/ComfyUI"
+        lines=[f"FROM nvidia/cuda:{config.cuda_version}-cudnn-runtime-ubuntu22.04","ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1","RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv git curl ffmpeg libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*",f"RUN git clone {config.comfyui_repository} {comfy_target}"]
+        if config.comfyui_commit: lines.append(f"RUN git -C {comfy_target} checkout {config.comfyui_commit}")
+        lines += [f"RUN pip3 install --index-url {config.pytorch_index_url} torch torchvision torchaudio",f"RUN pip3 install -r {comfy_target}/requirements.txt","COPY requirements.txt /tmp/runtime-requirements.txt","RUN if [ -s /tmp/runtime-requirements.txt ]; then pip3 install -r /tmp/runtime-requirements.txt; fi"]
+        if nodes: lines += [f"COPY custom_nodes/ {comfy_target}/custom_nodes/",f"RUN find {comfy_target}/custom_nodes -name requirements.txt -print0 | xargs -0 -r -n1 pip3 install -r"]
+        if models: lines.append(f"COPY models/ {comfy_target}/models/")
+        lines += [f"COPY scripts/ {workdir}/tryon/scripts/",f"RUN chmod +x {workdir}/tryon/scripts/startup.sh",f"WORKDIR {comfy_target}",f"HEALTHCHECK --interval=30s --timeout=10s --start-period=120s CMD python3 {workdir}/tryon/scripts/healthcheck.py || exit 1",f"ENTRYPOINT [\"{workdir}/tryon/scripts/startup.sh\"]"]
         return "\n".join(lines)+"\n"

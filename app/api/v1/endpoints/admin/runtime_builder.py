@@ -4,7 +4,7 @@ from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeWorkspaceUpdate
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
 from app.services.runtime_import_service import RuntimeImportService
@@ -23,6 +23,14 @@ def update_config(payload:RuntimeBuilderConfigUpdate,db:Session=Depends(get_db))
     config=get_or_create(db)
     for field,value in payload.model_dump().items(): setattr(config,field,value)
     db.add(config); db.commit(); db.refresh(config); return config
+@router.patch('/workspace', response_model=RuntimeBuilderConfigResponse)
+def update_workspace(payload: RuntimeWorkspaceUpdate, db: Session = Depends(get_db)):
+    config = get_or_create(db)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(config, field, value)
+    db.add(config); db.commit(); db.refresh(config)
+    return config
+
 @router.post('/validate',response_model=RuntimeValidationResponse)
 def validate_config(db:Session=Depends(get_db)): return RuntimeBuilderService.validate(get_or_create(db))
 @router.post('/generate',response_model=RuntimeGeneratedFilesResponse)
@@ -121,7 +129,9 @@ def generate_runtime_context(payload: RuntimeContextGenerateRequest, db: Session
         config = get_or_create(db)
         result = RuntimeContextGeneratorService.generate(config, payload)
         config.source_comfyui_path = payload.comfyui_path
+        config.export_root_directory = result.get("export_root_directory")
         config.export_directory = result["output_directory"]
+        config.workspace_status = "generated"
         config.last_export_archive = result["archive_path"]
         config.last_export_manifest = result.get("manifest") or {}
         from app.common.time import utc_now
