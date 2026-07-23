@@ -87,3 +87,41 @@ class RuntimeGeneratedFilesResponse(BaseModel):
     custom_nodes_lock: dict
     models_manifest: dict
     env_example: str
+
+
+class RuntimeBuildCreate(BaseModel):
+    push_after_build: bool = False
+
+class RuntimeBuildResponse(BaseModel):
+    id: int
+    runtime_config_id: int
+    version: str
+    image_tag: str
+    status: Literal["pending", "building", "validating", "succeeded", "failed", "publishing", "published", "active", "cancelled"]
+    phase: str
+    progress: int
+    logs: str
+    error_message: str | None
+    image_id: str | None
+    image_size_bytes: int | None
+    manifest: dict
+    validation_result: dict
+    published: bool
+    active: bool
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+class RuntimeBuildListResponse(BaseModel):
+    items: list[RuntimeBuildResponse]
+    total: int
+
+class RuntimeDockerDiagnosticResponse(BaseModel):
+    docker_available: bool
+    docker_version: str | None = None
+    buildx_available: bool = False
+    registry_image: str
+    active_image: str | None = None
+    message: str
