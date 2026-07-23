@@ -115,6 +115,7 @@ class RuntimeGeneratedFilesResponse(BaseModel):
 
 class RuntimeBuildCreate(BaseModel):
     push_after_build: bool = False
+    context_directory: str | None = Field(default=None, max_length=2000)
 
 class RuntimeBuildResponse(BaseModel):
     id: int

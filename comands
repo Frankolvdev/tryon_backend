@@ -1,3 +1,5 @@
+ .\.venv\Scripts\Activate.ps1                                                                      
+
 Para simular una renovación:
 
 python -m app.scripts.simulate_subscription_renewal --subscription-id 1
@@ -6,5 +8,8 @@ Para comprobar la idempotencia usando la misma referencia:
 
 python -m app.scripts.simulate_subscription_renewal --subscription-id 1 --reference-id test-invoice-001
 
-Para escuchas webhooks de stripe
+Para ver el secret de webhooks de stripe
 stripe listen --forward-to http://127.0.0.1:8001/api/v1/webhooks/stripe --print-secret
+
+para escuchar webhoos de stripe
+stripe listen --forward-to http://127.0.0.1:8001/api/v1/webhooks/stripe

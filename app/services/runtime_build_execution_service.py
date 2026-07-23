@@ -32,10 +32,68 @@ class RuntimeBuildExecutionService:
         return {"docker_available":available,"docker_version":version,"buildx_available":bx,"registry_image":cfg.registry_image,"active_image":active.image_tag if active else None,"message":"Docker listo para construir." if available else "Docker no está disponible en el host del backend. También puedes ejecutar el build mediante CI usando el contexto generado."}
 
     @staticmethod
-    def create(db, config):
+    def _resolve_context(db, config, requested_directory=None):
+        candidates = []
+        if requested_directory:
+            candidates.append(requested_directory)
+
+        projects = db.query(RuntimeProject).filter(
+            (RuntimeProject.runtime_config_id == config.id) |
+            (RuntimeProject.project_key == config.project_key)
+        ).order_by(RuntimeProject.updated_at.desc(), RuntimeProject.id.desc()).all()
+        for project in projects:
+            if project.export_directory:
+                candidates.append(project.export_directory)
+
+        if config.export_directory:
+            candidates.append(config.export_directory)
+        if config.export_root_directory:
+            candidates.append(str(Path(config.export_root_directory) / f"{config.project_key}-{config.runtime_version}"))
+
+        seen = set()
+        for raw in candidates:
+            if not raw:
+                continue
+            normalized = os.path.normcase(os.path.abspath(os.path.expanduser(str(raw))))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            path = Path(normalized)
+            if path.exists() and path.is_dir():
+                return path
+        return None
+
+    @staticmethod
+    def _validate_context(path):
+        required = ["Dockerfile", "runtime_manifest.json", "entrypoint.sh"]
+        missing = [name for name in required if not (path / name).is_file()]
+        if missing:
+            raise ValueError(
+                f"La exportación está incompleta o dañada en {path}. Faltan: {', '.join(missing)}."
+            )
+        try:
+            manifest = json.loads((path / "runtime_manifest.json").read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"runtime_manifest.json no es válido en {path}: {exc}") from exc
+        return {"valid": True, "context_path": str(path), "required_files": required, "manifest": manifest}
+
+    @staticmethod
+    def create(db, config, context_directory=None):
         validation=RuntimeBuilderService.validate(config)
         if not validation["valid"]: raise ValueError("La configuración contiene errores y no puede compilarse.")
-        build=RuntimeBuilderBuild(runtime_config_id=config.id,version=config.runtime_version,image_tag=RuntimeBuildExecutionService.image_tag(config),manifest=RuntimeBuilderService.generate(config)["runtime_manifest"],validation_result=validation)
+        context = RuntimeBuildExecutionService._resolve_context(db, config, context_directory)
+        if context is None:
+            raise ValueError("No se encontró una exportación válida. Selecciona el directorio generado, por ejemplo ...\tryon-1.0.0, antes de construir.")
+        context_validation = RuntimeBuildExecutionService._validate_context(context)
+        build=RuntimeBuilderBuild(
+            runtime_config_id=config.id,
+            version=config.runtime_version,
+            image_tag=RuntimeBuildExecutionService.image_tag(config),
+            context_path=str(context),
+            manifest=context_validation["manifest"],
+            validation_result={**validation, "context": context_validation},
+            logs=f"[runtime-builder] Contexto validado antes de iniciar: {context}\n",
+        )
         db.add(build); db.commit(); db.refresh(build); return build
 
     @staticmethod
@@ -54,21 +112,14 @@ class RuntimeBuildExecutionService:
         db=SessionLocal()
         try:
             build=db.get(RuntimeBuilderBuild,build_id); cfg=db.get(RuntimeBuilderConfig,build.runtime_config_id)
-            project=db.query(RuntimeProject).filter(RuntimeProject.runtime_config_id==cfg.id).order_by(RuntimeProject.id.desc()).first()
-            if project:
-                cfg.export_directory=project.export_directory
-                cfg.export_root_directory=project.export_root_directory
-                cfg.container_workdir=project.container_workdir
-                cfg.workflow_json=project.workflow_json
-                cfg.workflow_filename=project.workflow_filename
             build.status="building"; build.started_at=utc_now(); RuntimeBuildExecutionService._append(db,build,"[runtime-builder] Preparando contexto reproducible...","preparing",5)
-            if not cfg.export_directory:
-                raise RuntimeError("Primero genera el runtime autocontenido; no existe un directorio de exportación guardado.")
-            ctx = Path(cfg.export_directory).expanduser().resolve()
-            if not ctx.exists() or not ctx.is_dir():
-                raise RuntimeError(f"El directorio de exportación guardado no existe: {ctx}")
-            if not (ctx / "Dockerfile").is_file():
-                raise RuntimeError(f"La exportación no contiene Dockerfile: {ctx}")
+            ctx = Path(build.context_path).expanduser().resolve() if build.context_path else RuntimeBuildExecutionService._resolve_context(db, cfg)
+            if ctx is None:
+                raise RuntimeError("No se encontró el directorio de exportación seleccionado para este build.")
+            try:
+                RuntimeBuildExecutionService._validate_context(ctx)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
             build.context_path=str(ctx)
             RuntimeBuildExecutionService._append(db,build,f"[runtime-builder] Usando exportación persistida: {ctx}","building",12)
             cmd=['docker','build','--platform',cfg.target_platform,'-t',build.image_tag,'-f',str(ctx/'Dockerfile'),str(ctx)]

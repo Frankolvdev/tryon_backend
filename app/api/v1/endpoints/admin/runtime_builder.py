@@ -86,7 +86,7 @@ def list_builds(limit:int=Query(50,ge=1,le=200),db:Session=Depends(get_db)):
     q=db.query(RuntimeBuilderBuild); return {'items':q.order_by(RuntimeBuilderBuild.id.desc()).limit(limit).all(),'total':q.count()}
 @router.post('/builds',response_model=RuntimeBuildResponse)
 def create_build(payload:RuntimeBuildCreate,background_tasks:BackgroundTasks,db:Session=Depends(get_db)):
-    try: build=RuntimeBuildExecutionService.create(db,get_or_create(db))
+    try: build=RuntimeBuildExecutionService.create(db,get_or_create(db),payload.context_directory)
     except ValueError as exc: raise HTTPException(422,str(exc))
     background_tasks.add_task(RuntimeBuildExecutionService.start,build.id,payload.push_after_build); return build
 @router.get('/builds/{build_id}',response_model=RuntimeBuildResponse)
