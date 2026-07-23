@@ -4,11 +4,12 @@ from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
 from app.services.runtime_import_service import RuntimeImportService
 from app.services.runtime_intelligence_service import RuntimeIntelligenceService
+from app.services.runtime_context_generator_service import RuntimeContextGeneratorService
 router=APIRouter(prefix="/runtime-builder",dependencies=[Depends(admin_guard)])
 
 def get_or_create(db):
@@ -100,3 +101,13 @@ def intelligence_search(payload: RuntimeIntelligenceSearchRequest):
         return {"items": RuntimeIntelligenceService.search(index, payload.query), "summary": index["summary"]}
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+
+
+@router.post('/context/generate', response_model=RuntimeContextGenerateResponse)
+def generate_runtime_context(payload: RuntimeContextGenerateRequest, db: Session = Depends(get_db)):
+    try:
+        return RuntimeContextGeneratorService.generate(get_or_create(db), payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    except OSError as exc:
+        raise HTTPException(500, f"No fue posible generar el contexto Docker: {exc}")

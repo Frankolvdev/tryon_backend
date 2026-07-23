@@ -141,3 +141,31 @@ class RuntimeWorkflowAnalysisRequest(BaseModel):
 class RuntimeWorkflowResolveRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
     workflow: dict
+
+
+class RuntimeIntelligenceIndexRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+
+class RuntimeIntelligenceSearchRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+    query: str = Field(min_length=1, max_length=500)
+
+
+class RuntimeContextGenerateRequest(BaseModel):
+    comfyui_path: str = Field(min_length=1, max_length=2000)
+    output_directory: str | None = Field(default=None, max_length=2000)
+    copy_models: bool = True
+    copy_custom_nodes: bool = True
+    calculate_sha256: bool = True
+    overwrite: bool = False
+
+class RuntimeContextGenerateResponse(BaseModel):
+    success: bool
+    output_directory: str
+    archive_path: str
+    models_copied: int
+    custom_nodes_copied: int
+    bytes_copied: int
+    files_generated: list[str]
+    warnings: list[str]
+    manifest: dict
