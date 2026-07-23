@@ -146,6 +146,7 @@ class RuntimeContextGeneratorService:
             ".git", "__pycache__", "*.pyc", ".venv", "venv", "node_modules", ".idea", ".vscode"
         )
         enabled_nodes = [n for n in (config.custom_nodes or []) if n.get("enabled", True)]
+        copied_node_sources: dict[str, str] = {}
         notify("custom_nodes", 47, "Copiando Custom Nodes requeridos…")
         for index, item in enumerate(enabled_nodes):
             source = RuntimeContextGeneratorService._find_node(comfy, item)
@@ -155,18 +156,40 @@ class RuntimeContextGeneratorService:
                 record.update({"included": False, "source_path": None})
                 node_manifest.append(record)
                 continue
-            destination = output / "custom_nodes" / source.name
-            if payload.copy_custom_nodes:
-                shutil.copytree(source, destination, ignore=ignored)
+
+            source_key = os.path.normcase(str(source.resolve()))
+            context_path = f"custom_nodes/{source.name}"
+            destination = output / context_path
+            duplicate_of = copied_node_sources.get(source_key)
+
+            if payload.copy_custom_nodes and duplicate_of is None:
+                shutil.copytree(
+                    source,
+                    destination,
+                    ignore=ignored,
+                    dirs_exist_ok=True,
+                )
+                copied_node_sources[source_key] = context_path
                 nodes_copied += 1
                 total += sum(path.stat().st_size for path in destination.rglob("*") if path.is_file())
+            elif payload.copy_custom_nodes and duplicate_of is not None:
+                warnings.append(
+                    f"Custom Node duplicado omitido: {item.get('name') or source.name} "
+                    f"(usa el mismo directorio que {duplicate_of})."
+                )
+
             record.update({
                 "included": bool(payload.copy_custom_nodes),
                 "source_path": str(source),
-                "context_path": f"custom_nodes/{source.name}",
+                "context_path": duplicate_of or context_path,
+                "duplicate": duplicate_of is not None,
             })
             node_manifest.append(record)
-            notify("custom_nodes", 47 + int(28 * (index + 1) / max(1, len(enabled_nodes))), "Procesando Custom Nodes…")
+            notify(
+                "custom_nodes",
+                47 + int(28 * (index + 1) / max(1, len(enabled_nodes))),
+                "Procesando Custom Nodes…",
+            )
 
         dependencies = [d for d in (config.python_dependencies or []) if d.get("enabled", True)]
         requirements_lines = RuntimeBuilderService.render_requirements(dependencies)
@@ -243,8 +266,6 @@ fi
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(content, encoding="utf-8", newline="\n")
 
-        # No se crea un ZIP de respaldo. El directorio exportado es directamente
-        # el contexto que Docker/Modal necesita, evitando duplicar decenas de GB.
         notify("completed", 99, "Contexto de runtime generado sin crear ZIP de respaldo.")
         return {
             "success": True,
