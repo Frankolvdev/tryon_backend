@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib, json, os, re, shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.services.runtime_builder_service import RuntimeBuilderService
 
@@ -48,16 +48,22 @@ class RuntimeContextGeneratorService:
         return None
 
     @staticmethod
-    def generate(config: RuntimeBuilderConfig, payload: Any) -> dict[str,Any]:
+    def generate(config: RuntimeBuilderConfig, payload: Any, progress: Callable[[str, int, str], None] | None = None) -> dict[str,Any]:
+        report = progress or (lambda _phase, _percent, _message: None)
+        report("preparing", 2, "Validando la instalación local de ComfyUI…")
         comfy=RuntimeContextGeneratorService._find_comfyui(payload.comfyui_path)
         base=Path(payload.output_directory).expanduser().resolve() if payload.output_directory else (Path(config.export_root_directory).expanduser().resolve() if config.export_root_directory else Path(os.getenv("RUNTIME_EXPORTS_DIR","runtime_exports")).resolve())
         output=base/f"{RuntimeContextGeneratorService._safe(config.project_key or config.name)}-{RuntimeContextGeneratorService._safe(config.runtime_version)}"
+        report("preparing", 5, f"Preparando directorio de salida: {output}")
         if output.exists():
             if not payload.overwrite: raise ValueError(f"El directorio de salida ya existe: {output}. Activa sobrescribir para reemplazarlo.")
             shutil.rmtree(output)
         for folder in ("models","custom_nodes","workflow","scripts"): (output/folder).mkdir(parents=True,exist_ok=True)
+        report("preparing", 8, "Generando configuración reproducible…")
         generated=RuntimeBuilderService.generate(config); warnings=[]; model_manifest=[]; node_manifest=[]; total=0; models_copied=0; nodes_copied=0
-        for item in [m for m in (config.models or []) if m.get("enabled",True)]:
+        enabled_models=[m for m in (config.models or []) if m.get("enabled",True)]
+        for index, item in enumerate(enabled_models, start=1):
+            report("copying_models", 10 + int(55 * index / max(1, len(enabled_models))), f"Procesando modelo {index} de {len(enabled_models)}: {item.get('name') or item.get('target_path')}")
             source=RuntimeContextGeneratorService._find_model(comfy,item); record=dict(item)
             if not source:
                 warnings.append(f"Modelo no localizado: {item.get('target_path') or item.get('name')}"); record.update({"included":False,"source_path":None}); model_manifest.append(record); continue
@@ -66,32 +72,24 @@ class RuntimeContextGeneratorService:
             if payload.copy_models:
                 destination.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(source,destination); models_copied+=1; total+=size
             record.update({"included":bool(payload.copy_models),"source_path":str(source),"context_path":f"models/{relative.as_posix()}","size_bytes":size,"sha256":sha}); model_manifest.append(record)
+        report("copying_nodes", 68, "Preparando Custom Nodes…")
         ignored=shutil.ignore_patterns(".git","__pycache__","*.pyc",".venv","venv","node_modules",".idea",".vscode")
-        copied_node_sources: dict[str, str] = {}
-        copied_node_destinations: set[str] = set()
-        for item in [n for n in (config.custom_nodes or []) if n.get("enabled",True)]:
+        enabled_nodes=[n for n in (config.custom_nodes or []) if n.get("enabled",True)]
+        copied_node_sources: set[str] = set()
+        for index, item in enumerate(enabled_nodes, start=1):
+            report("copying_nodes", 68 + int(15 * index / max(1, len(enabled_nodes))), f"Procesando Custom Node {index} de {len(enabled_nodes)}: {item.get('name')}")
             source=RuntimeContextGeneratorService._find_node(comfy,item); record=dict(item)
             if not source:
                 warnings.append(f"Custom Node no localizado: {item.get('name')}"); record.update({"included":False,"source_path":None}); node_manifest.append(record); continue
-            source=source.resolve()
-            context_path=f"custom_nodes/{source.name}"
-            source_key=os.path.normcase(str(source))
             destination=output/"custom_nodes"/source.name
-            destination_key=os.path.normcase(str(destination.resolve(strict=False)))
-            duplicate_of=copied_node_sources.get(source_key)
-            if duplicate_of or destination_key in copied_node_destinations:
-                existing_context=duplicate_of or context_path
-                warnings.append(f"Custom Node duplicado omitido: {item.get('name') or source.name} ({existing_context}).")
-                record.update({"included":bool(payload.copy_custom_nodes),"source_path":str(source),"context_path":existing_context,"duplicate":True})
-                node_manifest.append(record)
-                continue
-            if payload.copy_custom_nodes:
-                shutil.copytree(source,destination,ignore=ignored)
-                nodes_copied+=1
-                total+=sum(path.stat().st_size for path in destination.rglob("*") if path.is_file())
-            copied_node_sources[source_key]=context_path
-            copied_node_destinations.add(destination_key)
-            record.update({"included":bool(payload.copy_custom_nodes),"source_path":str(source),"context_path":context_path,"duplicate":False}); node_manifest.append(record)
+            source_key=os.path.normcase(str(source.resolve()))
+            duplicate=source_key in copied_node_sources
+            if duplicate:
+                warnings.append(f"Custom Node duplicado omitido: {source.name}")
+            elif payload.copy_custom_nodes:
+                shutil.copytree(source,destination,ignore=ignored); nodes_copied+=1; total+=sum(p.stat().st_size for p in destination.rglob("*") if p.is_file()); copied_node_sources.add(source_key)
+            record.update({"included":bool(payload.copy_custom_nodes) and not duplicate,"duplicate":duplicate,"source_path":str(source),"context_path":f"custom_nodes/{source.name}"}); node_manifest.append(record)
+        report("generating_files", 85, "Generando manifiestos y scripts del contenedor…")
         deps=[d for d in (config.python_dependencies or []) if d.get("enabled",True)]
         requirements="\n".join(f"{d['package']}{'=='+d['version'] if d.get('version') else ''}" for d in deps)+( "\n" if deps else "")
         manifest={"contract":"tryon.runtime-context/v2","generated_at":datetime.now(timezone.utc).isoformat(),"runtime":generated["runtime_manifest"],"project_key":config.project_key,"module_type":config.module_type,"container_workdir":config.container_workdir,"source_comfyui":str(comfy),"copy_mode":{"models":payload.copy_models,"custom_nodes":payload.copy_custom_nodes},"models":model_manifest,"custom_nodes":node_manifest,"summary":{"models_copied":models_copied,"custom_nodes_copied":nodes_copied,"bytes_copied":total,"warnings":len(warnings)}}
@@ -114,7 +112,13 @@ fi
         files={"Dockerfile":RuntimeContextGeneratorService._dockerfile(config,payload.copy_models,payload.copy_custom_nodes),"requirements.txt":requirements,"runtime.json":json.dumps(generated["runtime_manifest"],indent=2,ensure_ascii=False),"manifest.json":json.dumps(manifest,indent=2,ensure_ascii=False),"models-manifest.json":json.dumps({"models":model_manifest},indent=2,ensure_ascii=False),"custom-nodes.lock.json":json.dumps({"nodes":node_manifest},indent=2,ensure_ascii=False),".env.example":generated["env_example"],"scripts/startup.sh":startup,"scripts/healthcheck.py":health,".dockerignore":"**/.git\n**/__pycache__\n**/*.pyc\n.venv\nnode_modules\n"}
         for relative,content in files.items():
             destination=output/relative; destination.parent.mkdir(parents=True,exist_ok=True); destination.write_text(content,encoding="utf-8",newline="\n")
+        report("archiving", 94, "Comprimiendo el runtime exportado…")
         archive=shutil.make_archive(str(output),"zip",root_dir=output)
+        report("validating", 99, "Validando archivos finales de la exportación…")
+        required=[output/"Dockerfile", output/"manifest.json", output/"runtime.json", output/"requirements.txt", output/"scripts"/"startup.sh", output/"scripts"/"healthcheck.py"]
+        missing=[str(item.relative_to(output)) for item in required if not item.is_file()]
+        if missing:
+            raise OSError("La exportación terminó incompleta. Faltan: " + ", ".join(missing))
         return {"success":True,"export_root_directory":str(base),"output_directory":str(output),"archive_path":archive,"models_copied":models_copied,"custom_nodes_copied":nodes_copied,"bytes_copied":total,"files_generated":sorted(files),"warnings":warnings,"manifest":manifest}
 
     @staticmethod

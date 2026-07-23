@@ -5,12 +5,13 @@ from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
 from app.models.runtime_project import RuntimeProject
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeContextJobCreateResponse, RuntimeContextJobResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
 from app.services.runtime_import_service import RuntimeImportService
 from app.services.runtime_intelligence_service import RuntimeIntelligenceService
 from app.services.runtime_context_generator_service import RuntimeContextGeneratorService
+from app.services.runtime_context_job_service import RuntimeContextJobService
 router=APIRouter(prefix="/runtime-builder",dependencies=[Depends(admin_guard)])
 
 def get_or_create(db):
@@ -86,7 +87,7 @@ def list_builds(limit:int=Query(50,ge=1,le=200),db:Session=Depends(get_db)):
     q=db.query(RuntimeBuilderBuild); return {'items':q.order_by(RuntimeBuilderBuild.id.desc()).limit(limit).all(),'total':q.count()}
 @router.post('/builds',response_model=RuntimeBuildResponse)
 def create_build(payload:RuntimeBuildCreate,background_tasks:BackgroundTasks,db:Session=Depends(get_db)):
-    try: build=RuntimeBuildExecutionService.create(db,get_or_create(db),payload.context_directory)
+    try: build=RuntimeBuildExecutionService.create(db,get_or_create(db))
     except ValueError as exc: raise HTTPException(422,str(exc))
     background_tasks.add_task(RuntimeBuildExecutionService.start,build.id,payload.push_after_build); return build
 @router.get('/builds/{build_id}',response_model=RuntimeBuildResponse)
@@ -173,24 +174,17 @@ def intelligence_search(payload: RuntimeIntelligenceSearchRequest):
         raise HTTPException(422, str(exc))
 
 
-@router.post('/context/generate', response_model=RuntimeContextGenerateResponse)
-def generate_runtime_context(payload: RuntimeContextGenerateRequest, db: Session = Depends(get_db)):
+@router.post('/context/generate', response_model=RuntimeContextJobCreateResponse, status_code=202)
+def generate_runtime_context(payload: RuntimeContextGenerateRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    config = get_or_create(db)
+    job = RuntimeContextJobService.create(config.id, payload)
+    background_tasks.add_task(RuntimeContextJobService.run, job["job_id"])
+    return job
+
+
+@router.get('/context/jobs/{job_id}', response_model=RuntimeContextJobResponse)
+def read_runtime_context_job(job_id: str):
     try:
-        config = get_or_create(db)
-        result = RuntimeContextGeneratorService.generate(config, payload)
-        project = get_or_create_project(db, config)
-        project.source_comfyui_path = payload.comfyui_path
-        project.export_root_directory = result.get("export_root_directory")
-        project.export_directory = result["output_directory"]
-        project.workspace_status = "generated"
-        project.last_export_archive = result["archive_path"]
-        project.last_export_manifest = result.get("manifest") or {}
-        from app.common.time import utc_now
-        project.last_exported_at = utc_now()
-        sync_project_to_config(project, config)
-        db.add_all([project, config]); db.commit(); db.refresh(project)
-        return result
-    except ValueError as exc:
-        raise HTTPException(422, str(exc))
-    except OSError as exc:
-        raise HTTPException(500, f"No fue posible generar el contexto Docker: {exc}")
+        return RuntimeContextJobService.public(job_id)
+    except KeyError:
+        raise HTTPException(404, 'Trabajo de exportación no encontrado o el backend fue reiniciado.')
