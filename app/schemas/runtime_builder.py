@@ -125,3 +125,15 @@ class RuntimeDockerDiagnosticResponse(BaseModel):
     registry_image: str
     active_image: str | None = None
     message: str
+
+class RuntimeImportPathRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+    include_all_models: bool = True
+
+class RuntimeImportApplyRequest(BaseModel):
+    report: dict
+    selection: dict[str, bool] = Field(default_factory=lambda: {"base": True, "custom_nodes": True, "models": True, "dependencies": False, "volumes": True})
+
+class RuntimeWorkflowAnalysisRequest(BaseModel):
+    workflow: dict
+    report: dict | None = None

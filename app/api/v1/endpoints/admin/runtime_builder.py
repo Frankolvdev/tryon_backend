@@ -1,12 +1,13 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
+from app.services.runtime_import_service import RuntimeImportService
 router=APIRouter(prefix="/runtime-builder",dependencies=[Depends(admin_guard)])
 
 def get_or_create(db):
@@ -56,3 +57,24 @@ def cancel(build_id:int,db:Session=Depends(get_db)):
     if not item: raise HTTPException(404,'Build no encontrado.')
     if item.status in {'building','pending','validating','publishing'}: item.status='cancelled'; item.phase='cancelled'; db.add(item); db.commit(); db.refresh(item)
     return item
+
+@router.post('/import/scan-path')
+def import_scan_path(payload:RuntimeImportPathRequest):
+    try: return RuntimeImportService.scan_path(payload.path,payload.include_all_models)
+    except ValueError as exc: raise HTTPException(422,str(exc))
+
+@router.post('/import/upload')
+async def import_upload(file:UploadFile=File(...)):
+    if not file.filename or not file.filename.lower().endswith('.zip'): raise HTTPException(422,'Debes cargar un archivo ZIP.')
+    content=await file.read()
+    if len(content)>100*1024*1024: raise HTTPException(413,'El inventario supera el límite de 100 MB.')
+    try: return RuntimeImportService.scan_inventory_zip(content)
+    except ValueError as exc: raise HTTPException(422,str(exc))
+
+@router.post('/import/analyze-workflow')
+def import_analyze_workflow(payload:RuntimeWorkflowAnalysisRequest):
+    return RuntimeImportService.analyze_workflow(payload.workflow,payload.report)
+
+@router.post('/import/apply',response_model=RuntimeBuilderConfigResponse)
+def import_apply(payload:RuntimeImportApplyRequest,db:Session=Depends(get_db)):
+    return RuntimeImportService.apply_report(db,get_or_create(db),payload.report,payload.selection)

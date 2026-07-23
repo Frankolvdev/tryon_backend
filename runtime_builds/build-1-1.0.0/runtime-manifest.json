@@ -1,0 +1,14 @@
+{
+  "contract": "tryon.runtime-builder/v1",
+  "name": "Runtime principal",
+  "version": "1.0.0",
+  "platform": "linux/amd64",
+  "registry_image": "ghcr.io/your-org/tryon-generation-runtime",
+  "comfyui": {
+    "repository": "https://github.com/comfyanonymous/ComfyUI.git",
+    "commit": null
+  },
+  "python": "3.11",
+  "cuda": "12.4.1",
+  "volumes": []
+}
