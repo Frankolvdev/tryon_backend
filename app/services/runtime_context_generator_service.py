@@ -106,6 +106,28 @@ class RuntimeContextGeneratorService:
             (output / folder).mkdir(parents=True, exist_ok=True)
 
         generated = RuntimeBuilderService.generate(config)
+
+        # La decisión real de copiar modelos pertenece a la exportación. Si el
+        # usuario desmarca "Copiar modelos" y existe un Volume configurado, se
+        # fuerza el contexto Modal aunque los modelos detectados conservaran una
+        # estrategia anterior. Así siempre se generan modal_app.py y
+        # extra_model_paths.yaml para el directorio exportado.
+        modal_external_models = (
+            not payload.copy_models
+            and bool(config.volumes)
+            and RuntimeBuilderService._is_modal(config)
+        )
+        if modal_external_models:
+            volume_path = RuntimeBuilderService._modal_volume_path(config)
+            volume_name = next(
+                (str(volume.get("name")) for volume in (config.volumes or []) if volume.get("name")),
+                "tryon-models",
+            )
+            generated["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path)
+            generated["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(volume_path)
+            generated["runtime_manifest"]["provider"] = "modal"
+            generated["runtime_manifest"]["model_storage"] = "external-volume"
+
         warnings: list[str] = []
         model_manifest: list[dict[str, Any]] = []
         node_manifest: list[dict[str, Any]] = []

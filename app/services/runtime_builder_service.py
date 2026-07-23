@@ -100,11 +100,27 @@ class RuntimeBuilderService:
 
     @staticmethod
     def _is_modal(config: RuntimeBuilderConfig) -> bool:
+        # Compatibilidad con configuraciones anteriores: todavía no existe un
+        # selector visual de proveedor. Modal se detecta por plataforma/notas,
+        # variables de entorno o por la existencia del Volume de modelos.
         values = [
             str(getattr(config, "target_platform", "") or ""),
             str(getattr(config, "notes", "") or ""),
         ]
-        return any("modal" in value.lower() for value in values)
+        for item in getattr(config, "environment_variables", None) or []:
+            values.extend([str(item.get("key") or ""), str(item.get("value") or "")])
+        for volume in getattr(config, "volumes", None) or []:
+            values.extend([
+                str(volume.get("name") or ""),
+                str(volume.get("mount_path") or volume.get("container_path") or volume.get("path") or ""),
+            ])
+        if any("modal" in value.lower() for value in values):
+            return True
+
+        # En el Runtime Builder actual, un Volume configurado junto con modelos
+        # de estrategia volume representa el almacenamiento externo de Modal.
+        # Esto evita depender de un campo de proveedor que aún no existe en UI.
+        return bool(getattr(config, "volumes", None)) and RuntimeBuilderService._models_are_external(config)
 
     @staticmethod
     def _models_are_external(config: RuntimeBuilderConfig) -> bool:
