@@ -65,17 +65,45 @@ class RuntimeBuildExecutionService:
 
     @staticmethod
     def _validate_context(path):
-        required = ["Dockerfile", "runtime_manifest.json", "entrypoint.sh"]
+        # Estos son los nombres que genera RuntimeContextGeneratorService.
+        # El Dockerfile utiliza scripts/startup.sh como ENTRYPOINT.
+        required = [
+            "Dockerfile",
+            "manifest.json",
+            "runtime.json",
+            "requirements.txt",
+            "scripts/startup.sh",
+            "scripts/healthcheck.py",
+        ]
         missing = [name for name in required if not (path / name).is_file()]
         if missing:
             raise ValueError(
-                f"La exportación está incompleta o dañada en {path}. Faltan: {', '.join(missing)}."
+                f"La exportación está incompleta o dañada en {path}. "
+                f"Faltan: {', '.join(missing)}. Vuelve a generar el runtime autocontenido."
             )
+
         try:
-            manifest = json.loads((path / "runtime_manifest.json").read_text(encoding="utf-8"))
+            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
         except Exception as exc:
-            raise ValueError(f"runtime_manifest.json no es válido en {path}: {exc}") from exc
-        return {"valid": True, "context_path": str(path), "required_files": required, "manifest": manifest}
+            raise ValueError(f"manifest.json no es válido en {path}: {exc}") from exc
+
+        try:
+            runtime_manifest = json.loads((path / "runtime.json").read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"runtime.json no es válido en {path}: {exc}") from exc
+
+        if manifest.get("contract") != "tryon.runtime-context/v2":
+            raise ValueError(
+                f"manifest.json no corresponde a un contexto Runtime Builder compatible en {path}."
+            )
+
+        return {
+            "valid": True,
+            "context_path": str(path),
+            "required_files": required,
+            "manifest": manifest,
+            "runtime_manifest": runtime_manifest,
+        }
 
     @staticmethod
     def create(db, config, context_directory=None):
