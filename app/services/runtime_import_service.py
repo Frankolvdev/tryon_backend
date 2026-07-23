@@ -319,12 +319,23 @@ class RuntimeImportService:
         # Building the static index here keeps resolution deterministic and also
         # supports Pinokio installations with more than one custom_nodes folder.
         intelligence_by_name: dict[str, dict[str, Any]] = {}
+        intelligence_classes: list[dict[str, Any]] = []
+        intelligence_provider_paths: list[Path] = []
         intelligence_summary: dict[str, Any] = {}
+        alias_resolver = None
         try:
+            from app.services.runtime_alias_resolver import RuntimeAliasResolver
             from app.services.runtime_intelligence_service import RuntimeIntelligenceService
             intelligence = RuntimeIntelligenceService.build_index(str(selected))
             intelligence_summary = intelligence.get('summary') or {}
-            for item in intelligence.get('classes') or []:
+            intelligence_classes = [item for item in (intelligence.get('classes') or []) if isinstance(item, dict)]
+            intelligence_provider_paths = [
+                Path(str(item.get('source_path'))).resolve()
+                for item in (intelligence.get('providers') or [])
+                if isinstance(item, dict) and item.get('source_path')
+            ]
+            alias_resolver = RuntimeAliasResolver(intelligence_classes)
+            for item in intelligence_classes:
                 if not isinstance(item, dict):
                     continue
                 public_name = str(item.get('class_type') or '').strip()
@@ -355,22 +366,48 @@ class RuntimeImportService:
         for cls in class_types:
             folder=class_to_folder.get(cls)
             intel = intelligence_by_name.get(cls.casefold())
-            # Some extensions create a deterministic class name by appending a
-            # SHA-256 suffix (for example ExecutePython<64 hex chars>).
-            if intel is None:
-                normalized = re.sub(r'[0-9a-f]{64}$', '', cls, flags=re.IGNORECASE).casefold()
-                intel = intelligence_by_name.get(normalized)
-                if intel is None and normalized:
-                    intel = next((value for key, value in intelligence_by_name.items() if key == normalized or key.startswith(normalized)), None)
+            alias_match: dict[str, Any] | None = None
+            if intel is None and alias_resolver is not None:
+                alias_match = alias_resolver.resolve(cls)
+                if alias_match:
+                    intel = alias_match.get('item')
+            # Some extensions build NODE_CLASS_MAPPINGS dynamically. Their names
+            # may not be representable as a literal AST dictionary, so scan only
+            # the still-unresolved provider sources as a bounded safe fallback.
+            if intel is None and alias_resolver is not None:
+                intel = alias_resolver.find_source_hint(cls, intelligence_provider_paths)
+                if intel:
+                    alias_match = {
+                        'matched_alias': intel.get('display_name') or cls,
+                        'reason': intel.get('alias_reason') or 'source-hint',
+                        'score': intel.get('alias_score') or 0.84,
+                    }
             if folder is None and intel and intel.get('source_file'):
                 source_file = Path(str(intel['source_file'])).resolve()
                 candidate = Path(str(intel.get('source_path') or source_file.parent)).resolve()
                 folder = candidate
             if folder:
+                class_to_folder[cls] = folder
                 required_folders[str(folder).casefold()]=folder
-                resolved_classes.append({'class_type':cls,'provider':'custom','provider_name':str(intel.get('provider') if intel else folder.name),'confidence':'intelligence-index' if intel else ('runtime' if cls in runtime_catalog else 'static')})
+                resolved_classes.append({
+                    'class_type':cls,
+                    'provider':'custom',
+                    'provider_name':str(intel.get('provider') if intel else folder.name),
+                    'confidence':('alias-resolver' if alias_match else 'intelligence-index') if intel else ('runtime' if cls in runtime_catalog else 'static'),
+                    'matched_alias':alias_match.get('matched_alias') if alias_match else None,
+                    'alias_reason':alias_match.get('reason') if alias_match else None,
+                    'alias_score':alias_match.get('score') if alias_match else None,
+                })
             elif intel:
-                resolved_classes.append({'class_type':cls,'provider':'custom','provider_name':str(intel.get('provider') or 'Custom Node'),'confidence':'intelligence-index'})
+                resolved_classes.append({
+                    'class_type':cls,
+                    'provider':'custom',
+                    'provider_name':str(intel.get('provider') or 'Custom Node'),
+                    'confidence':'alias-resolver' if alias_match else 'intelligence-index',
+                    'matched_alias':alias_match.get('matched_alias') if alias_match else None,
+                    'alias_reason':alias_match.get('reason') if alias_match else None,
+                    'alias_score':alias_match.get('score') if alias_match else None,
+                })
             elif cls.casefold() in virtual_workflow_nodes:
                 resolved_classes.append({'class_type':cls,'provider':'workflow','provider_name':'ComfyUI Frontend / Extension','confidence':'workflow-virtual'})
             elif cls in core_classes or cls in runtime_catalog or cls in MODEL_INPUT_RULES:
@@ -407,7 +444,7 @@ class RuntimeImportService:
         weighted_total=max(1,len(class_types)+len(reference_records)+4)
         weighted_ok=(len(class_types)-len(unresolved_classes))+(len(reference_records)-len(set(missing_models)))+sum(bool(python.get(k)) for k in ('python','torch','cuda','gpu'))
         score=max(0,min(100,round(weighted_ok/weighted_total*100)))
-        return {'source_type':source,'selected_path':str(selected),'comfyui_path':str(comfy),'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),'torch_cuda_version':python.get('cuda'),'gpu_name':python.get('gpu'),'python_candidates':python.get('candidate_attempts',[]),'workflow':{'node_count':len(workflow_nodes),'class_types':class_types,'referenced_models':referenced},'resolved_classes':resolved_classes,'core_classes':[r['class_type'] for r in resolved_classes if r['provider']=='core'],'custom_nodes':required_nodes,'models':required_models,'python_dependencies':list(dependencies_by_name.values()),'environment_variables':[],'volumes':[{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],'unresolved_classes':unresolved_classes,'missing_models':sorted(set(missing_models)),'ambiguous_models':sorted(set(ambiguous_models)),'warnings':warnings,'summary':{'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),'core_classes':sum(1 for r in resolved_classes if r['provider']=='core'),'resolved_custom_classes':sum(1 for r in resolved_classes if r['provider']=='custom'),'required_custom_nodes':len(required_nodes),'required_models':len(required_models),'referenced_models':len(reference_records),'missing_models':len(set(missing_models)),'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),'installed_custom_nodes':len(folders),'installed_models':total_models,'runtime_catalog_classes':max(0,len(runtime_catalog)-int('__error__' in runtime_catalog)),'knowledge_base_rules':len(MODEL_INPUT_RULES),'intelligence_index_classes':int(intelligence_summary.get('classes') or 0),'intelligence_index_providers':int(intelligence_summary.get('providers') or 0),'compatibility_score':score}}
+        return {'source_type':source,'selected_path':str(selected),'comfyui_path':str(comfy),'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),'torch_cuda_version':python.get('cuda'),'gpu_name':python.get('gpu'),'python_candidates':python.get('candidate_attempts',[]),'workflow':{'node_count':len(workflow_nodes),'class_types':class_types,'referenced_models':referenced},'resolved_classes':resolved_classes,'core_classes':[r['class_type'] for r in resolved_classes if r['provider']=='core'],'custom_nodes':required_nodes,'models':required_models,'python_dependencies':list(dependencies_by_name.values()),'environment_variables':[],'volumes':[{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],'unresolved_classes':unresolved_classes,'missing_models':sorted(set(missing_models)),'ambiguous_models':sorted(set(ambiguous_models)),'warnings':warnings,'summary':{'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),'core_classes':sum(1 for r in resolved_classes if r['provider']=='core'),'resolved_custom_classes':sum(1 for r in resolved_classes if r['provider']=='custom'),'required_custom_nodes':len(required_nodes),'required_models':len(required_models),'referenced_models':len(reference_records),'missing_models':len(set(missing_models)),'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),'installed_custom_nodes':len(folders),'installed_models':total_models,'runtime_catalog_classes':max(0,len(runtime_catalog)-int('__error__' in runtime_catalog)),'knowledge_base_rules':len(MODEL_INPUT_RULES),'intelligence_index_classes':int(intelligence_summary.get('classes') or 0),'intelligence_index_providers':int(intelligence_summary.get('providers') or 0),'alias_resolved_classes':sum(1 for r in resolved_classes if r.get('confidence')=='alias-resolver'),'compatibility_score':score}}
 
     @staticmethod
     def scan_path(path: str, include_all_models: bool = True) -> dict[str, Any]:
