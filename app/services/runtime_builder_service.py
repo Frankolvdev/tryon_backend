@@ -21,7 +21,23 @@ class RuntimeBuilderService:
     extras and markers instead of blindly inserting ``==``.
     """
 
-    DEFAULT_MODAL_VOLUME_PATH = "/models"
+    DEFAULT_MODAL_VOLUME_PATH = "/app/ComfyUI/models"
+
+    DEVELOPMENT_DEPENDENCIES = {
+        "black", "flake8", "pytest", "pytest-cov", "pytest-asyncio",
+        "coverage", "ruff", "isort", "mypy", "pre-commit", "tox",
+        "nox", "bandit", "pylint", "autopep8", "yapf",
+    }
+
+    @staticmethod
+    def _requirement_name(requirement: str) -> str:
+        value = str(requirement or "").strip()
+        value = value.split(";", 1)[0].strip()
+        return re.split(r"\[|===|==|~=|!=|<=|>=|<|>|\s", value, maxsplit=1)[0].strip().lower()
+
+    @staticmethod
+    def is_runtime_dependency(requirement: str) -> bool:
+        return RuntimeBuilderService._requirement_name(requirement) not in RuntimeBuilderService.DEVELOPMENT_DEPENDENCIES
 
     @staticmethod
     def normalize_cuda_version(value: str | None) -> str:
@@ -98,6 +114,8 @@ class RuntimeBuilderService:
         seen: set[str] = set()
         for dependency in dependencies:
             requirement = RuntimeBuilderService.render_requirement(dependency)
+            if not RuntimeBuilderService.is_runtime_dependency(requirement):
+                continue
             key = requirement.lower()
             if key not in seen:
                 seen.add(key)
@@ -141,12 +159,15 @@ class RuntimeBuilderService:
         for volume in config.volumes or []:
             provider = str(volume.get("provider") or volume.get("type") or "").lower()
             if provider == "modal" or str(volume.get("name") or "").lower().startswith("modal"):
-                return str(
+                configured = str(
                     volume.get("container_path")
                     or volume.get("mount_path")
                     or volume.get("path")
                     or RuntimeBuilderService.DEFAULT_MODAL_VOLUME_PATH
-                )
+                ).rstrip("/")
+                if configured in {"/opt/ComfyUI/models", "/models"}:
+                    return RuntimeBuilderService.DEFAULT_MODAL_VOLUME_PATH
+                return configured
         return RuntimeBuilderService.DEFAULT_MODAL_VOLUME_PATH
 
     @staticmethod
@@ -376,7 +397,7 @@ def comfyui():
         volume_path = RuntimeBuilderService._modal_volume_path(config)
         extra_paths_copy = ""
         if modal_enabled and external_models:
-            extra_paths_copy = "COPY runtime-builder/extra_model_paths.yaml /opt/ComfyUI/extra_model_paths.yaml"
+            extra_paths_copy = "COPY runtime-builder/extra_model_paths.yaml /app/ComfyUI/extra_model_paths.yaml"
 
         commit_line = (
             f"RUN git -C /opt/ComfyUI checkout {config.comfyui_commit}"

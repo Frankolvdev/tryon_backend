@@ -74,15 +74,27 @@ class RuntimeContextGeneratorService:
 
     @staticmethod
     def _normalize_copied_requirements(root: Path) -> list[str]:
-        """Corrige pins conocidos que no tienen wheel para el runtime Linux."""
+        """Normaliza requisitos de ejecución y elimina herramientas solo de desarrollo."""
         changed: list[str] = []
-        pattern = re.compile(r"(?im)^\s*mediapipe\s*==\s*0\.10\.0\s*$")
+        mediapipe_pattern = re.compile(r"(?i)^\s*mediapipe\s*==\s*0\.10\.0\s*$")
         for requirement_file in root.rglob("requirements.txt"):
             try:
                 original = requirement_file.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 original = requirement_file.read_text(encoding="utf-8", errors="ignore")
-            normalized = pattern.sub("mediapipe==0.10.21", original)
+
+            output_lines: list[str] = []
+            for line in original.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or stripped.startswith(("-r ", "--requirement ", "-c ", "--constraint ")):
+                    output_lines.append(line)
+                    continue
+                normalized_line = mediapipe_pattern.sub("mediapipe==0.10.21", line)
+                if not RuntimeBuilderService.is_runtime_dependency(normalized_line):
+                    continue
+                output_lines.append(normalized_line)
+
+            normalized = "\n".join(output_lines) + ("\n" if original.endswith(("\n", "\r")) else "")
             if normalized != original:
                 requirement_file.write_text(normalized, encoding="utf-8")
                 changed.append(str(requirement_file))
@@ -211,8 +223,8 @@ class RuntimeContextGeneratorService:
                 normalized_files = RuntimeContextGeneratorService._normalize_copied_requirements(destination)
                 for normalized_file in normalized_files:
                     warnings.append(
-                        "Dependencia corregida en Custom Node: "
-                        f"mediapipe==0.10.0 → mediapipe==0.10.21 ({normalized_file})."
+                        "Requirements de Custom Node normalizados para producción "
+                        f"({normalized_file})."
                     )
                 nodes_copied += 1
                 total += sum(path.stat().st_size for path in destination.rglob("*") if path.is_file())
