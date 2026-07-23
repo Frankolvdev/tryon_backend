@@ -13,6 +13,15 @@ class ValidationIssue:
 
 
 class RuntimeBuilderService:
+
+    @staticmethod
+    def normalize_cuda_version(value: str | None) -> str:
+        version = str(value or "").strip()
+        if re.fullmatch(r"\d+\.\d+", version):
+            return f"{version}.0"
+        if re.fullmatch(r"\d+\.\d+\.\d+", version):
+            return version
+        raise ValueError("La versión CUDA debe usar el formato mayor.menor o mayor.menor.parche, por ejemplo 12.8 o 12.8.0.")
     @staticmethod
     def validate(config: RuntimeBuilderConfig) -> dict:
         issues: list[ValidationIssue] = []
@@ -73,7 +82,7 @@ class RuntimeBuilderService:
                 model_lines.append(f"RUN mkdir -p $(dirname /opt/ComfyUI/models/{model['target_path']}) && curl -fL '{model['source_url']}' -o /opt/ComfyUI/models/{model['target_path']}")
         commit_line = f"RUN git -C /opt/ComfyUI checkout {config.comfyui_commit}" if config.comfyui_commit else ""
         dockerfile = "\n".join(filter(None, [
-            f"FROM nvidia/cuda:{config.cuda_version}-cudnn-runtime-ubuntu22.04",
+            f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
             "ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1",
             "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv git curl ffmpeg libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*",
             f"RUN git clone {config.comfyui_repository} /opt/ComfyUI",
