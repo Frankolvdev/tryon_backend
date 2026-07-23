@@ -67,14 +67,31 @@ class RuntimeContextGeneratorService:
                 destination.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(source,destination); models_copied+=1; total+=size
             record.update({"included":bool(payload.copy_models),"source_path":str(source),"context_path":f"models/{relative.as_posix()}","size_bytes":size,"sha256":sha}); model_manifest.append(record)
         ignored=shutil.ignore_patterns(".git","__pycache__","*.pyc",".venv","venv","node_modules",".idea",".vscode")
+        copied_node_sources: dict[str, str] = {}
+        copied_node_destinations: set[str] = set()
         for item in [n for n in (config.custom_nodes or []) if n.get("enabled",True)]:
             source=RuntimeContextGeneratorService._find_node(comfy,item); record=dict(item)
             if not source:
                 warnings.append(f"Custom Node no localizado: {item.get('name')}"); record.update({"included":False,"source_path":None}); node_manifest.append(record); continue
+            source=source.resolve()
+            context_path=f"custom_nodes/{source.name}"
+            source_key=os.path.normcase(str(source))
             destination=output/"custom_nodes"/source.name
+            destination_key=os.path.normcase(str(destination.resolve(strict=False)))
+            duplicate_of=copied_node_sources.get(source_key)
+            if duplicate_of or destination_key in copied_node_destinations:
+                existing_context=duplicate_of or context_path
+                warnings.append(f"Custom Node duplicado omitido: {item.get('name') or source.name} ({existing_context}).")
+                record.update({"included":bool(payload.copy_custom_nodes),"source_path":str(source),"context_path":existing_context,"duplicate":True})
+                node_manifest.append(record)
+                continue
             if payload.copy_custom_nodes:
-                shutil.copytree(source,destination,ignore=ignored); nodes_copied+=1; total+=sum(p.stat().st_size for p in destination.rglob("*") if p.is_file())
-            record.update({"included":bool(payload.copy_custom_nodes),"source_path":str(source),"context_path":f"custom_nodes/{source.name}"}); node_manifest.append(record)
+                shutil.copytree(source,destination,ignore=ignored)
+                nodes_copied+=1
+                total+=sum(path.stat().st_size for path in destination.rglob("*") if path.is_file())
+            copied_node_sources[source_key]=context_path
+            copied_node_destinations.add(destination_key)
+            record.update({"included":bool(payload.copy_custom_nodes),"source_path":str(source),"context_path":context_path,"duplicate":False}); node_manifest.append(record)
         deps=[d for d in (config.python_dependencies or []) if d.get("enabled",True)]
         requirements="\n".join(f"{d['package']}{'=='+d['version'] if d.get('version') else ''}" for d in deps)+( "\n" if deps else "")
         manifest={"contract":"tryon.runtime-context/v2","generated_at":datetime.now(timezone.utc).isoformat(),"runtime":generated["runtime_manifest"],"project_key":config.project_key,"module_type":config.module_type,"container_workdir":config.container_workdir,"source_comfyui":str(comfy),"copy_mode":{"models":payload.copy_models,"custom_nodes":payload.copy_custom_nodes},"models":model_manifest,"custom_nodes":node_manifest,"summary":{"models_copied":models_copied,"custom_nodes_copied":nodes_copied,"bytes_copied":total,"warnings":len(warnings)}}
