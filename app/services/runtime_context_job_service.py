@@ -4,7 +4,7 @@ import threading
 import traceback
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from app.db.database import SessionLocal
@@ -12,11 +12,7 @@ from app.services.runtime_context_generator_service import RuntimeContextGenerat
 
 
 class RuntimeContextJobService:
-    """In-process registry for long-running local runtime exports.
-
-    The export runs outside the request lifecycle so the Next.js proxy can return
-    immediately and poll progress without holding an HTTP connection for minutes.
-    """
+    """In-process registry for long-running local runtime exports."""
 
     _jobs: dict[str, dict[str, Any]] = {}
     _lock = threading.RLock()
@@ -62,10 +58,10 @@ class RuntimeContextJobService:
 
     @classmethod
     def run(cls, job_id: str) -> None:
+        from app.common.time import utc_now
         from app.models.runtime_builder_config import RuntimeBuilderConfig
         from app.models.runtime_project import RuntimeProject
         from app.schemas.runtime_builder import RuntimeContextGenerateRequest
-        from app.common.time import utc_now
 
         try:
             with cls._lock:
@@ -95,7 +91,6 @@ class RuntimeContextJobService:
                 config = db.get(RuntimeBuilderConfig, config_id)
                 if config is None:
                     raise ValueError("La configuración del Runtime Builder ya no existe.")
-
                 result = RuntimeContextGeneratorService.generate(config, payload, progress)
                 project = db.query(RuntimeProject).filter(
                     RuntimeProject.project_key == config.project_key
@@ -108,24 +103,20 @@ class RuntimeContextJobService:
                         container_workdir=config.container_workdir or "/app",
                     )
                     db.add(project)
-
                 project.source_comfyui_path = payload.comfyui_path
                 project.export_root_directory = result.get("export_root_directory")
                 project.export_directory = result["output_directory"]
                 project.workspace_status = "generated"
-                project.last_export_archive = result["archive_path"]
+                project.last_export_archive = None
                 project.last_export_manifest = result.get("manifest") or {}
                 project.last_exported_at = utc_now()
-
                 for field in (
-                    "project_key", "module_type", "source_comfyui_path",
-                    "workflow_filename", "workflow_json", "container_workdir",
-                    "export_root_directory", "export_directory", "last_index_summary",
-                    "workspace_status", "last_export_archive", "last_export_manifest",
-                    "last_exported_at",
+                    "project_key", "module_type", "source_comfyui_path", "workflow_filename",
+                    "workflow_json", "container_workdir", "export_root_directory",
+                    "export_directory", "last_index_summary", "workspace_status",
+                    "last_export_archive", "last_export_manifest", "last_exported_at",
                 ):
                     setattr(config, field, getattr(project, field))
-
                 db.add_all([project, config])
                 db.commit()
             finally:
@@ -136,11 +127,11 @@ class RuntimeContextJobService:
                 status="completed",
                 phase="completed",
                 progress=100,
-                message="Runtime autocontenido generado y validado correctamente.",
+                message="Contexto de runtime generado correctamente, sin ZIP de respaldo.",
                 result=result,
                 finished_at=datetime.now(timezone.utc).isoformat(),
             )
-        except Exception as exc:  # noqa: BLE001 - job must retain any failure
+        except Exception as exc:  # noqa: BLE001
             cls._update(
                 job_id,
                 status="failed",

@@ -3,8 +3,6 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from packaging.requirements import InvalidRequirement, Requirement
-
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 
 
@@ -78,10 +76,15 @@ class RuntimeBuilderService:
         else:
             candidate = f"{raw_package}=={raw_version}"
 
-        try:
-            return str(Requirement(candidate))
-        except InvalidRequirement as exc:
-            raise ValueError(f"Dependencia Python inválida: {candidate!r}. {exc}") from exc
+        # Validación conservadora sin dependencias externas. El Runtime Builder
+        # solo necesita impedir las formas que él mismo podía generar mal.
+        if not candidate or candidate.startswith(("==", ";", "[")):
+            raise ValueError(f"Dependencia Python inválida: {candidate!r}.")
+        if "==[" in candidate or "==;" in candidate:
+            raise ValueError(f"Dependencia Python inválida: {candidate!r}.")
+        if any(char in candidate for char in ("\n", "\r", "\x00")):
+            raise ValueError(f"Dependencia Python inválida: {candidate!r}.")
+        return candidate
 
     @staticmethod
     def render_requirements(dependencies: list[dict[str, Any]]) -> list[str]:
