@@ -345,7 +345,7 @@ fi
         lines = [
             f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
             "ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1",
-            "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv git curl ffmpeg libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*",
+            "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv python3-dev git curl ffmpeg libgl1 libglib2.0-0 build-essential pkg-config libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && rm -rf /var/lib/apt/lists/*",
             f"RUN git clone {config.comfyui_repository} {comfy_target}",
         ]
         if config.comfyui_commit:
