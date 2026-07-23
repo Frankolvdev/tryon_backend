@@ -20,7 +20,7 @@ class RuntimePythonDependency(BaseModel):
 
 class RuntimeModelAsset(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    model_type: Literal["checkpoint", "vae", "lora", "controlnet", "clip", "upscaler", "other"] = "other"
+    model_type: Literal["checkpoint", "vae", "lora", "controlnet", "clip", "upscaler", "diffusion_model", "embedding", "detector", "sam", "ipadapter", "video_model", "other"] = "other"
     source_url: str | None = Field(default=None, max_length=2000)
     target_path: str = Field(min_length=1, max_length=1000)
     sha256: str | None = Field(default=None, max_length=64)
@@ -141,11 +141,3 @@ class RuntimeWorkflowAnalysisRequest(BaseModel):
 class RuntimeWorkflowResolveRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
     workflow: dict
-
-
-class RuntimeIntelligenceIndexRequest(BaseModel):
-    path: str = Field(min_length=1, max_length=2000)
-
-class RuntimeIntelligenceSearchRequest(BaseModel):
-    path: str = Field(min_length=1, max_length=2000)
-    query: str = Field(default="", max_length=255)
