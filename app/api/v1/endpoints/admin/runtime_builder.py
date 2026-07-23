@@ -5,7 +5,7 @@ from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
 from app.models.runtime_project import RuntimeProject
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeContextJobCreateResponse, RuntimeContextJobResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeBuildBulkRequest, RuntimeBuildBulkResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeContextJobCreateResponse, RuntimeContextJobResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
 from app.services.runtime_import_service import RuntimeImportService
@@ -112,6 +112,41 @@ def cancel(build_id:int,db:Session=Depends(get_db)):
     if not item: raise HTTPException(404,'Build no encontrado.')
     if item.status in {'building','pending','validating','publishing'}: item.status='cancelled'; item.phase='cancelled'; db.add(item); db.commit(); db.refresh(item)
     return item
+
+@router.post('/builds/bulk-cancel', response_model=RuntimeBuildBulkResponse)
+def bulk_cancel_builds(payload: RuntimeBuildBulkRequest, db: Session = Depends(get_db)):
+    active_statuses = {'building', 'pending', 'validating', 'publishing'}
+    items = db.query(RuntimeBuilderBuild).filter(RuntimeBuilderBuild.id.in_(payload.ids)).all()
+    by_id = {item.id: item for item in items}
+    affected, skipped = [], []
+    for build_id in payload.ids:
+        item = by_id.get(build_id)
+        if item is None or item.status not in active_statuses:
+            skipped.append(build_id)
+            continue
+        item.status = 'cancelled'
+        item.phase = 'cancelled'
+        affected.append(build_id)
+        db.add(item)
+    db.commit()
+    return RuntimeBuildBulkResponse(affected_ids=affected, skipped_ids=skipped)
+
+
+@router.post('/builds/bulk-delete', response_model=RuntimeBuildBulkResponse)
+def bulk_delete_builds(payload: RuntimeBuildBulkRequest, db: Session = Depends(get_db)):
+    active_statuses = {'building', 'pending', 'validating', 'publishing'}
+    items = db.query(RuntimeBuilderBuild).filter(RuntimeBuilderBuild.id.in_(payload.ids)).all()
+    by_id = {item.id: item for item in items}
+    affected, skipped = [], []
+    for build_id in payload.ids:
+        item = by_id.get(build_id)
+        if item is None or item.status in active_statuses or item.active:
+            skipped.append(build_id)
+            continue
+        affected.append(build_id)
+        db.delete(item)
+    db.commit()
+    return RuntimeBuildBulkResponse(affected_ids=affected, skipped_ids=skipped)
 
 @router.post('/import/scan-path')
 def import_scan_path(payload:RuntimeImportPathRequest):

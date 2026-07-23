@@ -77,6 +77,7 @@ class RuntimeContextGeneratorService:
         """Normaliza requisitos de ejecución y elimina herramientas solo de desarrollo."""
         changed: list[str] = []
         mediapipe_pattern = re.compile(r"(?i)^\s*mediapipe\s*==\s*0\.10\.0\s*$")
+        av_pattern = re.compile(r"(?i)^\s*av\s*==\s*(?:8|9|10|11)(?:\.\d+){0,2}\s*$")
         for requirement_file in root.rglob("requirements.txt"):
             try:
                 original = requirement_file.read_text(encoding="utf-8")
@@ -90,6 +91,7 @@ class RuntimeContextGeneratorService:
                     output_lines.append(line)
                     continue
                 normalized_line = mediapipe_pattern.sub("mediapipe==0.10.21", line)
+                normalized_line = av_pattern.sub("av==12.3.0", normalized_line)
                 if not RuntimeBuilderService.is_runtime_dependency(normalized_line):
                     continue
                 output_lines.append(normalized_line)

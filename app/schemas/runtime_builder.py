@@ -116,6 +116,15 @@ class RuntimeGeneratedFilesResponse(BaseModel):
 class RuntimeBuildCreate(BaseModel):
     push_after_build: bool = False
 
+
+class RuntimeBuildBulkRequest(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class RuntimeBuildBulkResponse(BaseModel):
+    affected_ids: list[int] = Field(default_factory=list)
+    skipped_ids: list[int] = Field(default_factory=list)
+
 class RuntimeBuildResponse(BaseModel):
     id: int
     runtime_config_id: int

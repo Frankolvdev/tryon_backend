@@ -79,8 +79,16 @@ class RuntimeBuilderService:
         # mediapipe 0.10.0 no publica una distribución instalable para el
         # entorno Linux/Python usado por el runtime. 0.10.21 conserva la API
         # clásica utilizada por los Custom Nodes y sí dispone de wheels.
-        if raw_package.strip().lower() == "mediapipe" and raw_version in {"0.10.0", "==0.10.0"}:
+        package_name = raw_package.strip().lower()
+        if package_name == "mediapipe" and raw_version in {"0.10.0", "==0.10.0"}:
             raw_version = "0.10.21"
+        # PyAV 9.0.0 no ofrece wheel compatible con el runtime Linux/Python 3.10
+        # y obliga a compilar contra FFmpeg, donde falla con toolchains actuales.
+        # 12.3.0 mantiene la API usada por los nodos y dispone de wheels manylinux.
+        if package_name == "av":
+            version_number = raw_version.removeprefix("==").strip()
+            if re.fullmatch(r"(?:8|9|10|11)(?:\.\d+){0,2}", version_number):
+                raw_version = "12.3.0"
 
         # Some imported requirements already contain the whole PEP 508 string.
         if dependency.get("requirement"):

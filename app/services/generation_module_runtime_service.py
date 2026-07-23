@@ -223,6 +223,16 @@ class GenerationModuleRuntimeService:
                 db.close()
         return self.get(execution_id)
 
+    def delete(self, execution_id: UUID) -> None:
+        item = self.get(execution_id)
+        if item.status in {"queued", "running"}:
+            raise AppException("Active generation executions must be cancelled before deletion.")
+        with self._lock:
+            self._items.pop(execution_id, None)
+            self._provider_refs.pop(execution_id, None)
+            self._owners.pop(execution_id, None)
+        generation_module_execution_store_service.delete(execution_id)
+
     def health(self, db: Session) -> dict[str, Any]:
         try:
             runpod_health = runpod_serverless_adapter_service.health(db)

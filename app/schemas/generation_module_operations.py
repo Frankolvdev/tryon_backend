@@ -47,3 +47,12 @@ class GenerationExecutionRetryRequest(BaseModel):
 class GenerationExecutionDeleteResponse(BaseModel):
     execution_id: UUID
     deleted: bool = True
+
+
+class GenerationExecutionBulkRequest(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=500)
+
+
+class GenerationExecutionBulkResponse(BaseModel):
+    affected_ids: list[UUID] = Field(default_factory=list)
+    skipped_ids: list[UUID] = Field(default_factory=list)

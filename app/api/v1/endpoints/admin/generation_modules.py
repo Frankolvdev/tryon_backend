@@ -62,7 +62,7 @@ def list_generation_modules(
 # /generation-modules/{module_id} namespace. FastAPI matches routes in
 # declaration order, so a path such as "execution-history" would otherwise
 # be parsed as an integer module_id and return HTTP 422.
-from app.schemas.generation_module_operations import GenerationExecutionListResponse
+from app.schemas.generation_module_operations import GenerationExecutionListResponse, GenerationExecutionBulkRequest, GenerationExecutionBulkResponse
 from app.services.generation_module_runtime_service import generation_module_runtime_service
 
 
@@ -416,6 +416,40 @@ async def execute_generation_module(
     )
     audit_service.create_log(db, actor_user_id=current_admin.id, action="admin_generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started {result.engine.value if hasattr(result.engine, 'value') else result.engine} execution for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
     return result
+
+
+
+
+@router.post("/generation-modules/executions/bulk-cancel", response_model=GenerationExecutionBulkResponse)
+def bulk_cancel_generation_module_executions(data: GenerationExecutionBulkRequest, current_admin: User = Depends(admin_guard)):
+    affected, skipped = [], []
+    for execution_id in data.ids:
+        try:
+            item = generation_module_runtime_service.get(execution_id)
+            if item.status not in {"queued", "running"}:
+                skipped.append(execution_id)
+                continue
+            generation_module_runtime_service.cancel(execution_id)
+            affected.append(execution_id)
+        except Exception:
+            skipped.append(execution_id)
+    return GenerationExecutionBulkResponse(affected_ids=affected, skipped_ids=skipped)
+
+
+@router.post("/generation-modules/executions/bulk-delete", response_model=GenerationExecutionBulkResponse)
+def bulk_delete_generation_module_executions(data: GenerationExecutionBulkRequest, current_admin: User = Depends(admin_guard)):
+    affected, skipped = [], []
+    for execution_id in data.ids:
+        try:
+            item = generation_module_runtime_service.get(execution_id)
+            if item.status not in {"completed", "failed", "cancelled"}:
+                skipped.append(execution_id)
+                continue
+            generation_module_runtime_service.delete(execution_id)
+            affected.append(execution_id)
+        except Exception:
+            skipped.append(execution_id)
+    return GenerationExecutionBulkResponse(affected_ids=affected, skipped_ids=skipped)
 
 
 @router.get("/generation-modules/executions/{execution_id}", response_model=GenerationModuleExecutionResponse)
