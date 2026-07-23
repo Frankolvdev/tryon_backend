@@ -73,6 +73,22 @@ class RuntimeContextGeneratorService:
         return None
 
     @staticmethod
+    def _normalize_copied_requirements(root: Path) -> list[str]:
+        """Corrige pins conocidos que no tienen wheel para el runtime Linux."""
+        changed: list[str] = []
+        pattern = re.compile(r"(?im)^\s*mediapipe\s*==\s*0\.10\.0\s*$")
+        for requirement_file in root.rglob("requirements.txt"):
+            try:
+                original = requirement_file.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                original = requirement_file.read_text(encoding="utf-8", errors="ignore")
+            normalized = pattern.sub("mediapipe==0.10.21", original)
+            if normalized != original:
+                requirement_file.write_text(normalized, encoding="utf-8")
+                changed.append(str(requirement_file))
+        return changed
+
+    @staticmethod
     def generate(
         config: RuntimeBuilderConfig,
         payload: Any,
@@ -192,6 +208,12 @@ class RuntimeContextGeneratorService:
                     dirs_exist_ok=True,
                 )
                 copied_node_sources[source_key] = context_path
+                normalized_files = RuntimeContextGeneratorService._normalize_copied_requirements(destination)
+                for normalized_file in normalized_files:
+                    warnings.append(
+                        "Dependencia corregida en Custom Node: "
+                        f"mediapipe==0.10.0 → mediapipe==0.10.21 ({normalized_file})."
+                    )
                 nodes_copied += 1
                 total += sum(path.stat().st_size for path in destination.rglob("*") if path.is_file())
             elif payload.copy_custom_nodes and duplicate_of is not None:

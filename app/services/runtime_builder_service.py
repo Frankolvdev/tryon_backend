@@ -60,6 +60,12 @@ class RuntimeBuilderService:
         if not raw_package:
             raise ValueError("La dependencia no contiene package, name o requirement.")
 
+        # mediapipe 0.10.0 no publica una distribución instalable para el
+        # entorno Linux/Python usado por el runtime. 0.10.21 conserva la API
+        # clásica utilizada por los Custom Nodes y sí dispone de wheels.
+        if raw_package.strip().lower() == "mediapipe" and raw_version in {"0.10.0", "==0.10.0"}:
+            raw_version = "0.10.21"
+
         # Some imported requirements already contain the whole PEP 508 string.
         if dependency.get("requirement"):
             candidate = raw_package
