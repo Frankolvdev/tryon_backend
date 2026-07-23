@@ -18,8 +18,45 @@ MODEL_TYPE_BY_FOLDER = {
     'controlnet': 'controlnet', 'clip': 'clip', 'clip_vision': 'clip',
     'upscale_models': 'upscaler', 'upscalers': 'upscaler', 'embeddings': 'embedding',
     'ultralytics': 'detector', 'sams': 'sam', 'sam': 'sam', 'ipadapter': 'ipadapter',
+    'diffusion_models': 'diffusion_model', 'unet': 'diffusion_model', 'unets': 'diffusion_model',
+    'text_encoders': 'clip', 'animatediff_models': 'video_model',
 }
-IGNORED_DIRS = {'models', 'output', 'input', '.git', 'node_modules', '__pycache__', '.cache'}
+IGNORED_DIRS = {'models', 'output', 'input', '.git', 'node_modules', '__pycache__', '.cache', 'temp'}
+UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$')
+MODEL_INPUT_RULES = {
+    'UNETLoader': (('unet_name','diffusion_model',('diffusion_models','unet','unets')),),
+    'CheckpointLoaderSimple': (('ckpt_name','checkpoint',('checkpoints',)),),
+    'CheckpointLoader': (('ckpt_name','checkpoint',('checkpoints',)),),
+    'CLIPLoader': (('clip_name','clip',('text_encoders','clip')),),
+    'DualCLIPLoader': (('clip_name1','clip',('text_encoders','clip')),('clip_name2','clip',('text_encoders','clip'))),
+    'TripleCLIPLoader': (('clip_name1','clip',('text_encoders','clip')),('clip_name2','clip',('text_encoders','clip')),('clip_name3','clip',('text_encoders','clip'))),
+    'VAELoader': (('vae_name','vae',('vae',)),),
+    'LoraLoader': (('lora_name','lora',('loras','lora')),),
+    'LoraLoaderModelOnly': (('lora_name','lora',('loras','lora')),),
+    'ControlNetLoader': (('control_net_name','controlnet',('controlnet',)),),
+    'DiffControlNetLoader': (('control_net_name','controlnet',('controlnet',)),),
+    'UpscaleModelLoader': (('model_name','upscaler',('upscale_models','upscalers')),),
+    'CLIPVisionLoader': (('clip_name','clip',('clip_vision',)),),
+    'StyleModelLoader': (('style_model_name','other',('style_models',)),),
+    'GLIGENLoader': (('gligen_name','other',('gligen',)),),
+    'unCLIPCheckpointLoader': (('ckpt_name','checkpoint',('checkpoints',)),),
+}
+MODEL_FIELD_HINTS = ('model','ckpt','checkpoint','unet','diffusion','vae','clip','lora','control','adapter','ipadapter','sam','yolo','ultralytics','upscale','gguf','encoder','detector','bbox','segm')
+CORE_FALLBACK_CLASSES = {
+    'CheckpointLoaderSimple','CheckpointLoader','unCLIPCheckpointLoader','UNETLoader','CLIPLoader','DualCLIPLoader','TripleCLIPLoader','VAELoader',
+    'LoraLoader','LoraLoaderModelOnly','ControlNetLoader','DiffControlNetLoader','CLIPVisionLoader','StyleModelLoader','GLIGENLoader','UpscaleModelLoader',
+    'LoadImage','LoadImageMask','SaveImage','PreviewImage','ImageScale','ImageScaleBy','ImageInvert','ImageBatch','ImagePadForOutpaint','EmptyImage',
+    'EmptyLatentImage','EmptySD3LatentImage','EmptyLatentAudio','LatentUpscale','LatentUpscaleBy','LatentComposite','LatentBlend','LatentFlip','LatentCrop',
+    'KSampler','KSamplerAdvanced','SamplerCustom','SamplerCustomAdvanced','RandomNoise','BasicScheduler','KarrasScheduler','ExponentialScheduler','PolyexponentialScheduler',
+    'CFGGuider','BasicGuider','DualCFGGuider','FluxGuidance','ConditioningCombine','ConditioningConcat','ConditioningAverage','ConditioningSetArea','ConditioningSetMask',
+    'CLIPTextEncode','CLIPSetLastLayer','CLIPTextEncodeSDXL','CLIPTextEncodeSDXLRefiner','VAEDecode','VAEEncode','VAEEncodeForInpaint','InpaintModelConditioning',
+    'ModelMergeSimple','ModelMergeBlocks','ModelMergeAdd','ModelSamplingDiscrete','ModelSamplingContinuousEDM','ModelSamplingFlux','FreeU','FreeU_V2',
+    'ControlNetApply','ControlNetApplyAdvanced','SetLatentNoiseMask','RepeatLatentBatch','RebatchLatents','ImageToMask','MaskToImage','SolidMask','InvertMask','CropMask',
+    'FeatherMask','GrowMask','MaskComposite','PorterDuffImageComposite','SplitImageWithAlpha','JoinImageWithAlpha','ImageCompositeMasked','ImageBlend','ImageBlur',
+    'ImageQuantize','ImageSharpen','ImageColorToMask','ImageOnlyCheckpointLoader','PhotoMakerLoader','PhotoMakerEncode','DifferentialDiffusion','StableCascade_EmptyLatentImage',
+    'StableCascade_StageB_Conditioning','SDTurboScheduler','AlignYourStepsScheduler','LCMScheduler','HyperTile','PatchModelAddDownscale','VideoLinearCFGGuidance',
+}
+
 
 
 class RuntimeImportService:
@@ -79,17 +116,18 @@ class RuntimeImportService:
         ]
         for root in roots:
             for rel in relative: candidates.append(root / rel)
-        # Pinokio can place the venv beside app/ComfyUI with arbitrary depth.
-        for root in roots[:3]:
+        # Pinokio may place env beside app/ or several levels above it.
+        for root in roots:
             if not root.exists(): continue
             base_depth = len(root.parts)
             for current, dirs, files in os.walk(root):
                 current_path = Path(current)
                 depth = len(current_path.parts) - base_depth
-                dirs[:] = [d for d in dirs if d.lower() not in IGNORED_DIRS and depth < 5]
-                if 'python.exe' in files and current_path.name.lower() in {'scripts', 'python_embeded', 'python'}:
+                dirs[:] = [d for d in dirs if d.lower() not in IGNORED_DIRS and depth < 9]
+                parent = current_path.name.lower()
+                if 'python.exe' in files and parent in {'scripts', 'python_embeded', 'python', 'bin'}:
                     candidates.append(current_path / 'python.exe')
-                if 'python' in files and current_path.name.lower() in {'bin', 'venv', '.venv', 'env'}:
+                if 'python' in files and parent in {'bin', 'venv', '.venv', 'env', 'python'}:
                     candidates.append(current_path / 'python')
         unique: list[Path] = []
         seen: set[str] = set()
@@ -153,18 +191,69 @@ class RuntimeImportService:
     @staticmethod
     def _workflow_nodes(workflow: dict[str, Any]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
-        if isinstance(workflow.get('nodes'), list):
-            for node in workflow['nodes']:
-                if not isinstance(node, dict): continue
-                cls = node.get('type') or node.get('class_type')
-                result.append({'id': str(node.get('id', '')), 'class_type': str(cls or ''),
-                               'inputs': node.get('inputs') or {}, 'widgets_values': node.get('widgets_values') or []})
-        else:
-            for node_id, node in workflow.items():
-                if not isinstance(node, dict) or 'class_type' not in node: continue
-                result.append({'id': str(node_id), 'class_type': str(node.get('class_type') or ''),
-                               'inputs': node.get('inputs') or {}, 'widgets_values': []})
-        return result
+        seen_objects: set[int] = set()
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                marker=id(value)
+                if marker in seen_objects: return
+                seen_objects.add(marker)
+                if 'class_type' in value and isinstance(value.get('class_type'), str):
+                    cls=str(value.get('class_type') or '')
+                    if cls and not UUID_RE.match(cls):
+                        result.append({'id':str(value.get('id','')),'class_type':cls,'inputs':value.get('inputs') or {},'widgets_values':value.get('widgets_values') or [],'title':(value.get('_meta') or {}).get('title') if isinstance(value.get('_meta'),dict) else None})
+                elif 'type' in value and ('widgets_values' in value or 'inputs' in value or 'outputs' in value):
+                    cls=str(value.get('type') or '')
+                    if cls and not UUID_RE.match(cls):
+                        result.append({'id':str(value.get('id','')),'class_type':cls,'inputs':value.get('inputs') or {},'widgets_values':value.get('widgets_values') or [],'title':value.get('title')})
+                for child in value.values(): visit(child)
+            elif isinstance(value,list):
+                for child in value: visit(child)
+        visit(workflow)
+        dedup={}
+        for node in result: dedup[(node['id'],node['class_type'])]=node
+        return list(dedup.values())
+
+    @staticmethod
+    def _runtime_node_catalog(comfy: Path, python_executable: str | None) -> dict[str, dict[str, Any]]:
+        if not python_executable: return {}
+        script="\n".join([
+            "import inspect,json,os,sys", "sys.path.insert(0, os.getcwd())", "result={}",
+            "try:", " import nodes", " try: nodes.init_extra_nodes(init_custom_nodes=True)",
+            " except TypeError: nodes.init_extra_nodes()", " except Exception: pass",
+            " for name, cls in getattr(nodes,'NODE_CLASS_MAPPINGS',{}).items():",
+            "  try: f=inspect.getsourcefile(cls) or inspect.getfile(cls)", "  except Exception: f=None",
+            "  result[str(name)]={'file':f,'module':getattr(cls,'__module__',None)}",
+            "except Exception as e: result={'__error__':{'message':str(e)}}", "print(json.dumps(result))"])
+        output=RuntimeImportService._run([python_executable,'-c',script],comfy,120)
+        if not output: return {}
+        try:
+            data=json.loads(output.splitlines()[-1]); return data if isinstance(data,dict) else {}
+        except json.JSONDecodeError: return {}
+
+    @staticmethod
+    def _core_static_classes(comfy: Path) -> set[str]:
+        classes:set[str]=set()
+        for file in comfy.rglob('*.py'):
+            if 'custom_nodes' in file.parts or any(part in IGNORED_DIRS for part in file.parts): continue
+            try: text=file.read_text(encoding='utf-8',errors='ignore')
+            except OSError: continue
+            for match in re.finditer(r'NODE_CLASS_MAPPINGS\s*=\s*\{(.*?)\}',text,re.S):
+                classes.update(re.findall(r"['\"]([^'\"]+)['\"]\s*:",match.group(1)))
+        return classes
+
+    @staticmethod
+    def _model_references_for_node(node: dict[str, Any]) -> list[dict[str,str]]:
+        cls=node.get('class_type',''); inputs=node.get('inputs') if isinstance(node.get('inputs'),dict) else {}; refs=[]
+        for field,model_type,folders in MODEL_INPUT_RULES.get(cls,()):
+            value=inputs.get(field)
+            if isinstance(value,str): refs.append({'value':value,'field':field,'model_type':model_type,'folders':','.join(folders),'class_type':cls})
+        for field,value in inputs.items():
+            if isinstance(value,str) and (RuntimeImportService._looks_like_model(value) or any(h in field.lower() for h in MODEL_FIELD_HINTS)):
+                if not any(r['value']==value for r in refs): refs.append({'value':value,'field':field,'model_type':'other','folders':'','class_type':cls})
+        for value in RuntimeImportService._string_values(node.get('widgets_values')):
+            if RuntimeImportService._looks_like_model(value) and not any(r['value']==value for r in refs):
+                refs.append({'value':value,'field':'widgets_values','model_type':'other','folders':'','class_type':cls})
+        return refs
 
     @staticmethod
     def _string_values(value: Any) -> list[str]:
@@ -215,96 +304,62 @@ class RuntimeImportService:
 
     @staticmethod
     def resolve_workflow(path: str, workflow: dict[str, Any]) -> dict[str, Any]:
-        selected = Path(path).expanduser().resolve()
-        comfy, source = RuntimeImportService._find_comfy_root(selected)
-        repo, commit = RuntimeImportService._git_info(comfy)
-        python = RuntimeImportService._probe_python(comfy, selected)
-        workflow_nodes = RuntimeImportService._workflow_nodes(workflow)
-        class_types = sorted({n['class_type'] for n in workflow_nodes if n['class_type']})
-
-        node_catalog: list[dict[str, Any]] = []
-        class_to_folder: dict[str, Path] = {}
-        custom_root = comfy / 'custom_nodes'
-        for folder in sorted(custom_root.iterdir() if custom_root.exists() else []):
-            if not folder.is_dir() or folder.name.startswith(('.', '__')): continue
-            classes = RuntimeImportService._read_node_classes(folder)
-            for cls in classes: class_to_folder.setdefault(cls, folder)
-            node_catalog.append({'folder': folder, 'classes': classes})
-
-        required_folders: dict[str, Path] = {}
-        unresolved_classes: list[str] = []
-        builtin_hint = {'CheckpointLoaderSimple','CLIPTextEncode','KSampler','VAEDecode','VAEEncode','SaveImage','PreviewImage','LoadImage','EmptyLatentImage'}
+        selected=Path(path).expanduser().resolve(); comfy,source=RuntimeImportService._find_comfy_root(selected)
+        repo,commit=RuntimeImportService._git_info(comfy); python=RuntimeImportService._probe_python(comfy,selected)
+        workflow_nodes=RuntimeImportService._workflow_nodes(workflow)
+        class_types=sorted({n['class_type'] for n in workflow_nodes if n['class_type'] and not UUID_RE.match(n['class_type'])})
+        runtime_catalog=RuntimeImportService._runtime_node_catalog(comfy,python.get('executable'))
+        core_classes=RuntimeImportService._core_static_classes(comfy) | CORE_FALLBACK_CLASSES; class_to_folder={}; custom_root=comfy/'custom_nodes'
+        folders=[f for f in sorted(custom_root.iterdir() if custom_root.exists() else []) if f.is_dir() and not f.name.startswith(('.', '__'))]
+        for folder in folders:
+            for cls in RuntimeImportService._read_node_classes(folder): class_to_folder.setdefault(cls,folder)
+        for cls,meta in runtime_catalog.items():
+            if cls=='__error__' or not isinstance(meta,dict) or not meta.get('file'): continue
+            try: file_path=Path(meta['file']).resolve()
+            except OSError: continue
+            try:
+                rel=file_path.relative_to(custom_root.resolve())
+                if rel.parts: class_to_folder[cls]=custom_root/rel.parts[0]
+            except ValueError: core_classes.add(cls)
+        required_folders={}; unresolved_classes=[]; resolved_classes=[]
         for cls in class_types:
-            folder = class_to_folder.get(cls)
-            if folder: required_folders[folder.name] = folder
-            elif cls not in builtin_hint: unresolved_classes.append(cls)
-
-        required_nodes: list[dict[str, Any]] = []
-        dependencies_by_name: dict[str, dict[str, Any]] = {}
-        node_warnings: list[str] = []
-        for name, folder in sorted(required_folders.items()):
-            node_repo, node_commit = RuntimeImportService._git_info(folder)
-            inferred = node_repo or RuntimeImportService._infer_repo(folder)
-            confidence = 'exact-git' if node_repo else ('inferred-readme' if inferred else 'local-only')
-            if not inferred: node_warnings.append(f'{name}: usado por el workflow, pero no se pudo determinar su repositorio.')
-            required_nodes.append({'name': name, 'repository': inferred or '', 'commit': node_commit,
-                                   'enabled': True, 'install_requirements': (folder/'requirements.txt').exists() or (folder/'pyproject.toml').exists(),
-                                   'source_path': str(folder), 'confidence': confidence,
-                                   'matched_classes': sorted(required_folders[name] and RuntimeImportService._read_node_classes(folder) & set(class_types))})
-            for dep in RuntimeImportService._requirements_for_node(folder):
-                dependencies_by_name.setdefault(dep['package'].lower(), dep)
-
-        referenced = sorted({value for node in workflow_nodes for value in (
-            RuntimeImportService._string_values(node.get('inputs')) + RuntimeImportService._string_values(node.get('widgets_values'))
-        ) if RuntimeImportService._looks_like_model(value)})
-        model_index, total_models = RuntimeImportService._model_index(comfy)
-        required_models: list[dict[str, Any]] = []
-        missing_models: list[str] = []
-        ambiguous_models: list[str] = []
-        models_root = comfy / 'models'
-        for reference in referenced:
-            normalized = reference.replace('\\','/').lstrip('./').lower()
-            matches = model_index.get(normalized) or model_index.get(Path(normalized).name.lower()) or []
-            if not matches:
-                # suffix match supports workflow values relative to a model subfolder.
-                matches = [p for key, paths in model_index.items() if key.endswith(normalized) for p in paths]
-            unique = list(dict.fromkeys(matches))
-            if not unique:
-                missing_models.append(reference); continue
-            if len(unique) > 1: ambiguous_models.append(reference)
-            file = unique[0]
-            rel = file.relative_to(models_root).as_posix()
-            top = rel.split('/',1)[0].lower()
-            required_models.append({'name': file.name, 'model_type': MODEL_TYPE_BY_FOLDER.get(top,'other'),
-                                    'source_url': None, 'target_path': rel, 'sha256': None,
-                                    'strategy': 'volume', 'enabled': True, 'size_bytes': file.stat().st_size,
-                                    'workflow_reference': reference, 'found': True})
-
-        warnings = node_warnings[:]
-        if not python.get('python'): warnings.append('No se detectó Python. Revisa la ruta seleccionada o el venv de Pinokio.')
-        if unresolved_classes: warnings.append(f'{len(unresolved_classes)} clases no pudieron asociarse a un custom node local.')
-        if missing_models: warnings.append(f'{len(missing_models)} modelos referenciados no fueron encontrados.')
-        score_parts = [bool(python.get('python')), bool(python.get('torch')), not unresolved_classes, not missing_models,
-                       all(n['repository'] for n in required_nodes)]
-        score = round(sum(1 for x in score_parts if x) / len(score_parts) * 100)
-        return {
-            'source_type': source, 'selected_path': str(selected), 'comfyui_path': str(comfy),
-            'comfyui_repository': repo or 'https://github.com/comfyanonymous/ComfyUI.git', 'comfyui_commit': commit,
-            'python_executable': python.get('executable'), 'python_version': python.get('python'),
-            'torch_version': python.get('torch'), 'torch_cuda_version': python.get('cuda'), 'gpu_name': python.get('gpu'),
-            'python_candidates': python.get('candidate_attempts', []),
-            'workflow': {'node_count': len(workflow_nodes), 'class_types': class_types, 'referenced_models': referenced},
-            'custom_nodes': required_nodes, 'models': required_models,
-            'python_dependencies': list(dependencies_by_name.values()),
-            'environment_variables': [], 'volumes': [{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],
-            'unresolved_classes': unresolved_classes, 'missing_models': missing_models, 'ambiguous_models': ambiguous_models,
-            'warnings': warnings,
-            'summary': {'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),
-                        'required_custom_nodes':len(required_nodes),'required_models':len(required_models),
-                        'referenced_models':len(referenced),'missing_models':len(missing_models),
-                        'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),
-                        'installed_custom_nodes':len(node_catalog),'installed_models':total_models,'compatibility_score':score},
-        }
+            folder=class_to_folder.get(cls)
+            if folder:
+                required_folders[folder.name]=folder; resolved_classes.append({'class_type':cls,'provider':'custom','provider_name':folder.name,'confidence':'runtime' if cls in runtime_catalog else 'static'})
+            elif cls in core_classes or cls in runtime_catalog or cls in MODEL_INPUT_RULES:
+                resolved_classes.append({'class_type':cls,'provider':'core','provider_name':'ComfyUI Core','confidence':'runtime' if cls in runtime_catalog else 'knowledge-base'})
+            else: unresolved_classes.append(cls)
+        required_nodes=[]; dependencies_by_name={}; node_warnings=[]
+        for name,folder in sorted(required_folders.items()):
+            node_repo,node_commit=RuntimeImportService._git_info(folder); inferred=node_repo or RuntimeImportService._infer_repo(folder)
+            matched=sorted(cls for cls in class_types if class_to_folder.get(cls)==folder)
+            if not inferred: node_warnings.append(f'{name}: se detectó localmente, pero no se encontró repositorio.')
+            required_nodes.append({'name':name,'repository':inferred or '','commit':node_commit,'enabled':True,'install_requirements':(folder/'requirements.txt').exists() or (folder/'pyproject.toml').exists(),'source_path':str(folder),'confidence':'exact-git' if node_repo else ('inferred-readme' if inferred else 'local-only'),'matched_classes':matched})
+            for dep in RuntimeImportService._requirements_for_node(folder): dependencies_by_name.setdefault(dep['package'].lower(),dep)
+        reference_records=[]
+        for node in workflow_nodes: reference_records.extend(RuntimeImportService._model_references_for_node(node))
+        unique_refs={}
+        for ref in reference_records: unique_refs[(ref['value'].replace('\\','/').lower(),ref['class_type'],ref['field'])]=ref
+        reference_records=list(unique_refs.values()); referenced=sorted({r['value'] for r in reference_records})
+        model_index,total_models=RuntimeImportService._model_index(comfy); required_models=[]; missing_models=[]; ambiguous_models=[]; models_root=comfy/'models'
+        for ref in reference_records:
+            reference=ref['value']; normalized=reference.replace('\\','/').lstrip('./').lower()
+            matches=model_index.get(normalized) or model_index.get(Path(normalized).name.lower()) or []
+            if not matches: matches=[p for key,paths in model_index.items() if key.endswith('/'+normalized) or key.endswith(normalized) for p in paths]
+            unique=list(dict.fromkeys(matches))
+            if not unique: missing_models.append(reference); continue
+            if len(unique)>1: ambiguous_models.append(reference)
+            file=unique[0]; rel=file.relative_to(models_root).as_posix(); top=rel.split('/',1)[0].lower()
+            inferred_type=ref['model_type'] if ref['model_type']!='other' else MODEL_TYPE_BY_FOLDER.get(top,'other')
+            required_models.append({'name':file.name,'model_type':inferred_type,'source_url':None,'target_path':rel,'sha256':None,'strategy':'volume','enabled':True,'size_bytes':file.stat().st_size,'workflow_reference':reference,'resolver':{'class_type':ref['class_type'],'field':ref['field'],'folders':ref['folders']},'found':True})
+        warnings=node_warnings[:]
+        if not python.get('python'): warnings.append('No se detectó Python. Se revisaron venv/.venv/env/python_embeded y rutas anidadas de Pinokio.')
+        if unresolved_classes: warnings.append(f'{len(unresolved_classes)} clases siguen sin resolver tras consultar ComfyUI, NODE_CLASS_MAPPINGS y reglas conocidas.')
+        if missing_models: warnings.append(f'{len(set(missing_models))} modelos referenciados no fueron encontrados.')
+        weighted_total=max(1,len(class_types)+len(reference_records)+4)
+        weighted_ok=(len(class_types)-len(unresolved_classes))+(len(reference_records)-len(set(missing_models)))+sum(bool(python.get(k)) for k in ('python','torch','cuda','gpu'))
+        score=max(0,min(100,round(weighted_ok/weighted_total*100)))
+        return {'source_type':source,'selected_path':str(selected),'comfyui_path':str(comfy),'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),'torch_cuda_version':python.get('cuda'),'gpu_name':python.get('gpu'),'python_candidates':python.get('candidate_attempts',[]),'workflow':{'node_count':len(workflow_nodes),'class_types':class_types,'referenced_models':referenced},'resolved_classes':resolved_classes,'core_classes':[r['class_type'] for r in resolved_classes if r['provider']=='core'],'custom_nodes':required_nodes,'models':required_models,'python_dependencies':list(dependencies_by_name.values()),'environment_variables':[],'volumes':[{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],'unresolved_classes':unresolved_classes,'missing_models':sorted(set(missing_models)),'ambiguous_models':sorted(set(ambiguous_models)),'warnings':warnings,'summary':{'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),'core_classes':sum(1 for r in resolved_classes if r['provider']=='core'),'resolved_custom_classes':sum(1 for r in resolved_classes if r['provider']=='custom'),'required_custom_nodes':len(required_nodes),'required_models':len(required_models),'referenced_models':len(reference_records),'missing_models':len(set(missing_models)),'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),'installed_custom_nodes':len(folders),'installed_models':total_models,'runtime_catalog_classes':max(0,len(runtime_catalog)-int('__error__' in runtime_catalog)),'knowledge_base_rules':len(MODEL_INPUT_RULES),'compatibility_score':score}}
 
     @staticmethod
     def scan_path(path: str, include_all_models: bool = True) -> dict[str, Any]:

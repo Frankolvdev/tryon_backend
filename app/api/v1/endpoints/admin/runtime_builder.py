@@ -72,7 +72,7 @@ async def import_upload(file:UploadFile=File(...)):
     except ValueError as exc: raise HTTPException(422,str(exc))
 
 @router.post('/import/analyze-workflow')
-def import_analyze_workflow(payload:RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest):
+def import_analyze_workflow(payload:RuntimeWorkflowAnalysisRequest):
     return RuntimeImportService.analyze_workflow(payload.workflow,payload.report)
 
 @router.post('/import/apply',response_model=RuntimeBuilderConfigResponse)
