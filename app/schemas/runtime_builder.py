@@ -194,3 +194,20 @@ class RuntimeContextGenerateResponse(BaseModel):
     files_generated: list[str]
     warnings: list[str]
     manifest: dict
+
+
+class RuntimeProjectResponse(RuntimeWorkspaceUpdate):
+    id: int
+    runtime_config_id: int | None = None
+    project_key: str
+    module_type: str
+    container_workdir: str
+    workspace_status: str
+    last_index_summary: dict | None = None
+    last_export_archive: str | None = None
+    last_export_manifest: dict | None = None
+    last_exported_at: datetime | None = None
+    notes: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)

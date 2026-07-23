@@ -4,7 +4,8 @@ from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeWorkspaceUpdate
+from app.models.runtime_project import RuntimeProject
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
 from app.services.runtime_import_service import RuntimeImportService
@@ -16,6 +17,39 @@ def get_or_create(db):
     config=db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.id.asc()).first()
     if config is None: config=RuntimeBuilderConfig(); db.add(config); db.commit(); db.refresh(config)
     return config
+
+def get_or_create_project(db: Session, config: RuntimeBuilderConfig | None = None) -> RuntimeProject:
+    config = config or get_or_create(db)
+    project = db.query(RuntimeProject).filter(RuntimeProject.project_key == config.project_key).first()
+    if project is None:
+        project = RuntimeProject(
+            runtime_config_id=config.id,
+            project_key=config.project_key,
+            module_type=config.module_type,
+            source_comfyui_path=config.source_comfyui_path,
+            workflow_filename=config.workflow_filename,
+            workflow_json=config.workflow_json,
+            container_workdir=config.container_workdir or "/app",
+            export_root_directory=config.export_root_directory,
+            export_directory=config.export_directory,
+            last_index_summary=config.last_index_summary,
+            workspace_status=config.workspace_status or "draft",
+            last_export_archive=config.last_export_archive,
+            last_export_manifest=config.last_export_manifest,
+            last_exported_at=config.last_exported_at,
+        )
+        db.add(project); db.commit(); db.refresh(project)
+    return project
+
+def sync_project_to_config(project: RuntimeProject, config: RuntimeBuilderConfig) -> None:
+    for field in (
+        "project_key", "module_type", "source_comfyui_path", "workflow_filename",
+        "workflow_json", "container_workdir", "export_root_directory",
+        "export_directory", "last_index_summary", "workspace_status",
+        "last_export_archive", "last_export_manifest", "last_exported_at",
+    ):
+        setattr(config, field, getattr(project, field))
+
 @router.get('/config',response_model=RuntimeBuilderConfigResponse)
 def read_config(db:Session=Depends(get_db)): return get_or_create(db)
 @router.put('/config',response_model=RuntimeBuilderConfigResponse)
@@ -23,13 +57,23 @@ def update_config(payload:RuntimeBuilderConfigUpdate,db:Session=Depends(get_db))
     config=get_or_create(db)
     for field,value in payload.model_dump().items(): setattr(config,field,value)
     db.add(config); db.commit(); db.refresh(config); return config
-@router.patch('/workspace', response_model=RuntimeBuilderConfigResponse)
-def update_workspace(payload: RuntimeWorkspaceUpdate, db: Session = Depends(get_db)):
+@router.get('/project', response_model=RuntimeProjectResponse)
+def read_project(db: Session = Depends(get_db)):
+    return get_or_create_project(db)
+
+@router.patch('/project', response_model=RuntimeProjectResponse)
+def update_project(payload: RuntimeWorkspaceUpdate, db: Session = Depends(get_db)):
     config = get_or_create(db)
+    project = get_or_create_project(db, config)
     for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(config, field, value)
-    db.add(config); db.commit(); db.refresh(config)
-    return config
+        setattr(project, field, value)
+    sync_project_to_config(project, config)
+    db.add_all([project, config]); db.commit(); db.refresh(project)
+    return project
+
+@router.patch('/workspace', response_model=RuntimeProjectResponse)
+def update_workspace(payload: RuntimeWorkspaceUpdate, db: Session = Depends(get_db)):
+    return update_project(payload, db)
 
 @router.post('/validate',response_model=RuntimeValidationResponse)
 def validate_config(db:Session=Depends(get_db)): return RuntimeBuilderService.validate(get_or_create(db))
@@ -94,10 +138,13 @@ def import_resolve_workflow(payload: RuntimeWorkflowResolveRequest, db: Session 
     try:
         result = RuntimeImportService.resolve_workflow(payload.path, payload.workflow)
         config = get_or_create(db)
-        config.source_comfyui_path = payload.path
-        config.workflow_json = payload.workflow
-        config.workflow_filename = payload.workflow_filename
-        db.add(config); db.commit()
+        project = get_or_create_project(db, config)
+        project.source_comfyui_path = payload.path
+        project.workflow_json = payload.workflow
+        project.workflow_filename = payload.workflow_filename
+        project.workspace_status = "workflow_resolved"
+        sync_project_to_config(project, config)
+        db.add_all([project, config]); db.commit(); db.refresh(project)
         return result
     except ValueError as exc: raise HTTPException(422,str(exc))
 
@@ -107,9 +154,12 @@ def intelligence_index(payload: RuntimeIntelligenceIndexRequest, db: Session = D
     try:
         result = RuntimeIntelligenceService.build_index(payload.path)
         config = get_or_create(db)
-        config.source_comfyui_path = payload.path
-        config.last_index_summary = result.get("summary") or {}
-        db.add(config); db.commit()
+        project = get_or_create_project(db, config)
+        project.source_comfyui_path = payload.path
+        project.last_index_summary = result.get("summary") or {}
+        project.workspace_status = "indexed"
+        sync_project_to_config(project, config)
+        db.add_all([project, config]); db.commit()
         return result
     except ValueError as exc:
         raise HTTPException(422, str(exc))
@@ -128,15 +178,17 @@ def generate_runtime_context(payload: RuntimeContextGenerateRequest, db: Session
     try:
         config = get_or_create(db)
         result = RuntimeContextGeneratorService.generate(config, payload)
-        config.source_comfyui_path = payload.comfyui_path
-        config.export_root_directory = result.get("export_root_directory")
-        config.export_directory = result["output_directory"]
-        config.workspace_status = "generated"
-        config.last_export_archive = result["archive_path"]
-        config.last_export_manifest = result.get("manifest") or {}
+        project = get_or_create_project(db, config)
+        project.source_comfyui_path = payload.comfyui_path
+        project.export_root_directory = result.get("export_root_directory")
+        project.export_directory = result["output_directory"]
+        project.workspace_status = "generated"
+        project.last_export_archive = result["archive_path"]
+        project.last_export_manifest = result.get("manifest") or {}
         from app.common.time import utc_now
-        config.last_exported_at = utc_now()
-        db.add(config); db.commit()
+        project.last_exported_at = utc_now()
+        sync_project_to_config(project, config)
+        db.add_all([project, config]); db.commit(); db.refresh(project)
         return result
     except ValueError as exc:
         raise HTTPException(422, str(exc))

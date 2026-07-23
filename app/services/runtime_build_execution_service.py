@@ -4,6 +4,7 @@ from app.common.time import utc_now
 from app.db.database import SessionLocal
 from app.models.runtime_builder_build import RuntimeBuilderBuild
 from app.models.runtime_builder_config import RuntimeBuilderConfig
+from app.models.runtime_project import RuntimeProject
 from app.models.runpod_config import RunPodConfig
 from app.services.runtime_builder_service import RuntimeBuilderService
 
@@ -53,6 +54,13 @@ class RuntimeBuildExecutionService:
         db=SessionLocal()
         try:
             build=db.get(RuntimeBuilderBuild,build_id); cfg=db.get(RuntimeBuilderConfig,build.runtime_config_id)
+            project=db.query(RuntimeProject).filter(RuntimeProject.runtime_config_id==cfg.id).order_by(RuntimeProject.id.desc()).first()
+            if project:
+                cfg.export_directory=project.export_directory
+                cfg.export_root_directory=project.export_root_directory
+                cfg.container_workdir=project.container_workdir
+                cfg.workflow_json=project.workflow_json
+                cfg.workflow_filename=project.workflow_filename
             build.status="building"; build.started_at=utc_now(); RuntimeBuildExecutionService._append(db,build,"[runtime-builder] Preparando contexto reproducible...","preparing",5)
             if not cfg.export_directory:
                 raise RuntimeError("Primero genera el runtime autocontenido; no existe un directorio de exportación guardado.")
