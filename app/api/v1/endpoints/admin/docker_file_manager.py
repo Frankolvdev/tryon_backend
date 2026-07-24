@@ -25,7 +25,12 @@ def rename(p:DockerRenamePayload): return call(S.rename,p.volume,p.path,p.new_na
 @router.post("/transfer")
 def transfer(p:DockerTransferPayload): return call(S.transfer,p.source_volume,p.source_path,p.destination_volume,p.destination_path,p.operation,p.overwrite)
 @router.post("/upload")
-async def upload(volume:str=Form(...),path:str=Form(...),overwrite:bool=Form(False),file:UploadFile=File(...)): return call(S.upload_bytes,volume,path,await file.read(),overwrite)
+def upload(volume:str=Form(...),path:str=Form(...),overwrite:bool=Form(False),file:UploadFile=File(...)):
+    try:
+        file.file.seek(0)
+        return call(S.upload_stream, volume, path, file.file, overwrite)
+    finally:
+        file.file.close()
 @router.get("/download")
 def download(volume:str,path:str):
     data=call(S.download_bytes,volume,path); name=path.replace('\\','/').split('/')[-1]

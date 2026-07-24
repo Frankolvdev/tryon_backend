@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json, os, re, subprocess, tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 class DockerFileManagerError(RuntimeError): pass
 
@@ -121,10 +121,56 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
         cls._helper(volume,f"test ! -e '/data/{dest}' && mv -- '/data/{p}' '/data/{dest}'")
         return {"success":True,"path":dest}
     @classmethod
+    def upload_stream(
+        cls,
+        volume: str,
+        path: str,
+        stream: BinaryIO,
+        overwrite: bool = False,
+        chunk_size: int = 8 * 1024 * 1024,
+    ) -> dict[str, Any]:
+        p = cls._path(path, False)
+        safe_volume = cls._require_volume(volume)
+        guard = "" if overwrite else f"test ! -e '/data/{p}' && "
+        command = f"mkdir -p -- \"$(dirname '/data/{p}')\"; {guard}cat > '/data/{p}'"
+        args = [
+            "docker", "run", "--rm", "-i",
+            "-v", f"{safe_volume}:/data",
+            cls.HELPER_IMAGE, "sh", "-lc", command,
+        ]
+        process = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        written = 0
+        try:
+            if process.stdin is None:
+                raise DockerFileManagerError("Docker upload stream could not be opened")
+            while True:
+                chunk = stream.read(chunk_size)
+                if not chunk:
+                    break
+                process.stdin.write(chunk)
+                written += len(chunk)
+            process.stdin.close()
+            stdout = process.stdout.read() if process.stdout else b""
+            stderr = process.stderr.read() if process.stderr else b""
+            return_code = process.wait(timeout=3600)
+        except Exception:
+            process.kill()
+            process.wait()
+            raise
+        if return_code != 0:
+            message = stderr.decode("utf-8", "replace").strip() or stdout.decode("utf-8", "replace").strip()
+            raise DockerFileManagerError(message or "Docker upload failed")
+        return {"success": True, "path": p, "size": written}
+
+    @classmethod
     def upload_bytes(cls,volume:str,path:str,data:bytes,overwrite:bool=False):
-        p=cls._path(path,False); guard="" if overwrite else f"test ! -e '/data/{p}' && "
-        cls._helper(volume,f"mkdir -p -- \"$(dirname '/data/{p}')\"; {guard}cat > '/data/{p}'",input_bytes=data,timeout=600)
-        return {"success":True,"path":p,"size":len(data)}
+        from io import BytesIO
+        return cls.upload_stream(volume, path, BytesIO(data), overwrite)
     @classmethod
     def download_bytes(cls,volume:str,path:str)->bytes:
         p=cls._path(path,False); return cls._helper(volume,f"test -f '/data/{p}' && cat '/data/{p}'",timeout=600).stdout
