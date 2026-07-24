@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from app.api.v1.guards.admin_guard import admin_guard
 from app.schemas.docker_file_manager import *
 from app.services.docker_file_manager_service import DockerFileManagerError, DockerFileManagerService as S
@@ -24,6 +24,13 @@ def delete(volume:str,path:str): return call(S.delete_path,volume,path)
 def rename(p:DockerRenamePayload): return call(S.rename,p.volume,p.path,p.new_name)
 @router.post("/transfer")
 def transfer(p:DockerTransferPayload): return call(S.transfer,p.source_volume,p.source_path,p.destination_volume,p.destination_path,p.operation,p.overwrite)
+@router.post("/upload-stream")
+async def upload_stream(request: Request, volume: str = Query(...), path: str = Query(...), overwrite: bool = Query(False)):
+    try:
+        return await S.upload_async_stream(volume, path, request.stream(), overwrite)
+    except DockerFileManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 @router.post("/upload")
 def upload(volume:str=Form(...),path:str=Form(...),overwrite:bool=Form(False),file:UploadFile=File(...)):
     try:

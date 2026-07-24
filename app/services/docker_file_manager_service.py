@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, re, subprocess, tempfile
+import asyncio, json, os, re, subprocess, tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
@@ -120,6 +120,63 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
         dest=str(p.parent/safe) if str(p.parent)!="." else safe
         cls._helper(volume,f"test ! -e '/data/{dest}' && mv -- '/data/{p}' '/data/{dest}'")
         return {"success":True,"path":dest}
+
+    @classmethod
+    async def upload_async_stream(
+        cls,
+        volume: str,
+        path: str,
+        chunks,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        p = cls._path(path, False)
+        safe_volume = cls._require_volume(volume)
+        script = r"""
+set -eu
+target="/data/$1"
+overwrite="$2"
+mkdir -p -- "$(dirname "$target")"
+if [ "$overwrite" != "true" ] && [ -e "$target" ]; then
+  echo "Destination already exists" >&2
+  exit 17
+fi
+cat > "$target"
+"""
+        process = await asyncio.create_subprocess_exec(
+            "docker", "run", "--rm", "-i",
+            "-v", f"{safe_volume}:/data",
+            cls.HELPER_IMAGE, "sh", "-lc", script, "sh", p,
+            "true" if overwrite else "false",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        written = 0
+        try:
+            if process.stdin is None:
+                raise DockerFileManagerError("Docker upload stream could not be opened")
+            async for chunk in chunks:
+                if not chunk:
+                    continue
+                process.stdin.write(chunk)
+                written += len(chunk)
+                await process.stdin.drain()
+            process.stdin.close()
+            try:
+                await process.stdin.wait_closed()
+            except (AttributeError, BrokenPipeError, ConnectionResetError):
+                pass
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=21600)
+        except Exception:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
+        if process.returncode != 0:
+            message = stderr.decode("utf-8", "replace").strip() or stdout.decode("utf-8", "replace").strip()
+            raise DockerFileManagerError(message or "Docker upload failed")
+        return {"success": True, "path": p, "size": written}
+
     @classmethod
     def upload_stream(
         cls,
