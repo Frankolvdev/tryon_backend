@@ -361,7 +361,7 @@ fi
         if nodes:
             lines += [
                 f"COPY custom_nodes/ {comfy_target}/custom_nodes/",
-                f"RUN find {comfy_target}/custom_nodes -name requirements.txt -print0 | xargs -0 -r -I{{}} sh -c 'sed -Ei \'/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id\' \"{{}}\" && pip3 install -r \"{{}}\"'",
+                f"RUN find {comfy_target}/custom_nodes -type f -name requirements.txt -exec sh -c 'for req do sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|\\$)/Id\" \"$req\" && pip3 install -r \"$req\" || exit 1; done' sh {{}} +",
             ]
         if models:
             lines.append(f"COPY models/ {comfy_target}/models/")
