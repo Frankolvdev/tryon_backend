@@ -1,5 +1,5 @@
  .\.venv\Scripts\Activate.ps1                                                                      
-
+ uvicorn app.main:app --reload --host 0.0.0.0 --port 8001      
 Para simular una renovación:
 
 python -m app.scripts.simulate_subscription_renewal --subscription-id 1

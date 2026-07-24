@@ -382,17 +382,16 @@ print("[runtime-performance] " + json.dumps(report, ensure_ascii=False, sort_key
 set -euo pipefail
 
 MODELS_ROOT="${{MODELS_ROOT:-/models}}"
+WORKFLOWS_ROOT="${{WORKFLOWS_ROOT:-/workflows}}"
+COMFY_USER_ROOT="${{COMFY_USER_ROOT:-$WORKFLOWS_ROOT}}"
 COMFY_MODELS="{workdir}/ComfyUI/models"
-mkdir -p "$COMFY_MODELS"
-if [ -d "$MODELS_ROOT/sam3" ]; then
-  rm -rf "$COMFY_MODELS/sam3"
-  ln -s "$MODELS_ROOT/sam3" "$COMFY_MODELS/sam3"
-  echo "[runtime] SAM3 enlazado: $COMFY_MODELS/sam3 -> $MODELS_ROOT/sam3"
-fi
+mkdir -p "$COMFY_MODELS" "$COMFY_USER_ROOT/default/workflows"
+echo "[runtime] Modelos externos registrados desde: $MODELS_ROOT"
+echo "[runtime] Workflows persistentes registrados en: $COMFY_USER_ROOT/default/workflows"
 
 python {workdir}/runtime/scripts/performance_probe.py || true
 read -r -a EXTRA_ARGS <<< "${{COMFYUI_EXTRA_ARGS:-}}"
-python {workdir}/ComfyUI/main.py --listen 0.0.0.0 --port 8188 "${{EXTRA_ARGS[@]}}" &
+python {workdir}/ComfyUI/main.py --listen 0.0.0.0 --port 8188 --user-directory "$COMFY_USER_ROOT" "${{EXTRA_ARGS[@]}}" &
 COMFY_PID=$!
 for _ in $(seq 1 180); do
   curl -fsS http://127.0.0.1:8188/system_stats >/dev/null && break

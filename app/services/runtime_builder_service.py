@@ -258,7 +258,9 @@ class RuntimeBuilderService:
                 "  clip_vision: clip_vision",
                 "  configs: configs",
                 "  controlnet: controlnet",
-                "  diffusion_models: diffusion_models",
+                "  diffusion_models: |",
+                "    diffusion_models",
+                "    unet",
                 "  embeddings: embeddings",
                 "  gligen: gligen",
                 "  hypernetworks: hypernetworks",
@@ -526,12 +528,11 @@ def comfyui():
         entrypoint = f"""#!/usr/bin/env bash
 set -euo pipefail
 MODELS_ROOT="${{MODELS_ROOT:-/models}}"
-mkdir -p /app/ComfyUI/models
-if [ -d "$MODELS_ROOT/sam3" ]; then
-  rm -rf /app/ComfyUI/models/sam3
-  ln -s "$MODELS_ROOT/sam3" /app/ComfyUI/models/sam3
-  echo "[runtime] SAM3 enlazado: /app/ComfyUI/models/sam3 -> $MODELS_ROOT/sam3"
-fi
+WORKFLOWS_ROOT="${{WORKFLOWS_ROOT:-/workflows}}"
+COMFY_USER_ROOT="${{COMFY_USER_ROOT:-$WORKFLOWS_ROOT}}"
+mkdir -p /app/ComfyUI/models "$COMFY_USER_ROOT/default/workflows"
+echo "[runtime] Modelos externos registrados desde: $MODELS_ROOT"
+echo "[runtime] Workflows persistentes registrados en: $COMFY_USER_ROOT/default/workflows"
 python - <<'PY_RUNTIME_PROBE' || true
 import importlib.util, json, os
 report = {{"provider": os.getenv("RUNTIME_PROVIDER", "docker")}}
@@ -545,7 +546,7 @@ for module in ("flash_attn", "xformers", "triton"):
 print("[runtime-performance] " + json.dumps(report, ensure_ascii=False, sort_keys=True))
 PY_RUNTIME_PROBE
 read -r -a EXTRA_ARGS <<< "${{COMFYUI_EXTRA_ARGS:-}}"
-python /app/ComfyUI/main.py {comfy_args} "${{EXTRA_ARGS[@]}}" &
+python /app/ComfyUI/main.py {comfy_args} --user-directory "$COMFY_USER_ROOT" "${{EXTRA_ARGS[@]}}" &
 COMFY_PID=$!
 for _ in $(seq 1 600); do
   curl -fsS http://127.0.0.1:{health_port}/system_stats >/dev/null && break
