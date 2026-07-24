@@ -5,13 +5,14 @@ from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
 from app.models.runtime_project import RuntimeProject
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeBuildBulkRequest, RuntimeBuildBulkResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeContextJobCreateResponse, RuntimeContextJobResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeContextJobCreateResponse, RuntimeContextJobResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse, RuntimeModelVolumeAnalyzeRequest, RuntimeModelVolumeExportRequest
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
 from app.services.runtime_import_service import RuntimeImportService
 from app.services.runtime_intelligence_service import RuntimeIntelligenceService
 from app.services.runtime_context_generator_service import RuntimeContextGeneratorService
 from app.services.runtime_context_job_service import RuntimeContextJobService
+from app.services.runtime_model_volume_export_service import RuntimeModelVolumeExportService
 router=APIRouter(prefix="/runtime-builder",dependencies=[Depends(admin_guard)])
 
 def get_or_create(db):
@@ -113,41 +114,6 @@ def cancel(build_id:int,db:Session=Depends(get_db)):
     if item.status in {'building','pending','validating','publishing'}: item.status='cancelled'; item.phase='cancelled'; db.add(item); db.commit(); db.refresh(item)
     return item
 
-@router.post('/builds/bulk-cancel', response_model=RuntimeBuildBulkResponse)
-def bulk_cancel_builds(payload: RuntimeBuildBulkRequest, db: Session = Depends(get_db)):
-    active_statuses = {'building', 'pending', 'validating', 'publishing'}
-    items = db.query(RuntimeBuilderBuild).filter(RuntimeBuilderBuild.id.in_(payload.ids)).all()
-    by_id = {item.id: item for item in items}
-    affected, skipped = [], []
-    for build_id in payload.ids:
-        item = by_id.get(build_id)
-        if item is None or item.status not in active_statuses:
-            skipped.append(build_id)
-            continue
-        item.status = 'cancelled'
-        item.phase = 'cancelled'
-        affected.append(build_id)
-        db.add(item)
-    db.commit()
-    return RuntimeBuildBulkResponse(affected_ids=affected, skipped_ids=skipped)
-
-
-@router.post('/builds/bulk-delete', response_model=RuntimeBuildBulkResponse)
-def bulk_delete_builds(payload: RuntimeBuildBulkRequest, db: Session = Depends(get_db)):
-    active_statuses = {'building', 'pending', 'validating', 'publishing'}
-    items = db.query(RuntimeBuilderBuild).filter(RuntimeBuilderBuild.id.in_(payload.ids)).all()
-    by_id = {item.id: item for item in items}
-    affected, skipped = [], []
-    for build_id in payload.ids:
-        item = by_id.get(build_id)
-        if item is None or item.status in active_statuses or item.active:
-            skipped.append(build_id)
-            continue
-        affected.append(build_id)
-        db.delete(item)
-    db.commit()
-    return RuntimeBuildBulkResponse(affected_ids=affected, skipped_ids=skipped)
-
 @router.post('/import/scan-path')
 def import_scan_path(payload:RuntimeImportPathRequest):
     try: return RuntimeImportService.scan_path(payload.path,payload.include_all_models)
@@ -223,3 +189,19 @@ def read_runtime_context_job(job_id: str):
         return RuntimeContextJobService.public(job_id)
     except KeyError:
         raise HTTPException(404, 'Trabajo de exportación no encontrado o el backend fue reiniciado.')
+
+
+@router.post('/models-volume/analyze')
+def analyze_models_volume(payload: RuntimeModelVolumeAnalyzeRequest, db: Session = Depends(get_db)):
+    try:
+        return RuntimeModelVolumeExportService.analyze(get_or_create(db), payload.comfyui_path)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@router.post('/models-volume/export', response_model=RuntimeContextJobCreateResponse, status_code=202)
+def export_models_volume(payload: RuntimeModelVolumeExportRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    config = get_or_create(db)
+    job = RuntimeContextJobService.create_model_volume(config.id, payload)
+    background_tasks.add_task(RuntimeContextJobService.run_model_volume, job['job_id'])
+    return job

@@ -56,6 +56,72 @@ class RuntimeContextJobService:
             if job_id in cls._jobs:
                 cls._jobs[job_id].update(values)
 
+
+    @classmethod
+    def create_model_volume(cls, config_id: int, payload: Any) -> dict[str, Any]:
+        job = cls.create(config_id, payload)
+        job_id = job["job_id"]
+        cls._update(job_id, message="Exportación de modelos en cola.", job_type="models_volume")
+        return cls.public(job_id)
+
+    @classmethod
+    def run_model_volume(cls, job_id: str) -> None:
+        from app.models.runtime_builder_config import RuntimeBuilderConfig
+        from app.schemas.runtime_builder import RuntimeModelVolumeExportRequest
+        from app.services.runtime_model_volume_export_service import RuntimeModelVolumeExportService
+
+        try:
+            with cls._lock:
+                stored = deepcopy(cls._jobs[job_id])
+            payload = RuntimeModelVolumeExportRequest(**stored["payload"])
+            config_id = int(stored["config_id"])
+            cls._update(
+                job_id,
+                status="running",
+                phase="analyzing",
+                progress=1,
+                message="Preparando exportación de modelos…",
+                started_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+            def progress(phase: str, percent: int, message: str) -> None:
+                cls._update(
+                    job_id,
+                    status="running",
+                    phase=phase,
+                    progress=max(1, min(99, int(percent))),
+                    message=message,
+                )
+
+            db = SessionLocal()
+            try:
+                config = db.get(RuntimeBuilderConfig, config_id)
+                if config is None:
+                    raise ValueError("La configuración del Runtime Builder ya no existe.")
+                result = RuntimeModelVolumeExportService.export(config, payload, progress)
+            finally:
+                db.close()
+
+            cls._update(
+                job_id,
+                status="completed",
+                phase="completed",
+                progress=100,
+                message="Modelos exportados y organizados para Volume.",
+                result=result,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            cls._update(
+                job_id,
+                status="failed",
+                phase="failed",
+                message="La exportación de modelos no pudo completarse.",
+                error=str(exc),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            traceback.print_exc()
+
     @classmethod
     def run(cls, job_id: str) -> None:
         from app.common.time import utc_now

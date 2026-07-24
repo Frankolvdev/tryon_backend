@@ -116,15 +116,6 @@ class RuntimeGeneratedFilesResponse(BaseModel):
 class RuntimeBuildCreate(BaseModel):
     push_after_build: bool = False
 
-
-class RuntimeBuildBulkRequest(BaseModel):
-    ids: list[int] = Field(min_length=1, max_length=200)
-
-
-class RuntimeBuildBulkResponse(BaseModel):
-    affected_ids: list[int] = Field(default_factory=list)
-    skipped_ids: list[int] = Field(default_factory=list)
-
 class RuntimeBuildResponse(BaseModel):
     id: int
     runtime_config_id: int
@@ -205,6 +196,33 @@ class RuntimeContextGenerateResponse(BaseModel):
     manifest: dict
 
 
+class RuntimeModelVolumeAnalyzeRequest(BaseModel):
+    comfyui_path: str = Field(min_length=1, max_length=2000)
+
+
+class RuntimeModelVolumeExportRequest(BaseModel):
+    comfyui_path: str = Field(min_length=1, max_length=2000)
+    output_directory: str | None = Field(default=None, max_length=2000)
+    calculate_sha256: bool = True
+    overwrite: bool = False
+    skip_identical: bool = True
+
+
+class RuntimeModelVolumeExportResponse(BaseModel):
+    success: bool
+    output_directory: str
+    models_directory: str
+    manifest_path: str
+    models_detected: int
+    models_found: int
+    models_missing: int
+    models_copied: int
+    models_skipped: int
+    bytes_copied: int
+    warnings: list[str]
+    manifest: dict
+
+
 class RuntimeContextJobCreateResponse(BaseModel):
     job_id: str
     status: str
@@ -212,7 +230,7 @@ class RuntimeContextJobCreateResponse(BaseModel):
     progress: int
     message: str
     error: str | None = None
-    result: RuntimeContextGenerateResponse | None = None
+    result: RuntimeContextGenerateResponse | RuntimeModelVolumeExportResponse | None = None
     created_at: str
     started_at: str | None = None
     finished_at: str | None = None
