@@ -29,6 +29,20 @@ class RuntimeBuilderService:
         "onnxruntime-gpu", "flash-attn",
     }
 
+    # Single source of truth used by the API endpoint, validation and exports.
+    # MEGA31 accidentally removed this class attribute while the endpoint still
+    # referenced it, causing GET /runtime-builder/config to fail at runtime.
+    RECOMMENDED_PROFILE = {
+        "id": "universal-modal-rtx5090",
+        "label": "Universal GPU — Modal + RTX 5090",
+        "python_version": "3.11",
+        "cuda_version": "12.8.1",
+        "pytorch_index_url": "https://download.pytorch.org/whl/cu128",
+        "comfyui_version": "0.15.1",
+        "comfyui_frontend_version": "1.39.19",
+        "comfyui_commit": "3dd10a59c00248d00f0cb0ab794ff1bb9fb00a5f",
+    }
+
     REQUIRED_CUSTOM_NODES = (
         {"name": "ComfyUI-Manager", "repository": "https://github.com/Comfy-Org/ComfyUI-Manager.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
         {"name": "rgthree-comfy", "repository": "https://github.com/rgthree/rgthree-comfy.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
@@ -525,7 +539,10 @@ wait $COMFY_PID
             "comfyui": {
                 "repository": config.comfyui_repository,
                 "commit": config.comfyui_commit,
+                "version": RuntimeBuilderService.RECOMMENDED_PROFILE["comfyui_version"],
+                "frontend_version": RuntimeBuilderService.RECOMMENDED_PROFILE["comfyui_frontend_version"],
             },
+            "compatibility_profile": RuntimeBuilderService.RECOMMENDED_PROFILE,
             "python": config.python_version,
             "cuda": config.cuda_version,
             "volumes": config.volumes or [],
