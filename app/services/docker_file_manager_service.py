@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, json, os, re, subprocess, tempfile
+import asyncio, json, os, re, subprocess, tempfile, uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
@@ -129,53 +129,104 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
         chunks,
         overwrite: bool = False,
     ) -> dict[str, Any]:
+        """Spool quickly, then use Docker's native copy implementation.
+
+        Directly piping every HTTP chunk to ``docker run -i`` can become
+        extremely slow on Windows/Docker Desktop because of subprocess-pipe
+        backpressure. ``docker cp`` is much faster and more stable for large
+        model files.
+        """
         p = cls._path(path, False)
         safe_volume = cls._require_volume(volume)
-        script = r"""
-set -eu
-target="/data/$1"
+        helper_name = f"tryon-volume-upload-{uuid.uuid4().hex[:12]}"
+        temporary_path: str | None = None
+        written = 0
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix="tryon-volume-upload-",
+                suffix=".part",
+                delete=False,
+                buffering=16 * 1024 * 1024,
+            ) as temporary_file:
+                temporary_path = temporary_file.name
+                async for chunk in chunks:
+                    if not chunk:
+                        continue
+                    temporary_file.write(chunk)
+                    written += len(chunk)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+
+            await asyncio.to_thread(
+                cls._run,
+                [
+                    "run", "-d", "--name", helper_name,
+                    "-v", f"{safe_volume}:/data",
+                    cls.HELPER_IMAGE, "sleep", "21600",
+                ],
+                timeout=120,
+            )
+
+            final_target = f"/data/{p}"
+            staging_target = f"{final_target}.uploading-{uuid.uuid4().hex[:8]}"
+            prepare_script = """set -eu
+final="$1"
 overwrite="$2"
-mkdir -p -- "$(dirname "$target")"
-if [ "$overwrite" != "true" ] && [ -e "$target" ]; then
+mkdir -p -- "$(dirname "$final")"
+if [ "$overwrite" != "true" ] && [ -e "$final" ]; then
   echo "Destination already exists" >&2
   exit 17
 fi
-cat > "$target"
 """
-        process = await asyncio.create_subprocess_exec(
-            "docker", "run", "--rm", "-i",
-            "-v", f"{safe_volume}:/data",
-            cls.HELPER_IMAGE, "sh", "-lc", script, "sh", p,
-            "true" if overwrite else "false",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        written = 0
-        try:
-            if process.stdin is None:
-                raise DockerFileManagerError("Docker upload stream could not be opened")
-            async for chunk in chunks:
-                if not chunk:
-                    continue
-                process.stdin.write(chunk)
-                written += len(chunk)
-                await process.stdin.drain()
-            process.stdin.close()
-            try:
-                await process.stdin.wait_closed()
-            except (AttributeError, BrokenPipeError, ConnectionResetError):
-                pass
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=21600)
-        except Exception:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-            raise
-        if process.returncode != 0:
-            message = stderr.decode("utf-8", "replace").strip() or stdout.decode("utf-8", "replace").strip()
-            raise DockerFileManagerError(message or "Docker upload failed")
-        return {"success": True, "path": p, "size": written}
+            await asyncio.to_thread(
+                cls._run,
+                [
+                    "exec", helper_name, "sh", "-lc", prepare_script,
+                    "sh", final_target, "true" if overwrite else "false",
+                ],
+                timeout=120,
+            )
+
+            await asyncio.to_thread(
+                cls._run,
+                ["cp", temporary_path, f"{helper_name}:{staging_target}"],
+                timeout=21600,
+            )
+
+            commit_script = """set -eu
+staging="$1"
+final="$2"
+overwrite="$3"
+if [ "$overwrite" = "true" ]; then
+  mv -f -- "$staging" "$final"
+else
+  test ! -e "$final"
+  mv -- "$staging" "$final"
+fi
+"""
+            await asyncio.to_thread(
+                cls._run,
+                [
+                    "exec", helper_name, "sh", "-lc", commit_script,
+                    "sh", staging_target, final_target,
+                    "true" if overwrite else "false",
+                ],
+                timeout=120,
+            )
+            return {"success": True, "path": p, "size": written}
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", helper_name],
+                capture_output=True,
+                check=False,
+            )
+            if temporary_path:
+                try:
+                    os.remove(temporary_path)
+                except FileNotFoundError:
+                    pass
 
     @classmethod
     def upload_stream(
