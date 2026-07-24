@@ -29,11 +29,27 @@ class RuntimeBuilderService:
         "onnxruntime-gpu", "flash-attn",
     }
 
+    RECOMMENDED_PROFILE = {
+        "id": "universal-modal-rtx5090",
+        "label": "Universal GPU — Modal + RTX 5090",
+        "python_version": "3.11",
+        "cuda_version": "12.8.1",
+        "pytorch_index_url": "https://download.pytorch.org/whl/cu128",
+        "comfyui_version": "0.15.1",
+        "comfyui_frontend_version": "1.39.19",
+        "comfyui_commit": "3dd10a59c00248d00f0cb0ab794ff1bb9fb00a5f",
+    }
+
     REQUIRED_CUSTOM_NODES = (
+        {"name": "ComfyUI-Manager", "repository": "https://github.com/Comfy-Org/ComfyUI-Manager.git", "commit": "3.39.2", "enabled": True, "install_requirements": True, "required_by_default": True},
         {"name": "rgthree-comfy", "repository": "https://github.com/rgthree/rgthree-comfy.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "ComfyUI-Easy-Use", "repository": "https://github.com/yolain/ComfyUI-Easy-Use.git", "commit": "v1.3.7", "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "ComfyUI-Lora-Manager", "repository": "https://github.com/willmiao/ComfyUI-Lora-Manager.git", "commit": "v1.1.1", "enabled": True, "install_requirements": True, "required_by_default": True},
         {"name": "ComfyUI-KJNodes", "repository": "https://github.com/kijai/ComfyUI-KJNodes.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
-        {"name": "comfyui-essentials", "repository": "https://github.com/comfyorg/comfyui-essentials.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "comfyui-essentials", "repository": "https://github.com/Comfy-Org/ComfyUI_essentials.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
         {"name": "was-node-suite-comfyui", "repository": "https://github.com/ltdrdata/was-node-suite-comfyui.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "ComfyUI-Logic", "repository": "https://github.com/theUpsider/ComfyUI-Logic.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "ComfyUI-Execute-Python", "repository": "https://github.com/mozhaa/ComfyUI-Execute-Python.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
         {"name": "ComfyLiterals", "repository": "https://github.com/M1kep/ComfyLiterals.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
         {"name": "Anomalous_Model_Browser", "repository": "https://github.com/DemonGatanjieu/Anomalous_Model_Browser.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
     )
@@ -284,10 +300,14 @@ def comfyui():
         runtime_name = RuntimeBuilderService.sanitize_runtime_name(getattr(config, "runtime_name", None))
         if runtime_name != str(getattr(config, "runtime_name", "") or ""):
             issues.append(ValidationIssue("error", "runtime_name", f"El nombre debe usar formato Docker seguro. Sugerencia: {runtime_name}"))
-        if not str(config.pytorch_index_url).rstrip("/").endswith("cu128"):
-            issues.append(ValidationIssue("warning", "pytorch_index_url", "Para compatibilidad amplia con RTX 5090 y Modal se recomienda el índice cu128."))
+        if str(config.pytorch_index_url).rstrip("/") != RuntimeBuilderService.RECOMMENDED_PROFILE["pytorch_index_url"]:
+            issues.append(ValidationIssue("error", "pytorch_index_url", "El perfil universal requiere PyTorch cu128 para Modal y RTX 5090."))
         if RuntimeBuilderService.normalize_cuda_version(config.cuda_version) < "12.8.0":
-            issues.append(ValidationIssue("warning", "cuda_version", "Para RTX 5090 se recomienda CUDA 12.8 o superior."))
+            issues.append(ValidationIssue("error", "cuda_version", "El perfil universal requiere CUDA 12.8 o superior."))
+        if not str(config.python_version).startswith("3.11"):
+            issues.append(ValidationIssue("error", "python_version", "El perfil universal validado requiere Python 3.11."))
+        if config.comfyui_commit != RuntimeBuilderService.RECOMMENDED_PROFILE["comfyui_commit"]:
+            issues.append(ValidationIssue("error", "comfyui_commit", "Debe usarse el commit validado de ComfyUI 0.15.1."))
         if not config.comfyui_commit:
             issues.append(
                 ValidationIssue(
@@ -428,13 +448,13 @@ def comfyui():
             )
             if node.get("commit"):
                 node_lines.append(
-                    f"RUN git -C /app/ComfyUI/custom_nodes/{folder} checkout {node['commit']}"
+                    f"RUN git -C /app/ComfyUI/custom_nodes/{folder} checkout {node['commit']} || git -C /app/ComfyUI/custom_nodes/{folder} checkout v{str(node['commit']).lstrip('vV')} || git -C /app/ComfyUI/custom_nodes/{folder} checkout V{str(node['commit']).lstrip('vV')}"
                 )
             if node.get("install_requirements", True):
                 node_lines.append(
                     "RUN if [ -f /app/ComfyUI/custom_nodes/"
                     f"{folder}/requirements.txt ]; then sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' "
-                    f"/app/ComfyUI/custom_nodes/{folder}/requirements.txt && pip install --no-cache-dir -r "
+                    f"/app/ComfyUI/custom_nodes/{folder}/requirements.txt && python3.11 -m pip install --no-cache-dir -r "
                     f"/app/ComfyUI/custom_nodes/{folder}/requirements.txt; fi"
                 )
 
@@ -468,19 +488,20 @@ def comfyui():
                 [
                     f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
                     'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',
-                    "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv python3-dev git curl ffmpeg libgl1 libglib2.0-0 build-essential pkg-config libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && rm -rf /var/lib/apt/lists/*",
+                    "RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common git curl ffmpeg libgl1 libopengl0 libglib2.0-0 build-essential pkg-config libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && add-apt-repository ppa:deadsnakes/ppa -y && apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-dev python3.11-venv && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 && ln -sf /usr/bin/python3.11 /usr/local/bin/python && rm -rf /var/lib/apt/lists/*",
                     f"RUN git clone {config.comfyui_repository} /app/ComfyUI",
                     commit_line,
-                    f"RUN pip install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
-                    "RUN sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt && pip install -r /app/ComfyUI/requirements.txt",
+                    f"RUN python3.11 -m pip install --upgrade pip setuptools wheel && python3.11 -m pip install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
+                    "RUN sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt && python3.11 -m pip install -r /app/ComfyUI/requirements.txt && python3.11 -m pip install comfyui-frontend-package==1.39.19",
                     *node_lines,
                     "COPY runtime-builder/requirements.txt /tmp/runtime-requirements.txt",
-                    "RUN if [ -s /tmp/runtime-requirements.txt ]; then pip install -r /tmp/runtime-requirements.txt; fi",
+                    "RUN if [ -s /tmp/runtime-requirements.txt ]; then python3.11 -m pip install -r /tmp/runtime-requirements.txt; fi",
                     *model_lines,
                     extra_paths_copy,
                     "COPY runpod_worker /app/runtime/runpod_worker",
                     "WORKDIR /app/runtime/runpod_worker",
-                    "RUN pip install -r requirements.txt",
+                    "RUN sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' requirements.txt && python3.11 -m pip install -r requirements.txt",
+                    "RUN python3.11 - <<'PY'\nimport torch\nassert torch.version.cuda and torch.version.cuda.startswith('12.8'), torch.version.cuda\nprint('PyTorch protegido:', torch.__version__, torch.version.cuda, torch.cuda.get_arch_list())\nPY",
                     "COPY runtime-builder/entrypoint.sh /app/runtime/entrypoint.sh",
                     "RUN chmod +x /app/runtime/entrypoint.sh",
                     'ENTRYPOINT ["/app/runtime/entrypoint.sh"]',
@@ -498,6 +519,23 @@ for _ in $(seq 1 600); do
   curl -fsS http://127.0.0.1:{health_port}/system_stats >/dev/null && break
   sleep 1
 done
+python3.11 - <<'PY_RUNTIME_VALIDATE'
+import json, urllib.request, torch
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA no disponible: el runtime no puede usar la GPU.")
+print("GPU runtime:", torch.cuda.get_device_name(0), torch.__version__, torch.version.cuda)
+with urllib.request.urlopen("http://127.0.0.1:{health_port}/object_info", timeout=60) as response:
+    info = json.load(response)
+keys = set(info)
+displays = {{str(value.get("display_name") or "") for value in info.values() if isinstance(value, dict)}}
+required = ["If ANY execute A else B", "Int", "Text Multiline", "ImageComposite+"]
+missing = [name for name in required if name not in keys and name not in displays]
+if not any(name.startswith("ExecutePython") for name in keys):
+    missing.append("ExecutePython*")
+if missing:
+    raise SystemExit("Custom Nodes obligatorios ausentes: " + ", ".join(missing))
+print("Validación /object_info completada: nodos obligatorios disponibles.")
+PY_RUNTIME_VALIDATE
 if [ -f /app/runtime/runpod_worker/handler.py ] && [ \"${{RUNTIME_PROVIDER:-}}\" != \"modal\" ]; then
   python3 /app/runtime/runpod_worker/handler.py
 fi
@@ -513,10 +551,8 @@ wait $COMFY_PID
             "version": config.runtime_version,
             "platform": config.target_platform,
             "registry_image": config.registry_image,
-            "comfyui": {
-                "repository": config.comfyui_repository,
-                "commit": config.comfyui_commit,
-            },
+            "comfyui": {"repository": config.comfyui_repository, "commit": config.comfyui_commit, "version": "0.15.1", "frontend_version": "1.39.19"},
+            "compatibility_profile": RuntimeBuilderService.RECOMMENDED_PROFILE,
             "python": config.python_version,
             "cuda": config.cuda_version,
             "volumes": config.volumes or [],

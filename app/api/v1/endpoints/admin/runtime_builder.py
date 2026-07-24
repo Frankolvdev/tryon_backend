@@ -25,6 +25,19 @@ def get_or_create(db):
     if config.runtime_name != safe_name:
         config.runtime_name = safe_name
         changed = True
+    profile = RuntimeBuilderService.RECOMMENDED_PROFILE
+    profile_values = {
+        "python_version": profile["python_version"],
+        "cuda_version": profile["cuda_version"],
+        "pytorch_index_url": profile["pytorch_index_url"],
+        "comfyui_commit": profile["comfyui_commit"],
+        "include_comfyui_manager": True,
+        "target_platform": "linux/amd64",
+    }
+    for field, value in profile_values.items():
+        if getattr(config, field) != value:
+            setattr(config, field, value)
+            changed = True
     merged_nodes = RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes)
     if merged_nodes != (config.custom_nodes or []):
         config.custom_nodes = merged_nodes
@@ -70,7 +83,18 @@ def read_config(db:Session=Depends(get_db)): return get_or_create(db)
 @router.put('/config',response_model=RuntimeBuilderConfigResponse)
 def update_config(payload:RuntimeBuilderConfigUpdate,db:Session=Depends(get_db)):
     config=get_or_create(db)
-    for field,value in payload.model_dump().items(): setattr(config,field,value)
+    values = payload.model_dump()
+    profile = RuntimeBuilderService.RECOMMENDED_PROFILE
+    values.update({
+        "python_version": profile["python_version"],
+        "cuda_version": profile["cuda_version"],
+        "pytorch_index_url": profile["pytorch_index_url"],
+        "comfyui_commit": profile["comfyui_commit"],
+        "include_comfyui_manager": True,
+        "target_platform": "linux/amd64",
+        "custom_nodes": RuntimeBuilderService.merge_required_custom_nodes(values.get("custom_nodes")),
+    })
+    for field,value in values.items(): setattr(config,field,value)
     db.add(config); db.commit(); db.refresh(config); return config
 @router.get('/project', response_model=RuntimeProjectResponse)
 def read_project(db: Session = Depends(get_db)):
