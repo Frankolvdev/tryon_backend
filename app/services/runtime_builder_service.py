@@ -43,6 +43,14 @@ class RuntimeBuilderService:
         "comfyui_commit": "3dd10a59c00248d00f0cb0ab794ff1bb9fb00a5f",
     }
 
+    # Nombres alternativos de carpetas locales. El exportador siempre copia la
+    # instalación local y nunca descarga ni reemplaza Custom Nodes desde Git.
+    CUSTOM_NODE_ALIASES = {
+        "comfyui-execute-python": ("execute-python",),
+        "was-node-suite-comfyui": ("was-ns",),
+        "comfyliterals": ("comfy-literals", "comfyui-comfyliterals"),
+    }
+
     REQUIRED_CUSTOM_NODES = (
         {"name": "ComfyUI-Manager", "repository": "https://github.com/Comfy-Org/ComfyUI-Manager.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
         {"name": "rgthree-comfy", "repository": "https://github.com/rgthree/rgthree-comfy.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},

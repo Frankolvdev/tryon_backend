@@ -58,17 +58,63 @@ class RuntimeContextGeneratorService:
         return matches[0] if len(matches) == 1 else None
 
     @staticmethod
+    def _normalize_node_name(value: str | None) -> str:
+        """Normaliza nombres de repositorios/carpetas sin perder identidad.
+
+        Ignora mayúsculas, espacios, guiones y guiones bajos para reconocer
+        forks o carpetas renombradas, pero mantiene la copia exacta del nodo
+        local encontrado.
+        """
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    @staticmethod
     def _find_node(comfy: Path, item: dict[str, Any]) -> Path | None:
         root = comfy / "custom_nodes"
         if not root.exists():
             return None
-        name = RuntimeContextGeneratorService._safe(str(item.get("name") or "")).lower()
-        repo = str(item.get("repository") or "").rstrip("/").removesuffix(".git").split("/")[-1].lower()
-        for folder in root.iterdir():
-            if not folder.is_dir() or folder.name.startswith("."):
-                continue
-            normalized = RuntimeContextGeneratorService._safe(folder.name).lower()
-            if normalized in {name, repo} or (name and name in normalized) or (repo and repo in normalized):
+
+        configured_name = str(item.get("name") or "").strip()
+        repository_name = (
+            str(item.get("repository") or "")
+            .rstrip("/")
+            .removesuffix(".git")
+            .split("/")[-1]
+        )
+
+        canonical_keys = {
+            RuntimeContextGeneratorService._normalize_node_name(configured_name),
+            RuntimeContextGeneratorService._normalize_node_name(repository_name),
+        }
+        canonical_keys.discard("")
+
+        aliases: set[str] = set()
+        for canonical, values in RuntimeBuilderService.CUSTOM_NODE_ALIASES.items():
+            canonical_normalized = RuntimeContextGeneratorService._normalize_node_name(canonical)
+            if canonical_normalized in canonical_keys:
+                aliases.update(values)
+
+        accepted = canonical_keys | {
+            RuntimeContextGeneratorService._normalize_node_name(alias)
+            for alias in aliases
+        }
+        accepted.discard("")
+
+        folders = [
+            folder for folder in root.iterdir()
+            if folder.is_dir() and not folder.name.startswith(".")
+        ]
+
+        # Primero exige coincidencia exacta normalizada. Esto evita que nombres
+        # genéricos como "logic" seleccionen accidentalmente otro paquete.
+        for folder in folders:
+            if RuntimeContextGeneratorService._normalize_node_name(folder.name) in accepted:
+                return folder
+
+        # Compatibilidad conservadora con el comportamiento anterior para nodos
+        # sin alias explícito y nombres de repositorio con sufijos adicionales.
+        for folder in folders:
+            normalized = RuntimeContextGeneratorService._normalize_node_name(folder.name)
+            if any(len(key) >= 8 and (key in normalized or normalized in key) for key in canonical_keys):
                 return folder
         return None
 
