@@ -17,7 +17,20 @@ router=APIRouter(prefix="/runtime-builder",dependencies=[Depends(admin_guard)])
 
 def get_or_create(db):
     config=db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.id.asc()).first()
-    if config is None: config=RuntimeBuilderConfig(); db.add(config); db.commit(); db.refresh(config)
+    if config is None:
+        config=RuntimeBuilderConfig()
+        db.add(config); db.commit(); db.refresh(config)
+    changed = False
+    safe_name = RuntimeBuilderService.sanitize_runtime_name(getattr(config, "runtime_name", None))
+    if config.runtime_name != safe_name:
+        config.runtime_name = safe_name
+        changed = True
+    merged_nodes = RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes)
+    if merged_nodes != (config.custom_nodes or []):
+        config.custom_nodes = merged_nodes
+        changed = True
+    if changed:
+        db.add(config); db.commit(); db.refresh(config)
     return config
 
 def get_or_create_project(db: Session, config: RuntimeBuilderConfig | None = None) -> RuntimeProject:

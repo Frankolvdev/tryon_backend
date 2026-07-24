@@ -121,7 +121,7 @@ class RuntimeContextGeneratorService:
             )
         )
         output = base / (
-            f"{RuntimeContextGeneratorService._safe(config.project_key or config.name)}-"
+            f"{RuntimeContextGeneratorService._safe(config.runtime_name or config.name)}-"
             f"{RuntimeContextGeneratorService._safe(config.runtime_version)}"
         )
         if output.exists():
@@ -151,9 +151,9 @@ class RuntimeContextGeneratorService:
             volume_path = RuntimeBuilderService._modal_volume_path(config)
             volume_name = next(
                 (str(volume.get("name")) for volume in (config.volumes or []) if volume.get("name")),
-                "tryon-models",
+                f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models",
             )
-            generated["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path)
+            generated["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path, RuntimeBuilderService.sanitize_runtime_name(config.runtime_name))
             generated["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(volume_path)
             generated["runtime_manifest"]["provider"] = "modal"
             generated["runtime_manifest"]["model_storage"] = "external-volume"
@@ -254,7 +254,7 @@ class RuntimeContextGeneratorService:
         requirements = "\n".join(requirements_lines) + ("\n" if requirements_lines else "")
 
         manifest = {
-            "contract": "tryon.runtime-context/v2",
+            "contract": "runtime-context/v3",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "runtime": generated["runtime_manifest"],
             "project_key": config.project_key,
@@ -346,7 +346,7 @@ fi
         external_models = modal_enabled and not models
         lines = [
             f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
-            "ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1",
+            'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',
             "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv python3-dev git curl ffmpeg libgl1 libglib2.0-0 build-essential pkg-config libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && rm -rf /var/lib/apt/lists/*",
             f"RUN git clone {config.comfyui_repository} {comfy_target}",
         ]
@@ -354,24 +354,24 @@ fi
             lines.append(f"RUN git -C {comfy_target} checkout {config.comfyui_commit}")
         lines += [
             f"RUN pip3 install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
-            f"RUN pip3 install -r {comfy_target}/requirements.txt",
+            f"RUN sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' {comfy_target}/requirements.txt && pip3 install -r {comfy_target}/requirements.txt",
             "COPY requirements.txt /tmp/runtime-requirements.txt",
             "RUN if [ -s /tmp/runtime-requirements.txt ]; then pip3 install -r /tmp/runtime-requirements.txt; fi",
         ]
         if nodes:
             lines += [
                 f"COPY custom_nodes/ {comfy_target}/custom_nodes/",
-                f"RUN find {comfy_target}/custom_nodes -name requirements.txt -print0 | xargs -0 -r -n1 pip3 install -r",
+                f"RUN find {comfy_target}/custom_nodes -name requirements.txt -print0 | xargs -0 -r -I{{}} sh -c 'sed -Ei \'/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id\' \"{{}}\" && pip3 install -r \"{{}}\"'",
             ]
         if models:
             lines.append(f"COPY models/ {comfy_target}/models/")
         elif external_models:
             lines.append(f"COPY extra_model_paths.yaml {comfy_target}/extra_model_paths.yaml")
         lines += [
-            f"COPY scripts/ {workdir}/tryon/scripts/",
-            f"RUN chmod +x {workdir}/tryon/scripts/startup.sh",
+            f"COPY scripts/ {workdir}/runtime/scripts/",
+            f"RUN chmod +x {workdir}/runtime/scripts/startup.sh",
             f"WORKDIR {comfy_target}",
-            f"HEALTHCHECK --interval=30s --timeout=10s --start-period=120s CMD python3 {workdir}/tryon/scripts/healthcheck.py || exit 1",
-            f'ENTRYPOINT ["{workdir}/tryon/scripts/startup.sh"]',
+            f"HEALTHCHECK --interval=30s --timeout=10s --start-period=120s CMD python3 {workdir}/runtime/scripts/healthcheck.py || exit 1",
+            f'ENTRYPOINT ["{workdir}/runtime/scripts/startup.sh"]',
         ]
         return "\n".join(lines) + "\n"

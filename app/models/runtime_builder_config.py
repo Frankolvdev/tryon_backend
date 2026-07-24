@@ -12,11 +12,12 @@ class RuntimeBuilderConfig(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(255), default="Runtime principal", nullable=False)
+    runtime_name: Mapped[str] = mapped_column(String(120), default="generation-runtime", nullable=False, index=True)
     runtime_version: Mapped[str] = mapped_column(String(64), default="1.0.0", nullable=False)
     python_version: Mapped[str] = mapped_column(String(32), default="3.11", nullable=False)
-    cuda_version: Mapped[str] = mapped_column(String(32), default="12.4.1", nullable=False)
+    cuda_version: Mapped[str] = mapped_column(String(32), default="12.8.0", nullable=False)
     pytorch_index_url: Mapped[str] = mapped_column(
-        String(1000), default="https://download.pytorch.org/whl/cu124", nullable=False
+        String(1000), default="https://download.pytorch.org/whl/cu128", nullable=False
     )
     comfyui_repository: Mapped[str] = mapped_column(
         String(1000), default="https://github.com/comfyanonymous/ComfyUI.git", nullable=False
@@ -24,7 +25,7 @@ class RuntimeBuilderConfig(Base):
     comfyui_commit: Mapped[str | None] = mapped_column(String(128), nullable=True)
     target_platform: Mapped[str] = mapped_column(String(64), default="linux/amd64", nullable=False)
     registry_image: Mapped[str] = mapped_column(
-        String(500), default="ghcr.io/your-org/tryon-generation-runtime", nullable=False
+        String(500), default="ghcr.io/your-org/generation-runtime", nullable=False
     )
     include_comfyui_manager: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     custom_nodes: Mapped[list] = mapped_column(JSON, default=list, nullable=False)

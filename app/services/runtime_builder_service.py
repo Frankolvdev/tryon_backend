@@ -23,6 +23,47 @@ class RuntimeBuilderService:
 
     DEFAULT_MODAL_VOLUME_PATH = "/app/ComfyUI/models"
 
+
+    PROTECTED_GPU_PACKAGES = {
+        "torch", "torchvision", "torchaudio", "xformers", "triton",
+        "onnxruntime-gpu", "flash-attn",
+    }
+
+    REQUIRED_CUSTOM_NODES = (
+        {"name": "rgthree-comfy", "repository": "https://github.com/rgthree/rgthree-comfy.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "ComfyUI-KJNodes", "repository": "https://github.com/kijai/ComfyUI-KJNodes.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "comfyui-essentials", "repository": "https://github.com/comfyorg/comfyui-essentials.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "was-node-suite-comfyui", "repository": "https://github.com/ltdrdata/was-node-suite-comfyui.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "ComfyLiterals", "repository": "https://github.com/M1kep/ComfyLiterals.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+        {"name": "Anomalous_Model_Browser", "repository": "https://github.com/DemonGatanjieu/Anomalous_Model_Browser.git", "commit": None, "enabled": True, "install_requirements": True, "required_by_default": True},
+    )
+
+    @staticmethod
+    def sanitize_runtime_name(value: str | None) -> str:
+        import unicodedata
+        normalized = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii").lower()
+        normalized = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+        normalized = re.sub(r"-+", "-", normalized)[:120].rstrip("-")
+        if not normalized:
+            normalized = "generation-runtime"
+        if not normalized[0].isalpha():
+            normalized = f"runtime-{normalized}"
+        return normalized
+
+    @staticmethod
+    def merge_required_custom_nodes(nodes: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = [dict(item) for item in RuntimeBuilderService.REQUIRED_CUSTOM_NODES]
+        keys = {str(item["repository"]).lower().removesuffix(".git") for item in merged}
+        for item in nodes or []:
+            repo = str(item.get("repository") or "").lower().removesuffix(".git")
+            name = str(item.get("name") or "").lower()
+            if repo in keys or any(str(x.get("name") or "").lower() == name for x in merged):
+                continue
+            merged.append(dict(item))
+            if repo:
+                keys.add(repo)
+        return merged
+
     DEVELOPMENT_DEPENDENCIES = {
         "black", "flake8", "pytest", "pytest-cov", "pytest-asyncio",
         "coverage", "ruff", "isort", "mypy", "pre-commit", "tox",
@@ -37,7 +78,8 @@ class RuntimeBuilderService:
 
     @staticmethod
     def is_runtime_dependency(requirement: str) -> bool:
-        return RuntimeBuilderService._requirement_name(requirement) not in RuntimeBuilderService.DEVELOPMENT_DEPENDENCIES
+        name = RuntimeBuilderService._requirement_name(requirement)
+        return name not in RuntimeBuilderService.DEVELOPMENT_DEPENDENCIES and name not in RuntimeBuilderService.PROTECTED_GPU_PACKAGES
 
     @staticmethod
     def normalize_cuda_version(value: str | None) -> str:
@@ -173,7 +215,7 @@ class RuntimeBuilderService:
                     or volume.get("path")
                     or RuntimeBuilderService.DEFAULT_MODAL_VOLUME_PATH
                 ).rstrip("/")
-                if configured in {"/opt/ComfyUI/models", "/models"}:
+                if configured in {"/app/ComfyUI/models", "/models"}:
                     return RuntimeBuilderService.DEFAULT_MODAL_VOLUME_PATH
                 return configured
         return RuntimeBuilderService.DEFAULT_MODAL_VOLUME_PATH
@@ -205,12 +247,12 @@ class RuntimeBuilderService:
         )
 
     @staticmethod
-    def _modal_app(volume_name: str, volume_path: str) -> str:
+    def _modal_app(volume_name: str, volume_path: str, runtime_name: str) -> str:
         # Modal builds directly from the generated Dockerfile. GPU snapshots stay
         # opt-in because the feature remains experimental and must be benchmarked.
         return f'''import modal
 
-APP_NAME = "tryon-comfyui-runtime"
+APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
 VOLUME_PATH = {json.dumps(volume_path)}
 
@@ -220,7 +262,7 @@ image = modal.Image.from_dockerfile("Dockerfile")
 
 @app.function(
     image=image,
-    gpu="L40S",
+    gpu=["L40S", "A100-80GB", "H100"],
     volumes={{VOLUME_PATH: models_volume}},
     timeout=1800,
     scaledown_window=60,
@@ -232,13 +274,20 @@ def comfyui():
     import subprocess
 
     subprocess.Popen([
-        "/app/tryon/scripts/startup.sh",
+        "/app/runtime/scripts/startup.sh",
     ])
 '''
 
     @staticmethod
     def validate(config: RuntimeBuilderConfig) -> dict:
         issues: list[ValidationIssue] = []
+        runtime_name = RuntimeBuilderService.sanitize_runtime_name(getattr(config, "runtime_name", None))
+        if runtime_name != str(getattr(config, "runtime_name", "") or ""):
+            issues.append(ValidationIssue("error", "runtime_name", f"El nombre debe usar formato Docker seguro. Sugerencia: {runtime_name}"))
+        if not str(config.pytorch_index_url).rstrip("/").endswith("cu128"):
+            issues.append(ValidationIssue("warning", "pytorch_index_url", "Para compatibilidad amplia con RTX 5090 y Modal se recomienda el índice cu128."))
+        if RuntimeBuilderService.normalize_cuda_version(config.cuda_version) < "12.8.0":
+            issues.append(ValidationIssue("warning", "cuda_version", "Para RTX 5090 se recomienda CUDA 12.8 o superior."))
         if not config.comfyui_commit:
             issues.append(
                 ValidationIssue(
@@ -265,7 +314,7 @@ def comfyui():
             )
 
         names: set[str] = set()
-        for index, node in enumerate(config.custom_nodes or []):
+        for index, node in enumerate(RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes)):
             name = str(node.get("name", "")).strip().lower()
             if not node.get("enabled", True):
                 continue
@@ -344,7 +393,7 @@ def comfyui():
             "issues": [asdict(issue) for issue in issues],
             "summary": {
                 "custom_nodes": len(
-                    [n for n in (config.custom_nodes or []) if n.get("enabled", True)]
+                    [n for n in RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes) if n.get("enabled", True)]
                 ),
                 "models": len(enabled_models),
                 "python_dependencies": len(
@@ -354,7 +403,7 @@ def comfyui():
                 "reproducible": bool(config.comfyui_commit)
                 and all(
                     bool(n.get("commit"))
-                    for n in (config.custom_nodes or [])
+                    for n in RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes)
                     if n.get("enabled", True)
                 ),
             },
@@ -367,7 +416,7 @@ def comfyui():
             errors = [item["message"] for item in validation["issues"] if item["level"] == "error"]
             raise ValueError("No se puede generar el runtime: " + " | ".join(errors))
 
-        nodes = [n for n in (config.custom_nodes or []) if n.get("enabled", True)]
+        nodes = [n for n in RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes) if n.get("enabled", True)]
         deps = [d for d in (config.python_dependencies or []) if d.get("enabled", True)]
         models = [m for m in (config.models or []) if m.get("enabled", True)]
 
@@ -375,17 +424,18 @@ def comfyui():
         for node in nodes:
             folder = re.sub(r"[^A-Za-z0-9_.-]", "-", node["name"]).strip("-")
             node_lines.append(
-                f"RUN git clone {node['repository']} /opt/ComfyUI/custom_nodes/{folder}"
+                f"RUN git clone {node['repository']} /app/ComfyUI/custom_nodes/{folder}"
             )
             if node.get("commit"):
                 node_lines.append(
-                    f"RUN git -C /opt/ComfyUI/custom_nodes/{folder} checkout {node['commit']}"
+                    f"RUN git -C /app/ComfyUI/custom_nodes/{folder} checkout {node['commit']}"
                 )
             if node.get("install_requirements", True):
                 node_lines.append(
-                    "RUN if [ -f /opt/ComfyUI/custom_nodes/"
-                    f"{folder}/requirements.txt ]; then pip install --no-cache-dir -r "
-                    f"/opt/ComfyUI/custom_nodes/{folder}/requirements.txt; fi"
+                    "RUN if [ -f /app/ComfyUI/custom_nodes/"
+                    f"{folder}/requirements.txt ]; then sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' "
+                    f"/app/ComfyUI/custom_nodes/{folder}/requirements.txt && pip install --no-cache-dir -r "
+                    f"/app/ComfyUI/custom_nodes/{folder}/requirements.txt; fi"
                 )
 
         requirements = RuntimeBuilderService.render_requirements(deps)
@@ -395,9 +445,9 @@ def comfyui():
         for model in models:
             if model.get("strategy") == "image":
                 model_lines.append(
-                    "RUN mkdir -p $(dirname /opt/ComfyUI/models/"
+                    "RUN mkdir -p $(dirname /app/ComfyUI/models/"
                     f"{model['target_path']}) && curl -fL '{model['source_url']}' "
-                    f"-o /opt/ComfyUI/models/{model['target_path']}"
+                    f"-o /app/ComfyUI/models/{model['target_path']}"
                 )
 
         modal_enabled = RuntimeBuilderService._is_modal(config)
@@ -408,7 +458,7 @@ def comfyui():
             extra_paths_copy = "COPY runtime-builder/extra_model_paths.yaml /app/ComfyUI/extra_model_paths.yaml"
 
         commit_line = (
-            f"RUN git -C /opt/ComfyUI checkout {config.comfyui_commit}"
+            f"RUN git -C /app/ComfyUI checkout {config.comfyui_commit}"
             if config.comfyui_commit
             else ""
         )
@@ -417,23 +467,23 @@ def comfyui():
                 None,
                 [
                     f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
-                    "ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1",
+                    'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',
                     "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv python3-dev git curl ffmpeg libgl1 libglib2.0-0 build-essential pkg-config libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && rm -rf /var/lib/apt/lists/*",
-                    f"RUN git clone {config.comfyui_repository} /opt/ComfyUI",
+                    f"RUN git clone {config.comfyui_repository} /app/ComfyUI",
                     commit_line,
                     f"RUN pip install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
-                    "RUN pip install -r /opt/ComfyUI/requirements.txt",
+                    "RUN sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt && pip install -r /app/ComfyUI/requirements.txt",
                     *node_lines,
                     "COPY runtime-builder/requirements.txt /tmp/runtime-requirements.txt",
                     "RUN if [ -s /tmp/runtime-requirements.txt ]; then pip install -r /tmp/runtime-requirements.txt; fi",
                     *model_lines,
                     extra_paths_copy,
-                    "COPY runpod_worker /opt/tryon/runpod_worker",
-                    "WORKDIR /opt/tryon/runpod_worker",
+                    "COPY runpod_worker /app/runtime/runpod_worker",
+                    "WORKDIR /app/runtime/runpod_worker",
                     "RUN pip install -r requirements.txt",
-                    "COPY runtime-builder/entrypoint.sh /opt/tryon/entrypoint.sh",
-                    "RUN chmod +x /opt/tryon/entrypoint.sh",
-                    'ENTRYPOINT ["/opt/tryon/entrypoint.sh"]',
+                    "COPY runtime-builder/entrypoint.sh /app/runtime/entrypoint.sh",
+                    "RUN chmod +x /app/runtime/entrypoint.sh",
+                    'ENTRYPOINT ["/app/runtime/entrypoint.sh"]',
                 ],
             )
         ) + "\n"
@@ -442,20 +492,23 @@ def comfyui():
         health_port = 8000 if modal_enabled else 8188
         entrypoint = f"""#!/usr/bin/env bash
 set -euo pipefail
-python3 /opt/ComfyUI/main.py {comfy_args} &
+python3 /app/ComfyUI/main.py {comfy_args} &
 COMFY_PID=$!
 for _ in $(seq 1 600); do
   curl -fsS http://127.0.0.1:{health_port}/system_stats >/dev/null && break
   sleep 1
 done
-if [ -f /opt/tryon/runpod_worker/handler.py ] && [ \"${{RUNTIME_PROVIDER:-}}\" != \"modal\" ]; then
-  python3 /opt/tryon/runpod_worker/handler.py
+if [ -f /app/runtime/runpod_worker/handler.py ] && [ \"${{RUNTIME_PROVIDER:-}}\" != \"modal\" ]; then
+  python3 /app/runtime/runpod_worker/handler.py
 fi
 wait $COMFY_PID
 """
 
         runtime_manifest = {
-            "contract": "tryon.runtime-builder/v1",
+            "contract": "runtime-builder/v2",
+            "runtime_name": RuntimeBuilderService.sanitize_runtime_name(config.runtime_name),
+            "gpu_profile": "universal-cu128",
+            "gpu_targets": ["RTX 5090", "L4", "L40S", "A10G", "A100", "H100", "H200"],
             "name": config.name,
             "version": config.runtime_version,
             "platform": config.target_platform,
@@ -491,12 +544,12 @@ wait $COMFY_PID
         }
 
         if modal_enabled:
-            volume_name = "tryon-models"
+            volume_name = f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models"
             for volume in config.volumes or []:
                 if volume.get("name"):
                     volume_name = str(volume["name"])
                     break
-            result["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path)
+            result["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path, RuntimeBuilderService.sanitize_runtime_name(config.runtime_name))
             if external_models:
                 result["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(
                     volume_path

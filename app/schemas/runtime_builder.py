@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 class RuntimeCustomNode(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    runtime_name: str = Field(default="generation-runtime", min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
     repository: str = Field(min_length=1, max_length=1000)
     commit: str | None = Field(default=None, max_length=128)
     enabled: bool = True

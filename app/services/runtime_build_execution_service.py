@@ -15,7 +15,14 @@ class RuntimeBuildExecutionService:
     @staticmethod
     def image_tag(config):
         base=config.registry_image.rstrip(":")
-        return base if base.endswith(":"+config.runtime_version) else f"{base}:{config.runtime_version}"
+        safe_name = RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)
+        tag = ""
+        if ":" in base.rsplit("/", 1)[-1]:
+            base, tag = base.rsplit(":", 1)
+        prefix = base.rsplit("/", 1)[0] if "/" in base else ""
+        image = f"{prefix}/{safe_name}" if prefix else safe_name
+        version = tag or config.runtime_version
+        return f"{image}:{version}"
 
     @staticmethod
     def diagnostic(db):
@@ -29,7 +36,7 @@ class RuntimeBuildExecutionService:
             bx=subprocess.run(["docker","buildx","version"],capture_output=True,timeout=10).returncode==0
         except Exception: bx=False
         active=db.query(RuntimeBuilderBuild).filter(RuntimeBuilderBuild.active.is_(True)).order_by(RuntimeBuilderBuild.id.desc()).first()
-        return {"docker_available":available,"docker_version":version,"buildx_available":bx,"registry_image":cfg.registry_image,"active_image":active.image_tag if active else None,"message":"Docker listo para construir." if available else "Docker no está disponible en el host del backend. También puedes ejecutar el build mediante CI usando el contexto generado."}
+        return {"docker_available":available,"docker_version":version,"buildx_available":bx,"registry_image":RuntimeBuildExecutionService.image_tag(cfg),"active_image":active.image_tag if active else None,"message":"Docker listo para construir." if available else "Docker no está disponible en el host del backend. También puedes ejecutar el build mediante CI usando el contexto generado."}
 
     @staticmethod
     def _resolve_context(db, config, requested_directory=None):
@@ -92,7 +99,7 @@ class RuntimeBuildExecutionService:
         except Exception as exc:
             raise ValueError(f"runtime.json no es válido en {path}: {exc}") from exc
 
-        if manifest.get("contract") != "tryon.runtime-context/v2":
+        if manifest.get("contract") not in {"runtime-context/v3", "tryon.runtime-context/v2"}:
             raise ValueError(
                 f"manifest.json no corresponde a un contexto Runtime Builder compatible en {path}."
             )
@@ -111,7 +118,7 @@ class RuntimeBuildExecutionService:
         if not validation["valid"]: raise ValueError("La configuración contiene errores y no puede compilarse.")
         context = RuntimeBuildExecutionService._resolve_context(db, config, context_directory)
         if context is None:
-            raise ValueError("No se encontró una exportación válida. Selecciona el directorio generado, por ejemplo ...\tryon-1.0.0, antes de construir.")
+            raise ValueError("No se encontró una exportación válida. Selecciona el directorio generado, por ejemplo ...\generation-runtime-1.0.0, antes de construir.")
         context_validation = RuntimeBuildExecutionService._validate_context(context)
         build=RuntimeBuilderBuild(
             runtime_config_id=config.id,

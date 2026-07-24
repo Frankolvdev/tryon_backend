@@ -214,6 +214,34 @@ class RuntimeImportService:
         return list(dedup.values())
 
     @staticmethod
+    def _workflow_graph_stats(workflow: dict[str, Any]) -> dict[str, int]:
+        subgraphs = 0
+        max_depth = 0
+        seen: set[int] = set()
+        def visit(value: Any, depth: int = 0, key: str = "") -> None:
+            nonlocal subgraphs, max_depth
+            if isinstance(value, dict):
+                marker = id(value)
+                if marker in seen:
+                    return
+                seen.add(marker)
+                lowered = key.casefold()
+                is_graph = lowered in {"subgraphs", "subgraph", "definitions", "graphs"} or (
+                    depth > 0 and isinstance(value.get("nodes"), list) and any(k in value for k in ("links", "inputs", "outputs"))
+                )
+                next_depth = depth + 1 if is_graph else depth
+                if is_graph:
+                    subgraphs += 1
+                    max_depth = max(max_depth, next_depth)
+                for child_key, child in value.items():
+                    visit(child, next_depth, str(child_key))
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child, depth, key)
+        visit(workflow)
+        return {"subgraphs": subgraphs, "max_subgraph_depth": max_depth}
+
+    @staticmethod
     def _runtime_node_catalog(comfy: Path, python_executable: str | None) -> dict[str, dict[str, Any]]:
         if not python_executable: return {}
         script="\n".join([
@@ -485,11 +513,14 @@ class RuntimeImportService:
     @staticmethod
     def analyze_workflow(workflow: dict[str, Any], report: dict[str, Any] | None = None) -> dict[str, Any]:
         nodes=RuntimeImportService._workflow_nodes(workflow); classes=sorted({n['class_type'] for n in nodes if n['class_type']})
+        graph_stats=RuntimeImportService._workflow_graph_stats(workflow)
         refs=sorted({v for n in nodes for v in RuntimeImportService._string_values(n.get('inputs')) if RuntimeImportService._looks_like_model(v)})
         known={c for item in (report or {}).get('custom_nodes',[]) for c in item.get('matched_classes',[])}
+        available=set((report or {}).get('core_classes',[])) | known
+        missing=sorted(c for c in classes if available and c not in available and c.casefold() not in {'getnode','setnode','reroute','note'})
         return {'node_count':len(nodes),'class_types':classes,'custom_node_classes':sorted(known),
-                'referenced_models':refs,'potentially_missing_nodes':[],
-                'summary':{'nodes':len(nodes),'unique_classes':len(classes),'referenced_models':len(refs)}}
+                'referenced_models':refs,'potentially_missing_nodes':missing,
+                'summary':{'nodes':len(nodes),'unique_classes':len(classes),'referenced_models':len(refs),**graph_stats}}
 
     @staticmethod
     def apply_report(db, config: RuntimeBuilderConfig, report: dict[str, Any], selection: dict[str, bool]):
