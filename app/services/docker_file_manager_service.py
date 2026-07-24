@@ -53,13 +53,26 @@ class DockerFileManagerService:
     @classmethod
     def list_directory(cls,volume:str,path:str="")->dict[str,Any]:
         p=cls._path(path); target=f"/data/{p}" if p else "/data"
-        script=f'''test -d "$1" || exit 44\nfind "$1" -mindepth 1 -maxdepth 1 -printf '%f\\t%y\\t%s\\t%T@\\n' | sort -k2,2 -k1,1'''
-        out=cls._helper(volume,f"{script}\n",input_bytes=None) if False else cls._run(["run","--rm","-v",f"{cls._volume(volume)}:/data",cls.HELPER_IMAGE,"sh","-lc",script,"sh",target])
+        # Alpine uses BusyBox; its `find` does not support GNU `-printf`.
+        script = r"""
+set -eu
+target="$1"
+test -d "$target" || exit 44
+find "$target" -mindepth 1 -maxdepth 1 -exec stat -c '%n\t%F\t%s\t%Y' {} \;
+"""
+        out = cls._run([
+            "run", "--rm", "-v", f"{cls._volume(volume)}:/data",
+            cls.HELPER_IMAGE, "sh", "-lc", script, "sh", target,
+        ])
         items=[]
+        prefix = target.rstrip("/") + "/"
         for line in out.stdout.decode("utf-8","replace").splitlines():
-            name,kind,size,modified=(line.split("\t",3)+["","",""])[:4]
+            full_name,kind,size,modified=(line.split("\t",3)+["","",""])[:4]
+            name = full_name[len(prefix):] if full_name.startswith(prefix) else PurePosixPath(full_name).name
             rel=f"{p}/{name}" if p else name
-            items.append({"name":name,"path":rel,"type":"directory" if kind=="d" else "file","size":int(size or 0),"modified_at":modified})
+            entry_type = "directory" if "directory" in kind.lower() else "file"
+            items.append({"name":name,"path":rel,"type":entry_type,"size":int(size or 0),"modified_at":modified})
+        items.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
         return {"volume":volume,"path":p,"items":items}
     @classmethod
     def create_directory(cls,volume:str,path:str,parents:bool=True):

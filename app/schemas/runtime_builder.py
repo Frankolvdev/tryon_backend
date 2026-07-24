@@ -206,7 +206,7 @@ class RuntimeModelVolumeExportRequest(BaseModel):
     output_directory: str | None = Field(default=None, max_length=2000)
     destination_type: Literal["local", "docker_volume"] = "local"
     docker_volume: str | None = Field(default=None, max_length=255)
-    docker_path: str = Field(default="models", max_length=2000)
+    docker_path: str = Field(default="", max_length=2000)
     calculate_sha256: bool = True
     overwrite: bool = False
     skip_identical: bool = True
@@ -273,7 +273,7 @@ class RuntimeModelExportSettings(BaseModel):
     output_directory: str = ""
     destination_type: Literal["local", "docker_volume"] = "local"
     docker_volume: str = ""
-    docker_path: str = "models"
+    docker_path: str = ""
     calculate_sha256: bool = True
     overwrite: bool = False
     skip_identical: bool = True

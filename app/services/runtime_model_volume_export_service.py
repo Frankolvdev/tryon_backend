@@ -198,6 +198,10 @@ class RuntimeModelVolumeExportService:
                 f"Procesando modelo {index + 1} de {len(records)}…",
             )
 
+        destination_type = getattr(payload, "destination_type", "local")
+        docker_volume = getattr(payload, "docker_volume", None)
+        docker_path = (getattr(payload, "docker_path", "") or "").strip("/\\")
+
         manifest = {
             "contract": "tryon.models-volume/v1",
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -215,21 +219,18 @@ class RuntimeModelVolumeExportService:
                 "models_overwritten": overwritten,
                 "errors": 0,
                 "elapsed_seconds": round(time.perf_counter() - started, 3),
-                "destination": destination_type if 'destination_type' in locals() else getattr(payload, "destination_type", "local"),
+                "destination": destination_type,
                 "bytes_copied": bytes_copied,
             },
         }
         manifest_path = output / "models_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
-        destination_type = getattr(payload, "destination_type", "local")
-        docker_volume = getattr(payload, "docker_volume", None)
-        docker_path = getattr(payload, "docker_path", "models")
         if destination_type == "docker_volume":
             if not docker_volume:
                 raise ValueError("Selecciona un volumen Docker de destino.")
             notify("docker-copy", 94, f"Copiando archivos al volumen Docker {docker_volume}…")
-            DockerFileManagerService.copy_local_tree_to_volume(output, docker_volume, docker_path, payload.overwrite)
+            DockerFileManagerService.copy_local_tree_to_volume(models_root, docker_volume, docker_path, payload.overwrite)
             manifest["docker_destination"] = {"volume": docker_volume, "path": docker_path}
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 

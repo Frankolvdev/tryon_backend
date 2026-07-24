@@ -258,7 +258,9 @@ def _runtime_command(payload: RuntimeLaunchSettings) -> RuntimeLaunchPreview:
 @router.get('/models-volume/settings', response_model=RuntimeModelExportSettings)
 def read_model_export_settings(db: Session = Depends(get_db)):
     config = get_or_create(db)
-    stored = _mega3_settings(config).get("model_export") or {}
+    stored = dict(_mega3_settings(config).get("model_export") or {})
+    if stored.get("docker_path") == "models":
+        stored["docker_path"] = ""
     defaults = RuntimeModelExportSettings(
         comfyui_path=config.source_comfyui_path or "",
         output_directory=config.export_root_directory or "",
