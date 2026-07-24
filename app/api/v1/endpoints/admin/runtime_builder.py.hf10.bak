@@ -289,20 +289,8 @@ def read_runtime_launch_settings(db: Session = Depends(get_db)):
 @router.put('/runtime-launch/settings', response_model=RuntimeLaunchSettings)
 def update_runtime_launch_settings(payload: RuntimeLaunchSettings, db: Session = Depends(get_db)):
     config = get_or_create(db)
-    values = payload.model_dump()
-
-    # Runtime Configuration es la única fuente de verdad para los nombres.
-    # Se conservan estos campos internos para compatibilidad con los
-    # exportadores y compiladores existentes.
-    config.name = payload.build_name
-    config.runtime_name = payload.build_name
-    config.registry_image = payload.image_name
-
-    _save_mega3_settings(db, config, "runtime_launch", values)
-
-    # La respuesta se construye desde lo realmente persistido.
-    stored = dict(_mega3_settings(config).get("runtime_launch") or {})
-    return RuntimeLaunchSettings.model_validate(stored)
+    _save_mega3_settings(db, config, "runtime_launch", payload.model_dump())
+    return payload
 
 @router.post('/runtime-launch/preview', response_model=RuntimeLaunchPreview)
 def preview_runtime_launch(payload: RuntimeLaunchSettings):
