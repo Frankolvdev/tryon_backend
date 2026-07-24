@@ -1,4 +1,3 @@
-import threading
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
@@ -330,14 +329,6 @@ def export_models_volume(payload: RuntimeModelVolumeExportRequest, background_ta
         "overwrite": payload.overwrite,
         "skip_identical": payload.skip_identical,
     })
-    # HF12D_BACKEND_SYNTAX_REPAIR
     job = RuntimeContextJobService.create_model_volume(config.id, payload)
-    RuntimeContextJobService._update(
-        job['job_id'],
-        status='queued',
-        phase='starting',
-        progress=1,
-        message='Iniciando exportación de modelos…',
-    )
-    job = RuntimeContextJobService.public(job['job_id'])
-    # HF12_MODEL_EXPORT_THREAD: iniciar fuera del ciclo de respuesta para que # el endpoint 202 regrese inmediatamente y el polling pueda observar progreso. worker = threading.Thread(target=RuntimeContextJobService.run_model_volume, args=(job['job_id'],), name=f"runtime-model-export-{job['job_id'][:8]}", daemon=True) worker.start() return job
+    background_tasks.add_task(RuntimeContextJobService.run_model_volume, job['job_id'])
+    return job
