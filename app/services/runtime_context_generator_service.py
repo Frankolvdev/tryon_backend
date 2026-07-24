@@ -197,7 +197,7 @@ class RuntimeContextGeneratorService:
         ignored = shutil.ignore_patterns(
             ".git", "__pycache__", "*.pyc", ".venv", "venv", "node_modules", ".idea", ".vscode"
         )
-        enabled_nodes = [n for n in (config.custom_nodes or []) if n.get("enabled", True)]
+        enabled_nodes = [n for n in RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes) if n.get("enabled", True)]
         copied_node_sources: dict[str, str] = {}
         notify("custom_nodes", 47, "Copiando Custom Nodes requeridos…")
         for index, item in enumerate(enabled_nodes):
@@ -284,14 +284,14 @@ class RuntimeContextGeneratorService:
         workdir = (config.container_workdir or "/app").rstrip("/")
         startup = f'''#!/usr/bin/env bash
 set -euo pipefail
-python3 {workdir}/ComfyUI/main.py --listen 0.0.0.0 --port 8188 &
+python {workdir}/ComfyUI/main.py --listen 0.0.0.0 --port 8188 &
 COMFY_PID=$!
 for _ in $(seq 1 180); do
   curl -fsS http://127.0.0.1:8188/system_stats >/dev/null && break
   sleep 1
 done
 if [ -f {workdir}/tryon/runpod_worker/handler.py ]; then
-  python3 {workdir}/tryon/runpod_worker/handler.py
+  python {workdir}/tryon/runpod_worker/handler.py
 else
   wait $COMFY_PID
 fi
@@ -346,22 +346,26 @@ fi
         external_models = modal_enabled and not models
         lines = [
             f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
-            'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',
-            "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv python3-dev git curl ffmpeg libgl1 libglib2.0-0 build-essential pkg-config libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && rm -rf /var/lib/apt/lists/*",
+            'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PATH="/opt/conda/bin:$PATH" TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',
+            "RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git curl bzip2 ffmpeg libgl1 libopengl0 libglib2.0-0 build-essential pkg-config libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && rm -rf /var/lib/apt/lists/*",
+            "RUN curl -fL https://github.com/conda-forge/miniforge/releases/download/26.3.2-3/Miniforge3-26.3.2-3-Linux-x86_64.sh -o /tmp/miniforge.sh && echo '848194851a98903134187fbb4ab50efe87b003e0c0f808f97644b7524a62bf2c  /tmp/miniforge.sh' | sha256sum -c - && bash /tmp/miniforge.sh -b -p /opt/conda && rm /tmp/miniforge.sh && conda install -y python=3.11 pip && conda clean -afy",
+            "RUN python --version && python -m pip install --upgrade 'pip>=25,<26' setuptools wheel",
             f"RUN git clone {config.comfyui_repository} {comfy_target}",
         ]
         if config.comfyui_commit:
             lines.append(f"RUN git -C {comfy_target} checkout {config.comfyui_commit}")
         lines += [
-            f"RUN pip3 install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
-            f"RUN sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' {comfy_target}/requirements.txt && pip3 install -r {comfy_target}/requirements.txt",
+            f"RUN python -m pip install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
+            f"RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' {comfy_target}/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r {comfy_target}/requirements.txt",
             "COPY requirements.txt /tmp/runtime-requirements.txt",
-            "RUN if [ -s /tmp/runtime-requirements.txt ]; then pip3 install -r /tmp/runtime-requirements.txt; fi",
+            "RUN if [ -s /tmp/runtime-requirements.txt ]; then python -m pip install --constraint /tmp/runtime-constraints.txt -r /tmp/runtime-requirements.txt; fi",
         ]
         if nodes:
             lines += [
                 f"COPY custom_nodes/ {comfy_target}/custom_nodes/",
-                f"RUN find {comfy_target}/custom_nodes -type f -name requirements.txt -exec sh -c 'for req do sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|\\$)/Id\" \"$req\" && pip3 install -r \"$req\" || exit 1; done' sh {{}} +",
+                f"RUN find {comfy_target}/custom_nodes -type f -name requirements.txt -print | sort | while IFS= read -r req; do echo '[runtime] Installing' \"$req\"; sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|\\$)/Id\" \"$req\"; python -m pip install --constraint /tmp/runtime-constraints.txt -r \"$req\" || exit 1; done",
+                "RUN python -m pip check",
+                "RUN python -c 'import sys, torch, transformers; assert sys.version_info[:2] == (3, 11); assert torch.version.cuda and torch.version.cuda.startswith(\"12.8\"); assert int(transformers.__version__.split(\".\")[0]) < 5; print(sys.version); print(torch.__version__, torch.version.cuda); print(transformers.__version__)'",
             ]
         if models:
             lines.append(f"COPY models/ {comfy_target}/models/")
@@ -371,7 +375,7 @@ fi
             f"COPY scripts/ {workdir}/runtime/scripts/",
             f"RUN chmod +x {workdir}/runtime/scripts/startup.sh",
             f"WORKDIR {comfy_target}",
-            f"HEALTHCHECK --interval=30s --timeout=10s --start-period=120s CMD python3 {workdir}/runtime/scripts/healthcheck.py || exit 1",
+            f"HEALTHCHECK --interval=30s --timeout=10s --start-period=120s CMD python {workdir}/runtime/scripts/healthcheck.py || exit 1",
             f'ENTRYPOINT ["{workdir}/runtime/scripts/startup.sh"]',
         ]
         return "\n".join(lines) + "\n"
