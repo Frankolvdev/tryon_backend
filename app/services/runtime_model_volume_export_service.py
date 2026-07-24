@@ -90,6 +90,7 @@ class RuntimeModelVolumeExportService:
         warnings: list[str] = []
         manifest_items: list[dict[str, Any]] = []
         total = max(1, len(records))
+        sam3_tree_processed = False
 
         for index, item in enumerate(records):
             record = dict(item)
@@ -104,6 +105,53 @@ class RuntimeModelVolumeExportService:
             relative = source.relative_to(comfy / "models")
             destination = models_root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
+
+            # SAM3 es una categoría compuesta: el loader TBG requiere todos los
+            # archivos y subdirectorios de models/sam3. Las demás categorías
+            # continúan exportándose modelo por modelo.
+            if relative.parts and relative.parts[0].lower() == "sam3" and not sam3_tree_processed:
+                sam3_source = comfy / "models" / relative.parts[0]
+                sam3_destination = models_root / relative.parts[0]
+                for tree_source in [path for path in sam3_source.rglob("*") if path.is_file()]:
+                    tree_relative = tree_source.relative_to(sam3_source)
+                    tree_destination = sam3_destination / tree_relative
+                    tree_destination.parent.mkdir(parents=True, exist_ok=True)
+                    tree_copy = True
+                    if tree_destination.exists():
+                        if payload.skip_identical and tree_destination.stat().st_size == tree_source.stat().st_size:
+                            if payload.calculate_sha256:
+                                tree_copy = RuntimeModelVolumeExportService._sha256(tree_source) != RuntimeModelVolumeExportService._sha256(tree_destination)
+                            else:
+                                tree_copy = False
+                        elif not payload.overwrite:
+                            tree_copy = False
+                    if tree_copy:
+                        shutil.copy2(tree_source, tree_destination)
+                        copied += 1
+                        bytes_copied += tree_source.stat().st_size
+                    else:
+                        skipped += 1
+                sam3_tree_processed = True
+                record.update({
+                    "status": "copied-tree",
+                    "sha256": RuntimeModelVolumeExportService._sha256(source) if payload.calculate_sha256 else item.get("sha256"),
+                    "destination_path": str(destination),
+                    "relative_path": f"models/{relative.as_posix()}",
+                    "recursive_category": True,
+                })
+                manifest_items.append(record)
+                notify("copying", 5 + int(88 * (index + 1) / total), f"Procesando modelo {index + 1} de {len(records)}…")
+                continue
+            elif relative.parts and relative.parts[0].lower() == "sam3" and sam3_tree_processed:
+                record.update({
+                    "status": "included-by-tree",
+                    "sha256": RuntimeModelVolumeExportService._sha256(source) if payload.calculate_sha256 else item.get("sha256"),
+                    "destination_path": str(destination),
+                    "relative_path": f"models/{relative.as_posix()}",
+                    "recursive_category": True,
+                })
+                manifest_items.append(record)
+                continue
 
             source_hash: str | None = None
             should_copy = True
@@ -149,7 +197,7 @@ class RuntimeModelVolumeExportService:
             "project_key": config.project_key,
             "runtime_version": config.runtime_version,
             "source_comfyui": str(comfy),
-            "volume_mount_path": "/app/ComfyUI/models",
+            "volume_mount_path": "/models",
             "models": manifest_items,
             "summary": {
                 "models_detected": len(records),

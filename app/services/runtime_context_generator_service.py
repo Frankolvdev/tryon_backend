@@ -188,21 +188,18 @@ class RuntimeContextGeneratorService:
         # fuerza el contexto Modal aunque los modelos detectados conservaran una
         # estrategia anterior. Así siempre se generan modal_app.py y
         # extra_model_paths.yaml para el directorio exportado.
-        modal_external_models = (
-            not payload.copy_models
-            and bool(config.volumes)
-            and RuntimeBuilderService._is_modal(config)
-        )
-        if modal_external_models:
+        external_volume_models = not payload.copy_models and bool(config.volumes)
+        if external_volume_models:
             volume_path = RuntimeBuilderService._modal_volume_path(config)
-            volume_name = next(
-                (str(volume.get("name")) for volume in (config.volumes or []) if volume.get("name")),
-                f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models",
-            )
-            generated["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path, RuntimeBuilderService.sanitize_runtime_name(config.runtime_name))
             generated["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(volume_path)
-            generated["runtime_manifest"]["provider"] = "modal"
             generated["runtime_manifest"]["model_storage"] = "external-volume"
+            if RuntimeBuilderService._is_modal(config):
+                volume_name = next(
+                    (str(volume.get("name")) for volume in (config.volumes or []) if volume.get("name")),
+                    f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models",
+                )
+                generated["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path, RuntimeBuilderService.sanitize_runtime_name(config.runtime_name))
+                generated["runtime_manifest"]["provider"] = "modal"
 
         warnings: list[str] = []
         model_manifest: list[dict[str, Any]] = []
@@ -212,6 +209,7 @@ class RuntimeContextGeneratorService:
         nodes_copied = 0
 
         enabled_models = [m for m in (config.models or []) if m.get("enabled", True)]
+        sam3_tree_copied = False
         notify("models", 8, "Revisando modelos requeridos por el workflow…")
         for index, item in enumerate(enabled_models):
             source = RuntimeContextGeneratorService._find_model(comfy, item)
@@ -226,10 +224,23 @@ class RuntimeContextGeneratorService:
             size = source.stat().st_size
             sha = RuntimeContextGeneratorService._sha256(source) if payload.calculate_sha256 else item.get("sha256")
             if payload.copy_models:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-                models_copied += 1
-                total += size
+                # TBG-SAM3 necesita el repositorio local completo (config, tokenizer,
+                # processor y pesos auxiliares), no solamente sam3.pt. Se conserva
+                # el comportamiento selectivo para todas las demás categorías.
+                if relative.parts and relative.parts[0].lower() == "sam3":
+                    if not sam3_tree_copied:
+                        sam3_source = comfy / "models" / relative.parts[0]
+                        sam3_destination = output / "models" / relative.parts[0]
+                        shutil.copytree(sam3_source, sam3_destination, dirs_exist_ok=True)
+                        copied_files = [path for path in sam3_source.rglob("*") if path.is_file()]
+                        models_copied += len(copied_files)
+                        total += sum(path.stat().st_size for path in copied_files)
+                        sam3_tree_copied = True
+                else:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                    models_copied += 1
+                    total += size
             record.update({
                 "included": bool(payload.copy_models),
                 "source_path": str(source),
@@ -328,9 +339,60 @@ class RuntimeContextGeneratorService:
             '    print(json.dumps({"ok": r.status == 200}))\n'
         )
         workdir = (config.container_workdir or "/app").rstrip("/")
+        performance_probe = r'''import importlib.util
+import json
+import os
+import subprocess
+
+
+def available(module: str) -> bool:
+    return importlib.util.find_spec(module) is not None
+
+
+report = {
+    "provider": os.getenv("RUNTIME_PROVIDER", "docker"),
+    "comfyui_extra_args": os.getenv("COMFYUI_EXTRA_ARGS", ""),
+    "flash_attn": available("flash_attn"),
+    "xformers": available("xformers"),
+    "triton": available("triton"),
+}
+try:
+    import torch
+    report.update({
+        "pytorch": torch.__version__,
+        "cuda_runtime": torch.version.cuda,
+        "cuda_available": torch.cuda.is_available(),
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "capability": list(torch.cuda.get_device_capability(0)) if torch.cuda.is_available() else None,
+        "vram_bytes": torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0,
+    })
+except Exception as exc:
+    report["torch_error"] = str(exc)
+try:
+    result = subprocess.run(
+        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    report["nvidia_driver"] = result.stdout.strip() or None
+except Exception:
+    report["nvidia_driver"] = None
+print("[runtime-performance] " + json.dumps(report, ensure_ascii=False, sort_keys=True))
+'''
         startup = f'''#!/usr/bin/env bash
 set -euo pipefail
-python {workdir}/ComfyUI/main.py --listen 0.0.0.0 --port 8188 &
+
+MODELS_ROOT="${{MODELS_ROOT:-/models}}"
+COMFY_MODELS="{workdir}/ComfyUI/models"
+mkdir -p "$COMFY_MODELS"
+if [ -d "$MODELS_ROOT/sam3" ]; then
+  rm -rf "$COMFY_MODELS/sam3"
+  ln -s "$MODELS_ROOT/sam3" "$COMFY_MODELS/sam3"
+  echo "[runtime] SAM3 enlazado: $COMFY_MODELS/sam3 -> $MODELS_ROOT/sam3"
+fi
+
+python {workdir}/runtime/scripts/performance_probe.py || true
+read -r -a EXTRA_ARGS <<< "${{COMFYUI_EXTRA_ARGS:-}}"
+python {workdir}/ComfyUI/main.py --listen 0.0.0.0 --port 8188 "${{EXTRA_ARGS[@]}}" &
 COMFY_PID=$!
 for _ in $(seq 1 180); do
   curl -fsS http://127.0.0.1:8188/system_stats >/dev/null && break
@@ -357,6 +419,7 @@ fi
             ".env.example": generated["env_example"],
             "scripts/startup.sh": startup,
             "scripts/healthcheck.py": health,
+            "scripts/performance_probe.py": performance_probe,
             ".dockerignore": "**/.git\n**/__pycache__\n**/*.pyc\n.venv\nnode_modules\n",
         }
         if generated.get("modal_app"):
@@ -389,7 +452,7 @@ fi
         workdir = (config.container_workdir or "/app").rstrip("/")
         comfy_target = f"{workdir}/ComfyUI"
         modal_enabled = RuntimeBuilderService._is_modal(config)
-        external_models = modal_enabled and not models
+        external_models = not models
         lines = [
             f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
             'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PATH="/opt/conda/bin:$PATH" TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',

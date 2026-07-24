@@ -21,7 +21,7 @@ class RuntimeBuilderService:
     extras and markers instead of blindly inserting ``==``.
     """
 
-    DEFAULT_MODAL_VOLUME_PATH = "/app/ComfyUI/models"
+    DEFAULT_MODAL_VOLUME_PATH = "/models"
 
 
     PROTECTED_GPU_PACKAGES = {
@@ -254,7 +254,7 @@ class RuntimeBuilderService:
                 "tryon_modal_volume:",
                 f"  base_path: {base_path}",
                 "  checkpoints: checkpoints",
-                "  clip: clip",
+                "  clip: text_encoders",
                 "  clip_vision: clip_vision",
                 "  configs: configs",
                 "  controlnet: controlnet",
@@ -269,6 +269,7 @@ class RuntimeBuilderService:
                 "  upscale_models: upscale_models",
                 "  vae: vae",
                 "  vae_approx: vae_approx",
+                "  sam3: sam3",
                 "",
             ]
         )
@@ -524,13 +525,33 @@ def comfyui():
         health_port = 8000 if modal_enabled else 8188
         entrypoint = f"""#!/usr/bin/env bash
 set -euo pipefail
-python /app/ComfyUI/main.py {comfy_args} &
+MODELS_ROOT="${{MODELS_ROOT:-/models}}"
+mkdir -p /app/ComfyUI/models
+if [ -d "$MODELS_ROOT/sam3" ]; then
+  rm -rf /app/ComfyUI/models/sam3
+  ln -s "$MODELS_ROOT/sam3" /app/ComfyUI/models/sam3
+  echo "[runtime] SAM3 enlazado: /app/ComfyUI/models/sam3 -> $MODELS_ROOT/sam3"
+fi
+python - <<'PY_RUNTIME_PROBE' || true
+import importlib.util, json, os
+report = {{"provider": os.getenv("RUNTIME_PROVIDER", "docker")}}
+try:
+    import torch
+    report.update({{"pytorch": torch.__version__, "cuda_runtime": torch.version.cuda, "cuda_available": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None, "capability": list(torch.cuda.get_device_capability(0)) if torch.cuda.is_available() else None}})
+except Exception as exc:
+    report["torch_error"] = str(exc)
+for module in ("flash_attn", "xformers", "triton"):
+    report[module] = importlib.util.find_spec(module) is not None
+print("[runtime-performance] " + json.dumps(report, ensure_ascii=False, sort_keys=True))
+PY_RUNTIME_PROBE
+read -r -a EXTRA_ARGS <<< "${{COMFYUI_EXTRA_ARGS:-}}"
+python /app/ComfyUI/main.py {comfy_args} "${{EXTRA_ARGS[@]}}" &
 COMFY_PID=$!
 for _ in $(seq 1 600); do
   curl -fsS http://127.0.0.1:{health_port}/system_stats >/dev/null && break
   sleep 1
 done
-if [ -f /app/runtime/runpod_worker/handler.py ] && [ \"${{RUNTIME_PROVIDER:-}}\" != \"modal\" ]; then
+if [ -f /app/runtime/runpod_worker/handler.py ] && [ "${{RUNTIME_PROVIDER:-}}" != "modal" ]; then
   python /app/runtime/runpod_worker/handler.py
 fi
 wait $COMFY_PID
