@@ -5,7 +5,7 @@ from app.api.v1.guards.admin_guard import admin_guard
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
 from app.models.runtime_project import RuntimeProject
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeContextJobCreateResponse, RuntimeContextJobResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse, RuntimeModelVolumeAnalyzeRequest, RuntimeModelVolumeExportRequest
+from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeContextJobCreateResponse, RuntimeContextJobResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse, RuntimeModelVolumeAnalyzeRequest, RuntimeModelVolumeExportRequest, RuntimeModelExportSettings, RuntimeLaunchSettings, RuntimeLaunchPreview
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
 from app.services.runtime_import_service import RuntimeImportService
@@ -228,6 +228,72 @@ def read_runtime_context_job(job_id: str):
         raise HTTPException(404, 'Trabajo de exportación no encontrado o el backend fue reiniciado.')
 
 
+
+
+def _mega3_settings(config: RuntimeBuilderConfig) -> dict:
+    manifest = dict(config.last_export_manifest or {})
+    return dict(manifest.get("mega3_settings") or {})
+
+def _save_mega3_settings(db: Session, config: RuntimeBuilderConfig, section: str, values: dict) -> None:
+    manifest = dict(config.last_export_manifest or {})
+    settings = dict(manifest.get("mega3_settings") or {})
+    settings[section] = values
+    manifest["mega3_settings"] = settings
+    config.last_export_manifest = manifest
+    db.add(config); db.commit(); db.refresh(config)
+
+def _runtime_command(payload: RuntimeLaunchSettings) -> RuntimeLaunchPreview:
+    parts = ["docker run", "--detach", f"--name {payload.container_name}", f"--restart {payload.restart_policy}"]
+    if payload.gpu_mode == "nvidia": parts.append("--gpus all")
+    elif payload.gpu_mode == "auto": parts.append("--gpus all")
+    parts.append(f"-p {payload.host_port}:{payload.container_port}")
+    if payload.models_volume: parts.append(f"-v {payload.models_volume}:{payload.models_mount_path}")
+    if payload.workflows_volume: parts.append(f"-v {payload.workflows_volume}:{payload.workflows_mount_path}")
+    if payload.output_volume: parts.append(f"-v {payload.output_volume}:{payload.output_mount_path}")
+    parts.extend(payload.extra_arguments)
+    parts.append(payload.image_name)
+    lines = [parts[0]] + [f"  {item}" for item in parts[1:]]
+    return RuntimeLaunchPreview(command=" \\n".join(lines), lines=lines)
+
+@router.get('/models-volume/settings', response_model=RuntimeModelExportSettings)
+def read_model_export_settings(db: Session = Depends(get_db)):
+    config = get_or_create(db)
+    stored = _mega3_settings(config).get("model_export") or {}
+    defaults = RuntimeModelExportSettings(
+        comfyui_path=config.source_comfyui_path or "",
+        output_directory=config.export_root_directory or "",
+    )
+    return defaults.model_copy(update=stored)
+
+@router.put('/models-volume/settings', response_model=RuntimeModelExportSettings)
+def update_model_export_settings(payload: RuntimeModelExportSettings, db: Session = Depends(get_db)):
+    config = get_or_create(db)
+    values = payload.model_dump()
+    config.source_comfyui_path = payload.comfyui_path or None
+    config.export_root_directory = payload.output_directory or None
+    _save_mega3_settings(db, config, "model_export", values)
+    return payload
+
+@router.get('/runtime-launch/settings', response_model=RuntimeLaunchSettings)
+def read_runtime_launch_settings(db: Session = Depends(get_db)):
+    config = get_or_create(db)
+    stored = _mega3_settings(config).get("runtime_launch") or {}
+    defaults = RuntimeLaunchSettings(
+        build_name=config.runtime_name or "tryon-runtime",
+        image_name=config.registry_image or "tryon-runtime:latest",
+    )
+    return defaults.model_copy(update=stored)
+
+@router.put('/runtime-launch/settings', response_model=RuntimeLaunchSettings)
+def update_runtime_launch_settings(payload: RuntimeLaunchSettings, db: Session = Depends(get_db)):
+    config = get_or_create(db)
+    _save_mega3_settings(db, config, "runtime_launch", payload.model_dump())
+    return payload
+
+@router.post('/runtime-launch/preview', response_model=RuntimeLaunchPreview)
+def preview_runtime_launch(payload: RuntimeLaunchSettings):
+    return _runtime_command(payload)
+
 @router.post('/models-volume/analyze')
 def analyze_models_volume(payload: RuntimeModelVolumeAnalyzeRequest, db: Session = Depends(get_db)):
     try:
@@ -239,6 +305,16 @@ def analyze_models_volume(payload: RuntimeModelVolumeAnalyzeRequest, db: Session
 @router.post('/models-volume/export', response_model=RuntimeContextJobCreateResponse, status_code=202)
 def export_models_volume(payload: RuntimeModelVolumeExportRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     config = get_or_create(db)
+    _save_mega3_settings(db, config, "model_export", {
+        "comfyui_path": payload.comfyui_path,
+        "output_directory": payload.output_directory or "",
+        "destination_type": payload.destination_type,
+        "docker_volume": payload.docker_volume or "",
+        "docker_path": payload.docker_path,
+        "calculate_sha256": payload.calculate_sha256,
+        "overwrite": payload.overwrite,
+        "skip_identical": payload.skip_identical,
+    })
     job = RuntimeContextJobService.create_model_volume(config.id, payload)
     background_tasks.add_task(RuntimeContextJobService.run_model_volume, job['job_id'])
     return job

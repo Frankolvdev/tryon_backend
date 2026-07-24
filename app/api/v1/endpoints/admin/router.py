@@ -24,6 +24,7 @@ from app.api.v1.endpoints.admin import (
     cache_locks,
     cache_operations,
     comfyui,
+    docker_file_manager,
     configuration,
     dashboard,
     default_rbac,
@@ -74,6 +75,11 @@ admin_router = APIRouter()
 admin_router.include_router(
     runtime_builder.router,
     tags=["Admin - Runtime Builder"],
+)
+
+admin_router.include_router(
+    docker_file_manager.router,
+    tags=["Admin - Docker File Manager"],
 )
 
 admin_router.include_router(

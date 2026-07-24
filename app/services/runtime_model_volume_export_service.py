@@ -4,12 +4,14 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.services.runtime_context_generator_service import RuntimeContextGeneratorService
+from app.services.docker_file_manager_service import DockerFileManagerService
 
 ProgressCallback = Callable[[str, int, str], None]
 
@@ -65,6 +67,7 @@ class RuntimeModelVolumeExportService:
         payload: Any,
         progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
+        started = time.perf_counter()
         notify = progress or (lambda _phase, _percent, _message: None)
         notify("analyzing", 2, "Localizando los modelos requeridos…")
         comfy, records = RuntimeModelVolumeExportService._resolve(config, payload.comfyui_path)
@@ -84,6 +87,7 @@ class RuntimeModelVolumeExportService:
         models_root.mkdir(parents=True, exist_ok=True)
 
         copied = 0
+        overwritten = 0
         skipped = 0
         missing = 0
         bytes_copied = 0
@@ -167,8 +171,11 @@ class RuntimeModelVolumeExportService:
                     should_copy = False
 
             if should_copy:
+                existed_before = destination.exists()
                 shutil.copy2(source, destination)
                 copied += 1
+                if existed_before:
+                    overwritten += 1
                 bytes_copied += source.stat().st_size
                 status = "copied"
             else:
@@ -205,11 +212,26 @@ class RuntimeModelVolumeExportService:
                 "models_missing": missing,
                 "models_copied": copied,
                 "models_skipped": skipped,
+                "models_overwritten": overwritten,
+                "errors": 0,
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+                "destination": destination_type if 'destination_type' in locals() else getattr(payload, "destination_type", "local"),
                 "bytes_copied": bytes_copied,
             },
         }
         manifest_path = output / "models_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        destination_type = getattr(payload, "destination_type", "local")
+        docker_volume = getattr(payload, "docker_volume", None)
+        docker_path = getattr(payload, "docker_path", "models")
+        if destination_type == "docker_volume":
+            if not docker_volume:
+                raise ValueError("Selecciona un volumen Docker de destino.")
+            notify("docker-copy", 94, f"Copiando archivos al volumen Docker {docker_volume}…")
+            DockerFileManagerService.copy_local_tree_to_volume(output, docker_volume, docker_path, payload.overwrite)
+            manifest["docker_destination"] = {"volume": docker_volume, "path": docker_path}
+            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
         notify("completed", 99, "Modelos organizados para Volume.")
         return {
@@ -217,11 +239,18 @@ class RuntimeModelVolumeExportService:
             "output_directory": str(output),
             "models_directory": str(models_root),
             "manifest_path": str(manifest_path),
+            "destination_type": destination_type,
+            "docker_volume": docker_volume if destination_type == "docker_volume" else None,
+            "docker_path": docker_path if destination_type == "docker_volume" else None,
             "models_detected": len(records),
             "models_found": len(records) - missing,
             "models_missing": missing,
             "models_copied": copied,
             "models_skipped": skipped,
+            "models_overwritten": overwritten,
+            "errors": 0,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "destination": {"type": destination_type, "volume": docker_volume, "path": docker_path} if destination_type == "docker_volume" else {"type": "local", "path": str(output)},
             "bytes_copied": bytes_copied,
             "warnings": warnings,
             "manifest": manifest,
