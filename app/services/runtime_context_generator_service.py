@@ -411,7 +411,7 @@ fi
             lines += [
                 f"COPY custom_nodes/ {comfy_target}/custom_nodes/",
                 f"RUN find {comfy_target}/custom_nodes -type f -name requirements.txt -print | sort | while IFS= read -r req; do echo '[runtime] Installing' \"$req\"; sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|\\$)/Id\" \"$req\"; python -m pip install --constraint /tmp/runtime-constraints.txt -r \"$req\" || exit 1; done",
-                "RUN python -m pip check",
+                'RUN set -eu; check_output="$(python -m pip check 2>&1)" && { printf \'%s\\n\' "$check_output"; exit 0; }; check_status=$?; printf \'%s\\n\' "$check_output"; unexpected="$(printf \'%s\\n\' "$check_output" | sed -E \'/^decord 0\\.6\\.0 is not supported on this platform$/d; /^[[:space:]]*$/d\')"; if [ -n "$unexpected" ]; then echo \'[runtime] pip check encontró errores no permitidos.\' >&2; exit "$check_status"; fi; echo \'[runtime] Advertencia conocida ignorada: decord 0.6.0 no declara soporte para esta plataforma.\'',
                 "RUN python -c 'import sys, torch, transformers; assert sys.version_info[:2] == (3, 11); assert torch.version.cuda and torch.version.cuda.startswith(\"12.8\"); assert int(transformers.__version__.split(\".\")[0]) < 5; print(sys.version); print(torch.__version__, torch.version.cuda); print(transformers.__version__)'",
             ]
         if models:
