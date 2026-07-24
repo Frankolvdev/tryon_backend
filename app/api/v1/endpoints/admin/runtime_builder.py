@@ -1,31 +1,65 @@
 import threading
+
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
+
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
-from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_builder_build import RuntimeBuilderBuild
+from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_project import RuntimeProject
-from app.schemas.runtime_builder import RuntimeBuilderConfigResponse, RuntimeBuilderConfigUpdate, RuntimeGeneratedFilesResponse, RuntimeValidationResponse, RuntimeBuildCreate, RuntimeBuildResponse, RuntimeBuildListResponse, RuntimeDockerDiagnosticResponse, RuntimeImportPathRequest, RuntimeImportApplyRequest, RuntimeWorkflowAnalysisRequest, RuntimeWorkflowResolveRequest, RuntimeIntelligenceIndexRequest, RuntimeIntelligenceSearchRequest, RuntimeContextGenerateRequest, RuntimeContextGenerateResponse, RuntimeContextJobCreateResponse, RuntimeContextJobResponse, RuntimeWorkspaceUpdate, RuntimeProjectResponse, RuntimeModelVolumeAnalyzeRequest, RuntimeModelVolumeExportRequest, RuntimeModelExportSettings, RuntimeLaunchSettings, RuntimeLaunchPreview
-from app.services.runtime_builder_service import RuntimeBuilderService
+from app.schemas.runtime_builder import (
+    RuntimeBuildCreate,
+    RuntimeBuildListResponse,
+    RuntimeBuildResponse,
+    RuntimeBuilderConfigResponse,
+    RuntimeBuilderConfigUpdate,
+    RuntimeContextGenerateRequest,
+    RuntimeContextJobCreateResponse,
+    RuntimeContextJobResponse,
+    RuntimeDockerDiagnosticResponse,
+    RuntimeGeneratedFilesResponse,
+    RuntimeImportApplyRequest,
+    RuntimeImportPathRequest,
+    RuntimeIntelligenceIndexRequest,
+    RuntimeIntelligenceSearchRequest,
+    RuntimeLaunchPreview,
+    RuntimeLaunchSettings,
+    RuntimeModelExportSettings,
+    RuntimeModelVolumeAnalyzeRequest,
+    RuntimeModelVolumeExportRequest,
+    RuntimeProjectResponse,
+    RuntimeValidationResponse,
+    RuntimeWorkflowAnalysisRequest,
+    RuntimeWorkflowResolveRequest,
+    RuntimeWorkspaceUpdate,
+)
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
+from app.services.runtime_builder_service import RuntimeBuilderService
+from app.services.runtime_context_job_service import RuntimeContextJobService
 from app.services.runtime_import_service import RuntimeImportService
 from app.services.runtime_intelligence_service import RuntimeIntelligenceService
-from app.services.runtime_context_generator_service import RuntimeContextGeneratorService
-from app.services.runtime_context_job_service import RuntimeContextJobService
 from app.services.runtime_model_volume_export_service import RuntimeModelVolumeExportService
-router=APIRouter(prefix="/runtime-builder",dependencies=[Depends(admin_guard)])
 
-def get_or_create(db):
-    config=db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.id.asc()).first()
+router = APIRouter(prefix="/runtime-builder", dependencies=[Depends(admin_guard)])
+
+
+def get_or_create(db: Session) -> RuntimeBuilderConfig:
+    config = db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.id.asc()).first()
     if config is None:
-        config=RuntimeBuilderConfig()
-        db.add(config); db.commit(); db.refresh(config)
+        config = RuntimeBuilderConfig()
+        db.add(config)
+        db.commit()
+        db.refresh(config)
+
     changed = False
-    safe_name = RuntimeBuilderService.sanitize_runtime_name(getattr(config, "runtime_name", None))
+    safe_name = RuntimeBuilderService.sanitize_runtime_name(
+        getattr(config, "runtime_name", None)
+    )
     if config.runtime_name != safe_name:
         config.runtime_name = safe_name
         changed = True
+
     profile = RuntimeBuilderService.RECOMMENDED_PROFILE
     profile_values = {
         "python_version": profile["python_version"],
@@ -39,17 +73,29 @@ def get_or_create(db):
         if getattr(config, field) != value:
             setattr(config, field, value)
             changed = True
+
     merged_nodes = RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes)
     if merged_nodes != (config.custom_nodes or []):
         config.custom_nodes = merged_nodes
         changed = True
+
     if changed:
-        db.add(config); db.commit(); db.refresh(config)
+        db.add(config)
+        db.commit()
+        db.refresh(config)
     return config
 
-def get_or_create_project(db: Session, config: RuntimeBuilderConfig | None = None) -> RuntimeProject:
+
+def get_or_create_project(
+    db: Session,
+    config: RuntimeBuilderConfig | None = None,
+) -> RuntimeProject:
     config = config or get_or_create(db)
-    project = db.query(RuntimeProject).filter(RuntimeProject.project_key == config.project_key).first()
+    project = (
+        db.query(RuntimeProject)
+        .filter(RuntimeProject.project_key == config.project_key)
+        .first()
+    )
     if project is None:
         project = RuntimeProject(
             runtime_config_id=config.id,
@@ -67,116 +113,240 @@ def get_or_create_project(db: Session, config: RuntimeBuilderConfig | None = Non
             last_export_manifest=config.last_export_manifest,
             last_exported_at=config.last_exported_at,
         )
-        db.add(project); db.commit(); db.refresh(project)
+        db.add(project)
+        db.commit()
+        db.refresh(project)
     return project
 
-def sync_project_to_config(project: RuntimeProject, config: RuntimeBuilderConfig) -> None:
+
+def sync_project_to_config(
+    project: RuntimeProject,
+    config: RuntimeBuilderConfig,
+) -> None:
     for field in (
-        "project_key", "module_type", "source_comfyui_path", "workflow_filename",
-        "workflow_json", "container_workdir", "export_root_directory",
-        "export_directory", "last_index_summary", "workspace_status",
-        "last_export_archive", "last_export_manifest", "last_exported_at",
+        "project_key",
+        "module_type",
+        "source_comfyui_path",
+        "workflow_filename",
+        "workflow_json",
+        "container_workdir",
+        "export_root_directory",
+        "export_directory",
+        "last_index_summary",
+        "workspace_status",
+        "last_export_archive",
+        "last_export_manifest",
+        "last_exported_at",
     ):
         setattr(config, field, getattr(project, field))
 
-@router.get('/config',response_model=RuntimeBuilderConfigResponse)
-def read_config(db:Session=Depends(get_db)): return get_or_create(db)
-@router.put('/config',response_model=RuntimeBuilderConfigResponse)
-def update_config(payload:RuntimeBuilderConfigUpdate,db:Session=Depends(get_db)):
-    config=get_or_create(db)
+
+@router.get("/config", response_model=RuntimeBuilderConfigResponse)
+def read_config(db: Session = Depends(get_db)):
+    return get_or_create(db)
+
+
+@router.put("/config", response_model=RuntimeBuilderConfigResponse)
+def update_config(
+    payload: RuntimeBuilderConfigUpdate,
+    db: Session = Depends(get_db),
+):
+    config = get_or_create(db)
     values = payload.model_dump()
     profile = RuntimeBuilderService.RECOMMENDED_PROFILE
-    values.update({
-        "python_version": profile["python_version"],
-        "cuda_version": profile["cuda_version"],
-        "pytorch_index_url": profile["pytorch_index_url"],
-        "comfyui_commit": profile["comfyui_commit"],
-        "include_comfyui_manager": True,
-        "target_platform": "linux/amd64",
-        "custom_nodes": RuntimeBuilderService.merge_required_custom_nodes(values.get("custom_nodes")),
-    })
-    for field,value in values.items(): setattr(config,field,value)
-    db.add(config); db.commit(); db.refresh(config); return config
-@router.get('/project', response_model=RuntimeProjectResponse)
+    values.update(
+        {
+            "python_version": profile["python_version"],
+            "cuda_version": profile["cuda_version"],
+            "pytorch_index_url": profile["pytorch_index_url"],
+            "comfyui_commit": profile["comfyui_commit"],
+            "include_comfyui_manager": True,
+            "target_platform": "linux/amd64",
+            "custom_nodes": RuntimeBuilderService.merge_required_custom_nodes(
+                values.get("custom_nodes")
+            ),
+        }
+    )
+    for field, value in values.items():
+        setattr(config, field, value)
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+    return config
+
+
+@router.get("/project", response_model=RuntimeProjectResponse)
 def read_project(db: Session = Depends(get_db)):
     return get_or_create_project(db)
 
-@router.patch('/project', response_model=RuntimeProjectResponse)
-def update_project(payload: RuntimeWorkspaceUpdate, db: Session = Depends(get_db)):
+
+@router.patch("/project", response_model=RuntimeProjectResponse)
+def update_project(
+    payload: RuntimeWorkspaceUpdate,
+    db: Session = Depends(get_db),
+):
     config = get_or_create(db)
     project = get_or_create_project(db, config)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(project, field, value)
     sync_project_to_config(project, config)
-    db.add_all([project, config]); db.commit(); db.refresh(project)
+    db.add_all([project, config])
+    db.commit()
+    db.refresh(project)
     return project
 
-@router.patch('/workspace', response_model=RuntimeProjectResponse)
-def update_workspace(payload: RuntimeWorkspaceUpdate, db: Session = Depends(get_db)):
+
+@router.patch("/workspace", response_model=RuntimeProjectResponse)
+def update_workspace(
+    payload: RuntimeWorkspaceUpdate,
+    db: Session = Depends(get_db),
+):
     return update_project(payload, db)
 
-@router.post('/validate',response_model=RuntimeValidationResponse)
-def validate_config(db:Session=Depends(get_db)): return RuntimeBuilderService.validate(get_or_create(db))
-@router.post('/generate',response_model=RuntimeGeneratedFilesResponse)
-def generate_files(db:Session=Depends(get_db)): return RuntimeBuilderService.generate(get_or_create(db))
-@router.get('/diagnostic',response_model=RuntimeDockerDiagnosticResponse)
-def diagnostic(db:Session=Depends(get_db)): return RuntimeBuildExecutionService.diagnostic(db)
-@router.get('/builds',response_model=RuntimeBuildListResponse)
-def list_builds(limit:int=Query(50,ge=1,le=200),db:Session=Depends(get_db)):
-    q=db.query(RuntimeBuilderBuild); return {'items':q.order_by(RuntimeBuilderBuild.id.desc()).limit(limit).all(),'total':q.count()}
-@router.post('/builds',response_model=RuntimeBuildResponse)
-def create_build(payload:RuntimeBuildCreate,background_tasks:BackgroundTasks,db:Session=Depends(get_db)):
-    try: build=RuntimeBuildExecutionService.create(db,get_or_create(db))
-    except ValueError as exc: raise HTTPException(422,str(exc))
-    background_tasks.add_task(RuntimeBuildExecutionService.start,build.id,payload.push_after_build); return build
-@router.get('/builds/{build_id}',response_model=RuntimeBuildResponse)
-def read_build(build_id:int,db:Session=Depends(get_db)):
-    item=db.get(RuntimeBuilderBuild,build_id)
-    if not item: raise HTTPException(404,'Build no encontrado.')
-    return item
-@router.post('/builds/{build_id}/publish',response_model=RuntimeBuildResponse)
-def publish(build_id:int,background_tasks:BackgroundTasks,db:Session=Depends(get_db)):
-    item=db.get(RuntimeBuilderBuild,build_id)
-    if not item: raise HTTPException(404,'Build no encontrado.')
-    background_tasks.add_task(RuntimeBuildExecutionService.publish,item.id); return item
-@router.post('/builds/{build_id}/activate',response_model=RuntimeBuildResponse)
-def activate(build_id:int,db:Session=Depends(get_db)):
-    item=db.get(RuntimeBuilderBuild,build_id)
-    if not item: raise HTTPException(404,'Build no encontrado.')
-    try: return RuntimeBuildExecutionService.activate(db,item)
-    except ValueError as exc: raise HTTPException(422,str(exc))
-@router.post('/builds/{build_id}/cancel',response_model=RuntimeBuildResponse)
-def cancel(build_id:int,db:Session=Depends(get_db)):
-    item=db.get(RuntimeBuilderBuild,build_id)
-    if not item: raise HTTPException(404,'Build no encontrado.')
-    if item.status in {'building','pending','validating','publishing'}: item.status='cancelled'; item.phase='cancelled'; db.add(item); db.commit(); db.refresh(item)
-    return item
 
-@router.post('/import/scan-path')
-def import_scan_path(payload:RuntimeImportPathRequest):
-    try: return RuntimeImportService.scan_path(payload.path,payload.include_all_models)
-    except ValueError as exc: raise HTTPException(422,str(exc))
+@router.post("/validate", response_model=RuntimeValidationResponse)
+def validate_config(db: Session = Depends(get_db)):
+    return RuntimeBuilderService.validate(get_or_create(db))
 
-@router.post('/import/upload')
-async def import_upload(file:UploadFile=File(...)):
-    if not file.filename or not file.filename.lower().endswith('.zip'): raise HTTPException(422,'Debes cargar un archivo ZIP.')
-    content=await file.read()
-    if len(content)>100*1024*1024: raise HTTPException(413,'El inventario supera el límite de 100 MB.')
-    try: return RuntimeImportService.scan_inventory_zip(content)
-    except ValueError as exc: raise HTTPException(422,str(exc))
 
-@router.post('/import/analyze-workflow')
-def import_analyze_workflow(payload:RuntimeWorkflowAnalysisRequest):
-    return RuntimeImportService.analyze_workflow(payload.workflow,payload.report)
+@router.post("/generate", response_model=RuntimeGeneratedFilesResponse)
+def generate_files(db: Session = Depends(get_db)):
+    return RuntimeBuilderService.generate(get_or_create(db))
 
-@router.post('/import/apply',response_model=RuntimeBuilderConfigResponse)
-def import_apply(payload:RuntimeImportApplyRequest,db:Session=Depends(get_db)):
-    return RuntimeImportService.apply_report(db,get_or_create(db),payload.report,payload.selection)
 
-@router.post('/import/resolve-workflow')
-def import_resolve_workflow(payload: RuntimeWorkflowResolveRequest, db: Session = Depends(get_db)):
+@router.get("/diagnostic", response_model=RuntimeDockerDiagnosticResponse)
+def diagnostic(db: Session = Depends(get_db)):
+    return RuntimeBuildExecutionService.diagnostic(db)
+
+
+@router.get("/builds", response_model=RuntimeBuildListResponse)
+def list_builds(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    query = db.query(RuntimeBuilderBuild)
+    return {
+        "items": query.order_by(RuntimeBuilderBuild.id.desc()).limit(limit).all(),
+        "total": query.count(),
+    }
+
+
+@router.post("/builds", response_model=RuntimeBuildResponse)
+def create_build(
+    payload: RuntimeBuildCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     try:
-        result = RuntimeImportService.resolve_workflow(payload.path, payload.workflow)
+        build = RuntimeBuildExecutionService.create(db, get_or_create(db))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    background_tasks.add_task(
+        RuntimeBuildExecutionService.start,
+        build.id,
+        payload.push_after_build,
+    )
+    return build
+
+
+@router.get("/builds/{build_id}", response_model=RuntimeBuildResponse)
+def read_build(build_id: int, db: Session = Depends(get_db)):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+    return item
+
+
+@router.post("/builds/{build_id}/publish", response_model=RuntimeBuildResponse)
+def publish(
+    build_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+    background_tasks.add_task(RuntimeBuildExecutionService.publish, item.id)
+    return item
+
+
+@router.post("/builds/{build_id}/activate", response_model=RuntimeBuildResponse)
+def activate(build_id: int, db: Session = Depends(get_db)):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+    try:
+        return RuntimeBuildExecutionService.activate(db, item)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/builds/{build_id}/cancel", response_model=RuntimeBuildResponse)
+def cancel(build_id: int, db: Session = Depends(get_db)):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+    if item.status in {"building", "pending", "validating", "publishing"}:
+        item.status = "cancelled"
+        item.phase = "cancelled"
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+    return item
+
+
+@router.post("/import/scan-path")
+def import_scan_path(payload: RuntimeImportPathRequest):
+    try:
+        return RuntimeImportService.scan_path(
+            payload.path,
+            payload.include_all_models,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/import/upload")
+async def import_upload(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(422, "Debes cargar un archivo ZIP.")
+    content = await file.read()
+    if len(content) > 100 * 1024 * 1024:
+        raise HTTPException(413, "El inventario supera el límite de 100 MB.")
+    try:
+        return RuntimeImportService.scan_inventory_zip(content)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/import/analyze-workflow")
+def import_analyze_workflow(payload: RuntimeWorkflowAnalysisRequest):
+    return RuntimeImportService.analyze_workflow(payload.workflow, payload.report)
+
+
+@router.post("/import/apply", response_model=RuntimeBuilderConfigResponse)
+def import_apply(
+    payload: RuntimeImportApplyRequest,
+    db: Session = Depends(get_db),
+):
+    return RuntimeImportService.apply_report(
+        db,
+        get_or_create(db),
+        payload.report,
+        payload.selection,
+    )
+
+
+@router.post("/import/resolve-workflow")
+def import_resolve_workflow(
+    payload: RuntimeWorkflowResolveRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        result = RuntimeImportService.resolve_workflow(
+            payload.path,
+            payload.workflow,
+        )
         config = get_or_create(db)
         project = get_or_create_project(db, config)
         project.source_comfyui_path = payload.path
@@ -184,13 +354,19 @@ def import_resolve_workflow(payload: RuntimeWorkflowResolveRequest, db: Session 
         project.workflow_filename = payload.workflow_filename
         project.workspace_status = "workflow_resolved"
         sync_project_to_config(project, config)
-        db.add_all([project, config]); db.commit(); db.refresh(project)
+        db.add_all([project, config])
+        db.commit()
+        db.refresh(project)
         return result
-    except ValueError as exc: raise HTTPException(422,str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
-@router.post('/intelligence/index')
-def intelligence_index(payload: RuntimeIntelligenceIndexRequest, db: Session = Depends(get_db)):
+@router.post("/intelligence/index")
+def intelligence_index(
+    payload: RuntimeIntelligenceIndexRequest,
+    db: Session = Depends(get_db),
+):
     try:
         result = RuntimeIntelligenceService.build_index(payload.path)
         config = get_or_create(db)
@@ -199,64 +375,104 @@ def intelligence_index(payload: RuntimeIntelligenceIndexRequest, db: Session = D
         project.last_index_summary = result.get("summary") or {}
         project.workspace_status = "indexed"
         sync_project_to_config(project, config)
-        db.add_all([project, config]); db.commit()
+        db.add_all([project, config])
+        db.commit()
         return result
     except ValueError as exc:
-        raise HTTPException(422, str(exc))
+        raise HTTPException(422, str(exc)) from exc
 
-@router.post('/intelligence/search')
+
+@router.post("/intelligence/search")
 def intelligence_search(payload: RuntimeIntelligenceSearchRequest):
     try:
         index = RuntimeIntelligenceService.build_index(payload.path)
-        return {"items": RuntimeIntelligenceService.search(index, payload.query), "summary": index["summary"]}
+        return {
+            "items": RuntimeIntelligenceService.search(index, payload.query),
+            "summary": index["summary"],
+        }
     except ValueError as exc:
-        raise HTTPException(422, str(exc))
+        raise HTTPException(422, str(exc)) from exc
 
 
-@router.post('/context/generate', response_model=RuntimeContextJobCreateResponse, status_code=202)
-def generate_runtime_context(payload: RuntimeContextGenerateRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+@router.post(
+    "/context/generate",
+    response_model=RuntimeContextJobCreateResponse,
+    status_code=202,
+)
+def generate_runtime_context(
+    payload: RuntimeContextGenerateRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     config = get_or_create(db)
     job = RuntimeContextJobService.create(config.id, payload)
     background_tasks.add_task(RuntimeContextJobService.run, job["job_id"])
     return job
 
 
-@router.get('/context/jobs/{job_id}', response_model=RuntimeContextJobResponse)
+@router.get(
+    "/context/jobs/{job_id}",
+    response_model=RuntimeContextJobResponse,
+)
 def read_runtime_context_job(job_id: str):
     try:
         return RuntimeContextJobService.public(job_id)
-    except KeyError:
-        raise HTTPException(404, 'Trabajo de exportación no encontrado o el backend fue reiniciado.')
-
-
+    except KeyError as exc:
+        raise HTTPException(
+            404,
+            "Trabajo de exportación no encontrado o el backend fue reiniciado.",
+        ) from exc
 
 
 def _mega3_settings(config: RuntimeBuilderConfig) -> dict:
     manifest = dict(config.last_export_manifest or {})
     return dict(manifest.get("mega3_settings") or {})
 
-def _save_mega3_settings(db: Session, config: RuntimeBuilderConfig, section: str, values: dict) -> None:
+
+def _save_mega3_settings(
+    db: Session,
+    config: RuntimeBuilderConfig,
+    section: str,
+    values: dict,
+) -> None:
     manifest = dict(config.last_export_manifest or {})
     settings = dict(manifest.get("mega3_settings") or {})
     settings[section] = values
     manifest["mega3_settings"] = settings
     config.last_export_manifest = manifest
-    db.add(config); db.commit(); db.refresh(config)
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+
 
 def _runtime_command(payload: RuntimeLaunchSettings) -> RuntimeLaunchPreview:
-    parts = ["docker run", "--detach", f"--name {payload.container_name}", f"--restart {payload.restart_policy}"]
-    if payload.gpu_mode == "nvidia": parts.append("--gpus all")
-    elif payload.gpu_mode == "auto": parts.append("--gpus all")
+    parts = [
+        "docker run",
+        "--detach",
+        f"--name {payload.container_name}",
+        f"--restart {payload.restart_policy}",
+    ]
+    if payload.gpu_mode in {"nvidia", "auto"}:
+        parts.append("--gpus all")
     parts.append(f"-p {payload.host_port}:{payload.container_port}")
-    if payload.models_volume: parts.append(f"-v {payload.models_volume}:{payload.models_mount_path}")
-    if payload.workflows_volume: parts.append(f"-v {payload.workflows_volume}:{payload.workflows_mount_path}")
-    if payload.output_volume: parts.append(f"-v {payload.output_volume}:{payload.output_mount_path}")
+    if payload.models_volume:
+        parts.append(f"-v {payload.models_volume}:{payload.models_mount_path}")
+    if payload.workflows_volume:
+        parts.append(
+            f"-v {payload.workflows_volume}:{payload.workflows_mount_path}"
+        )
+    if payload.output_volume:
+        parts.append(f"-v {payload.output_volume}:{payload.output_mount_path}")
     parts.extend(payload.extra_arguments)
     parts.append(payload.image_name)
     lines = [parts[0]] + [f"  {item}" for item in parts[1:]]
-    return RuntimeLaunchPreview(command=" \\n".join(lines), lines=lines)
+    return RuntimeLaunchPreview(command=" \\\n".join(lines), lines=lines)
 
-@router.get('/models-volume/settings', response_model=RuntimeModelExportSettings)
+
+@router.get(
+    "/models-volume/settings",
+    response_model=RuntimeModelExportSettings,
+)
 def read_model_export_settings(db: Session = Depends(get_db)):
     config = get_or_create(db)
     stored = dict(_mega3_settings(config).get("model_export") or {})
@@ -268,76 +484,118 @@ def read_model_export_settings(db: Session = Depends(get_db)):
     )
     return defaults.model_copy(update=stored)
 
-@router.put('/models-volume/settings', response_model=RuntimeModelExportSettings)
-def update_model_export_settings(payload: RuntimeModelExportSettings, db: Session = Depends(get_db)):
+
+@router.put(
+    "/models-volume/settings",
+    response_model=RuntimeModelExportSettings,
+)
+def update_model_export_settings(
+    payload: RuntimeModelExportSettings,
+    db: Session = Depends(get_db),
+):
     config = get_or_create(db)
     values = payload.model_dump()
     config.source_comfyui_path = payload.comfyui_path or None
     config.export_root_directory = payload.output_directory or None
     _save_mega3_settings(db, config, "model_export", values)
-    return payload
+    return RuntimeModelExportSettings.model_validate(values)
 
-@router.get('/runtime-launch/settings', response_model=RuntimeLaunchSettings)
+
+@router.get(
+    "/runtime-launch/settings",
+    response_model=RuntimeLaunchSettings,
+)
 def read_runtime_launch_settings(db: Session = Depends(get_db)):
     config = get_or_create(db)
-    stored = _mega3_settings(config).get("runtime_launch") or {}
+    stored = dict(_mega3_settings(config).get("runtime_launch") or {})
     defaults = RuntimeLaunchSettings(
         build_name=config.runtime_name or "tryon-runtime",
         image_name=config.registry_image or "tryon-runtime:latest",
     )
     return defaults.model_copy(update=stored)
 
-@router.put('/runtime-launch/settings', response_model=RuntimeLaunchSettings)
-def update_runtime_launch_settings(payload: RuntimeLaunchSettings, db: Session = Depends(get_db)):
+
+@router.put(
+    "/runtime-launch/settings",
+    response_model=RuntimeLaunchSettings,
+)
+def update_runtime_launch_settings(
+    payload: RuntimeLaunchSettings,
+    db: Session = Depends(get_db),
+):
     config = get_or_create(db)
     values = payload.model_dump()
-
-    # Runtime Configuration es la única fuente de verdad para los nombres.
-    # Se conservan estos campos internos para compatibilidad con los
-    # exportadores y compiladores existentes.
     config.name = payload.build_name
     config.runtime_name = payload.build_name
     config.registry_image = payload.image_name
-
     _save_mega3_settings(db, config, "runtime_launch", values)
-
-    # La respuesta se construye desde lo realmente persistido.
     stored = dict(_mega3_settings(config).get("runtime_launch") or {})
     return RuntimeLaunchSettings.model_validate(stored)
 
-@router.post('/runtime-launch/preview', response_model=RuntimeLaunchPreview)
+
+@router.post(
+    "/runtime-launch/preview",
+    response_model=RuntimeLaunchPreview,
+)
 def preview_runtime_launch(payload: RuntimeLaunchSettings):
     return _runtime_command(payload)
 
-@router.post('/models-volume/analyze')
-def analyze_models_volume(payload: RuntimeModelVolumeAnalyzeRequest, db: Session = Depends(get_db)):
+
+@router.post("/models-volume/analyze")
+def analyze_models_volume(
+    payload: RuntimeModelVolumeAnalyzeRequest,
+    db: Session = Depends(get_db),
+):
     try:
-        return RuntimeModelVolumeExportService.analyze(get_or_create(db), payload.comfyui_path)
+        return RuntimeModelVolumeExportService.analyze(
+            get_or_create(db),
+            payload.comfyui_path,
+        )
     except ValueError as exc:
-        raise HTTPException(422, str(exc))
+        raise HTTPException(422, str(exc)) from exc
 
 
-@router.post('/models-volume/export', response_model=RuntimeContextJobCreateResponse, status_code=202)
-def export_models_volume(payload: RuntimeModelVolumeExportRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+@router.post(
+    "/models-volume/export",
+    response_model=RuntimeContextJobCreateResponse,
+    status_code=202,
+)
+def export_models_volume(
+    payload: RuntimeModelVolumeExportRequest,
+    db: Session = Depends(get_db),
+):
     config = get_or_create(db)
-    _save_mega3_settings(db, config, "model_export", {
-        "comfyui_path": payload.comfyui_path,
-        "output_directory": payload.output_directory or "",
-        "destination_type": payload.destination_type,
-        "docker_volume": payload.docker_volume or "",
-        "docker_path": payload.docker_path,
-        "calculate_sha256": payload.calculate_sha256,
-        "overwrite": payload.overwrite,
-        "skip_identical": payload.skip_identical,
-    })
-    # HF12D_BACKEND_SYNTAX_REPAIR
+    _save_mega3_settings(
+        db,
+        config,
+        "model_export",
+        {
+            "comfyui_path": payload.comfyui_path,
+            "output_directory": payload.output_directory or "",
+            "destination_type": payload.destination_type,
+            "docker_volume": payload.docker_volume or "",
+            "docker_path": payload.docker_path,
+            "calculate_sha256": payload.calculate_sha256,
+            "overwrite": payload.overwrite,
+            "skip_identical": payload.skip_identical,
+        },
+    )
+
     job = RuntimeContextJobService.create_model_volume(config.id, payload)
     RuntimeContextJobService._update(
-        job['job_id'],
-        status='queued',
-        phase='starting',
+        job["job_id"],
+        status="queued",
+        phase="starting",
         progress=1,
-        message='Iniciando exportación de modelos…',
+        message="Iniciando exportación de modelos…",
     )
-    job = RuntimeContextJobService.public(job['job_id'])
-    # HF12_MODEL_EXPORT_THREAD: iniciar fuera del ciclo de respuesta para que # el endpoint 202 regrese inmediatamente y el polling pueda observar progreso. worker = threading.Thread(target=RuntimeContextJobService.run_model_volume, args=(job['job_id'],), name=f"runtime-model-export-{job['job_id'][:8]}", daemon=True) worker.start() return job
+    public_job = RuntimeContextJobService.public(job["job_id"])
+
+    worker = threading.Thread(
+        target=RuntimeContextJobService.run_model_volume,
+        args=(job["job_id"],),
+        name=f"runtime-model-export-{job['job_id'][:8]}",
+        daemon=True,
+    )
+    worker.start()
+    return public_job
