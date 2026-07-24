@@ -1,7 +1,10 @@
 from __future__ import annotations
-import asyncio, json, os, re, subprocess, tempfile, uuid
+import asyncio, hashlib, json, os, re, secrets, subprocess, tempfile, uuid
+from urllib.parse import quote
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO
+from typing import Any, AsyncIterator, BinaryIO
+
+import httpx
 
 class DockerFileManagerError(RuntimeError): pass
 
@@ -60,6 +63,7 @@ class DockerFileManagerService:
     @classmethod
     def delete_volume(cls,name:str,force:bool=False)->dict[str,Any]:
         safe_name = cls._require_volume(name)
+        cls._remove_upload_worker(safe_name)
         args=["volume","rm"] + (["--force"] if force else []) + [safe_name]
         cls._run(args)
         if cls.volume_exists(safe_name):
@@ -121,112 +125,158 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
         cls._helper(volume,f"test ! -e '/data/{dest}' && mv -- '/data/{p}' '/data/{dest}'")
         return {"success":True,"path":dest}
 
+    WORKER_IMAGE = os.getenv(
+        "DOCKER_FILE_MANAGER_UPLOAD_WORKER_IMAGE",
+        "tryon/docker-volume-upload-worker:1.0",
+    )
+    WORKER_INTERNAL_PORT = 8765
+
+    @classmethod
+    def _worker_name(cls, volume: str) -> str:
+        digest = hashlib.sha256(volume.encode("utf-8")).hexdigest()[:16]
+        return f"tryon-volume-upload-{digest}"
+
+    @classmethod
+    def _worker_source_dir(cls) -> Path:
+        return Path(__file__).resolve().parents[2] / "docker" / "docker-volume-upload-worker"
+
+    @classmethod
+    def _ensure_worker_image(cls) -> None:
+        inspected = subprocess.run(
+            ["docker", "image", "inspect", cls.WORKER_IMAGE],
+            capture_output=True,
+            check=False,
+        )
+        if inspected.returncode == 0:
+            return
+        source_dir = cls._worker_source_dir()
+        dockerfile = source_dir / "Dockerfile"
+        if not dockerfile.is_file():
+            raise DockerFileManagerError(
+                f"Upload worker Dockerfile not found: {dockerfile}"
+            )
+        cls._run(
+            ["build", "-t", cls.WORKER_IMAGE, "-f", str(dockerfile), str(source_dir)],
+            timeout=1800,
+        )
+
+    @classmethod
+    def _remove_upload_worker(cls, volume: str) -> None:
+        subprocess.run(
+            ["docker", "rm", "-f", cls._worker_name(volume)],
+            capture_output=True,
+            check=False,
+        )
+
+    @classmethod
+    def _ensure_upload_worker(cls, volume: str) -> tuple[str, str]:
+        safe_volume = cls._require_volume(volume)
+        cls._ensure_worker_image()
+        worker_name = cls._worker_name(safe_volume)
+
+        inspect = subprocess.run(
+            ["docker", "inspect", worker_name],
+            capture_output=True,
+            check=False,
+        )
+        token = ""
+        if inspect.returncode == 0:
+            data = json.loads(inspect.stdout.decode("utf-8"))[0]
+            mounts = data.get("Mounts") or []
+            mounted_volume = next(
+                (m.get("Name") for m in mounts if m.get("Destination") == "/data"),
+                None,
+            )
+            if mounted_volume != safe_volume:
+                cls._remove_upload_worker(safe_volume)
+                inspect = subprocess.CompletedProcess([], 1, b"", b"")
+            else:
+                env = data.get("Config", {}).get("Env") or []
+                token = next(
+                    (item.split("=", 1)[1] for item in env if item.startswith("UPLOAD_TOKEN=")),
+                    "",
+                )
+                if not data.get("State", {}).get("Running"):
+                    cls._run(["start", worker_name])
+
+        if inspect.returncode != 0:
+            token = secrets.token_urlsafe(32)
+            cls._run(
+                [
+                    "run", "-d",
+                    "--name", worker_name,
+                    "--restart", "unless-stopped",
+                    "-e", f"UPLOAD_TOKEN={token}",
+                    "-v", f"{safe_volume}:/data",
+                    "-p", f"127.0.0.1::{cls.WORKER_INTERNAL_PORT}",
+                    cls.WORKER_IMAGE,
+                ],
+                timeout=120,
+            )
+
+        port_result = cls._run(
+            ["port", worker_name, f"{cls.WORKER_INTERNAL_PORT}/tcp"],
+            timeout=30,
+        )
+        mapping = port_result.stdout.decode("utf-8", "replace").strip().splitlines()[0]
+        host_port = mapping.rsplit(":", 1)[-1]
+        if not host_port.isdigit():
+            raise DockerFileManagerError("Could not resolve upload worker port")
+        return f"http://127.0.0.1:{host_port}", token
+
     @classmethod
     async def upload_async_stream(
         cls,
         volume: str,
         path: str,
-        chunks,
+        chunks: AsyncIterator[bytes],
         overwrite: bool = False,
+        content_length: int | None = None,
     ) -> dict[str, Any]:
-        """Spool quickly, then use Docker's native copy implementation.
+        """Stream once, directly into a container with the target volume mounted.
 
-        Directly piping every HTTP chunk to ``docker run -i`` can become
-        extremely slow on Windows/Docker Desktop because of subprocess-pipe
-        backpressure. ``docker cp`` is much faster and more stable for large
-        model files.
+        The browser upload and the Docker-volume write happen simultaneously. No
+        Windows temporary file, ``docker cp`` or second full-file pass is used.
         """
-        p = cls._path(path, False)
-        safe_volume = cls._require_volume(volume)
-        helper_name = f"tryon-volume-upload-{uuid.uuid4().hex[:12]}"
-        temporary_path: str | None = None
-        written = 0
+        destination = cls._path(path, False)
+        base_url, token = await asyncio.to_thread(cls._ensure_upload_worker, volume)
 
+        async def body() -> AsyncIterator[bytes]:
+            async for chunk in chunks:
+                if chunk:
+                    yield chunk
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/octet-stream",
+        }
+        if content_length is not None and content_length >= 0:
+            headers["Content-Length"] = str(content_length)
+
+        url = (
+            f"{base_url}/upload?path={quote(destination, safe='/')}"
+            f"&overwrite={'true' if overwrite else 'false'}"
+        )
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb",
-                prefix="tryon-volume-upload-",
-                suffix=".part",
-                delete=False,
-                buffering=16 * 1024 * 1024,
-            ) as temporary_file:
-                temporary_path = temporary_file.name
-                async for chunk in chunks:
-                    if not chunk:
-                        continue
-                    temporary_file.write(chunk)
-                    written += len(chunk)
-                temporary_file.flush()
-                os.fsync(temporary_file.fileno())
+            async with httpx.AsyncClient(timeout=None) as client:
+                response = await client.post(url, headers=headers, content=body())
+        except httpx.HTTPError as exc:
+            raise DockerFileManagerError(f"Upload worker connection failed: {exc}") from exc
 
-            await asyncio.to_thread(
-                cls._run,
-                [
-                    "run", "-d", "--name", helper_name,
-                    "-v", f"{safe_volume}:/data",
-                    cls.HELPER_IMAGE, "sleep", "21600",
-                ],
-                timeout=120,
-            )
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail")
+            except Exception:
+                detail = response.text
+            raise DockerFileManagerError(detail or "Upload worker rejected the file")
 
-            final_target = f"/data/{p}"
-            staging_target = f"{final_target}.uploading-{uuid.uuid4().hex[:8]}"
-            prepare_script = """set -eu
-final="$1"
-overwrite="$2"
-mkdir -p -- "$(dirname "$final")"
-if [ "$overwrite" != "true" ] && [ -e "$final" ]; then
-  echo "Destination already exists" >&2
-  exit 17
-fi
-"""
-            await asyncio.to_thread(
-                cls._run,
-                [
-                    "exec", helper_name, "sh", "-lc", prepare_script,
-                    "sh", final_target, "true" if overwrite else "false",
-                ],
-                timeout=120,
-            )
-
-            await asyncio.to_thread(
-                cls._run,
-                ["cp", temporary_path, f"{helper_name}:{staging_target}"],
-                timeout=21600,
-            )
-
-            commit_script = """set -eu
-staging="$1"
-final="$2"
-overwrite="$3"
-if [ "$overwrite" = "true" ]; then
-  mv -f -- "$staging" "$final"
-else
-  test ! -e "$final"
-  mv -- "$staging" "$final"
-fi
-"""
-            await asyncio.to_thread(
-                cls._run,
-                [
-                    "exec", helper_name, "sh", "-lc", commit_script,
-                    "sh", staging_target, final_target,
-                    "true" if overwrite else "false",
-                ],
-                timeout=120,
-            )
-            return {"success": True, "path": p, "size": written}
-        finally:
-            subprocess.run(
-                ["docker", "rm", "-f", helper_name],
-                capture_output=True,
-                check=False,
-            )
-            if temporary_path:
-                try:
-                    os.remove(temporary_path)
-                except FileNotFoundError:
-                    pass
+        result = response.json()
+        return {
+            "success": True,
+            "path": destination,
+            "size": int(result.get("size") or content_length or 0),
+            "method": "direct-volume-worker",
+        }
 
     @classmethod
     def upload_stream(

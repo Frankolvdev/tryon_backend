@@ -27,7 +27,11 @@ def transfer(p:DockerTransferPayload): return call(S.transfer,p.source_volume,p.
 @router.post("/upload-stream")
 async def upload_stream(request: Request, volume: str = Query(...), path: str = Query(...), overwrite: bool = Query(False)):
     try:
-        return await S.upload_async_stream(volume, path, request.stream(), overwrite)
+        content_length = request.headers.get("content-length")
+        return await S.upload_async_stream(
+            volume, path, request.stream(), overwrite,
+            int(content_length) if content_length and content_length.isdigit() else None,
+        )
     except DockerFileManagerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
