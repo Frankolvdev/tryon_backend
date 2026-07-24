@@ -58,7 +58,15 @@ class DockerFileManagerService:
 set -eu
 target="$1"
 test -d "$target" || exit 44
-find "$target" -mindepth 1 -maxdepth 1 -exec stat -c '%n\t%F\t%s\t%Y' {} \;
+find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
+  for entry do
+    printf "%s\t%s\t%s\t%s\n" \
+      "$entry" \
+      "$(stat -c %F "$entry")" \
+      "$(stat -c %s "$entry")" \
+      "$(stat -c %Y "$entry")"
+  done
+' sh {} +
 """
         out = cls._run([
             "run", "--rm", "-v", f"{cls._volume(volume)}:/data",
