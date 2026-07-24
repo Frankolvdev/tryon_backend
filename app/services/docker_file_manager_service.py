@@ -218,11 +218,45 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
             ["port", worker_name, f"{cls.WORKER_INTERNAL_PORT}/tcp"],
             timeout=30,
         )
-        mapping = port_result.stdout.decode("utf-8", "replace").strip().splitlines()[0]
+        mappings = port_result.stdout.decode("utf-8", "replace").strip().splitlines()
+        if not mappings:
+            raise DockerFileManagerError("Upload worker has no published port")
+        mapping = mappings[0]
         host_port = mapping.rsplit(":", 1)[-1]
         if not host_port.isdigit():
-            raise DockerFileManagerError("Could not resolve upload worker port")
-        return f"http://127.0.0.1:{host_port}", token
+            raise DockerFileManagerError(
+                f"Could not resolve upload worker port from: {mapping}"
+            )
+
+        base_url = f"http://127.0.0.1:{host_port}"
+
+        # Docker reports the container as running before Python's HTTP server is
+        # necessarily ready to accept connections. Wait for the health endpoint
+        # so the first upload cannot fail with a startup race.
+        last_error = ""
+        for _ in range(60):
+            try:
+                with httpx.Client(timeout=1.0) as client:
+                    response = client.get(f"{base_url}/health")
+                if response.status_code == 200:
+                    return base_url, token
+                last_error = f"HTTP {response.status_code}: {response.text[:300]}"
+            except Exception as exc:
+                last_error = str(exc)
+            import time
+            time.sleep(0.25)
+
+        logs = subprocess.run(
+            ["docker", "logs", "--tail", "50", worker_name],
+            capture_output=True,
+            check=False,
+        )
+        log_text = (logs.stderr or logs.stdout).decode("utf-8", "replace").strip()
+        raise DockerFileManagerError(
+            "Upload worker did not become ready"
+            + (f": {last_error}" if last_error else "")
+            + (f". Worker logs: {log_text}" if log_text else "")
+        )
 
     @classmethod
     async def upload_async_stream(
