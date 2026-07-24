@@ -32,6 +32,23 @@ class DockerFileManagerService:
         names=cls._run(["volume","ls","--format","{{.Name}}"]).stdout.decode().splitlines()
         return [cls.inspect_volume(n) for n in names if n.strip()]
     @classmethod
+    def volume_exists(cls, name: str) -> bool:
+        safe_name = cls._volume(name)
+        result = subprocess.run(
+            ["docker", "volume", "inspect", safe_name],
+            capture_output=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    @classmethod
+    def _require_volume(cls, name: str) -> str:
+        safe_name = cls._volume(name)
+        if not cls.volume_exists(safe_name):
+            raise DockerFileManagerError(f"Docker volume '{safe_name}' does not exist")
+        return safe_name
+
+    @classmethod
     def inspect_volume(cls,name:str)->dict[str,Any]:
         data=json.loads(cls._run(["volume","inspect",cls._volume(name)]).stdout.decode())[0]
         return {"name":data.get("Name"),"driver":data.get("Driver"),"mountpoint":data.get("Mountpoint"),"scope":data.get("Scope"),"labels":data.get("Labels") or {},"options":data.get("Options") or {},"created_at":data.get("CreatedAt")}
@@ -42,16 +59,24 @@ class DockerFileManagerService:
         args.append(cls._volume(name)); cls._run(args); return cls.inspect_volume(name)
     @classmethod
     def delete_volume(cls,name:str,force:bool=False)->dict[str,Any]:
-        args=["volume","rm"] + (["--force"] if force else []) + [cls._volume(name)]
-        cls._run(args); return {"success":True,"name":name}
+        safe_name = cls._require_volume(name)
+        args=["volume","rm"] + (["--force"] if force else []) + [safe_name]
+        cls._run(args)
+        if cls.volume_exists(safe_name):
+            raise DockerFileManagerError(f"Docker volume '{safe_name}' could not be removed")
+        return {"success":True,"name":safe_name,"deleted":True}
     @classmethod
     def _helper(cls, volume:str, command:str, *, second_volume:str|None=None, input_bytes:bytes|None=None, timeout:int=120)->subprocess.CompletedProcess:
-        args=["run","--rm","-i","-v",f"{cls._volume(volume)}:/data"]
-        if second_volume: args += ["-v",f"{cls._volume(second_volume)}:/dest"]
+        source_volume = cls._require_volume(volume)
+        args=["run","--rm","-i","-v",f"{source_volume}:/data"]
+        if second_volume:
+            destination_volume = cls._require_volume(second_volume)
+            args += ["-v",f"{destination_volume}:/dest"]
         args += [cls.HELPER_IMAGE,"sh","-lc",command]
         return cls._run(args,input_bytes=input_bytes,timeout=timeout)
     @classmethod
     def list_directory(cls,volume:str,path:str="")->dict[str,Any]:
+        safe_volume = cls._require_volume(volume)
         p=cls._path(path); target=f"/data/{p}" if p else "/data"
         # Alpine uses BusyBox; its `find` does not support GNU `-printf`.
         script = r"""
@@ -69,7 +94,7 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
 ' sh {} +
 """
         out = cls._run([
-            "run", "--rm", "-v", f"{cls._volume(volume)}:/data",
+            "run", "--rm", "-v", f"{safe_volume}:/data",
             cls.HELPER_IMAGE, "sh", "-lc", script, "sh", target,
         ])
         items=[]
