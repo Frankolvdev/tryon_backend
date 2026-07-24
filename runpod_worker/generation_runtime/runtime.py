@@ -84,11 +84,115 @@ class GenerationRuntime:
             return [self._materialize(v, directory) for v in value]
         return value
 
+    @staticmethod
+    def _decode_workflow(value: Any) -> dict[str, Any]:
+        """Accept a ComfyUI prompt as an object or a JSON-encoded string.
+
+        Production providers sometimes serialize the workflow more than once
+        while transporting the job. Decode safely, with a strict depth limit,
+        before applying bindings or submitting it to ComfyUI.
+        """
+        decoded = value
+        for _ in range(3):
+            if not isinstance(decoded, str):
+                break
+            raw = decoded.strip()
+            if not raw:
+                break
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Workflow JSON string is invalid: {exc.msg}.") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError("Workflow must be a JSON object or a JSON string containing an object.")
+        return decoded
+
+    @staticmethod
+    def _normalize_model_reference(value: str, category: str) -> str:
+        raw = value.strip().replace("\\", "/")
+        while "//" in raw:
+            raw = raw.replace("//", "/")
+        raw = raw.strip().lstrip("/")
+
+        # Remove a Windows drive prefix without leaking host paths into Linux.
+        if len(raw) >= 2 and raw[1] == ":":
+            raw = raw[2:].lstrip("/")
+
+        lowered = raw.lower()
+        category_lower = category.lower()
+        markers = (
+            f"/models/{category_lower}/",
+            f"models/{category_lower}/",
+            f"/{category_lower}/",
+            f"{category_lower}/",
+        )
+        normalized = raw
+        for marker in markers:
+            index = lowered.rfind(marker)
+            if index >= 0:
+                normalized = raw[index + len(marker):]
+                break
+
+        normalized = normalized.strip().lstrip("/")
+        parts = [part for part in normalized.split("/") if part not in ("", ".")]
+        if not parts or any(part == ".." for part in parts):
+            raise ValueError(
+                f"Invalid {category} model path '{value}'. Relative paths cannot be empty or contain '..'."
+            )
+        return "/".join(parts)
+
+    @classmethod
+    def _normalize_workflow_model_paths(cls, workflow: dict[str, Any]) -> dict[str, Any]:
+        field_categories = {
+            "lora_name": "loras",
+            "ckpt_name": "checkpoints",
+            "checkpoint_name": "checkpoints",
+            "unet_name": "diffusion_models",
+            "vae_name": "vae",
+            "clip_name": "text_encoders",
+            "text_encoder_name": "text_encoders",
+            "diffusion_model": "diffusion_models",
+            "diffusion_model_name": "diffusion_models",
+        }
+        class_categories = {
+            "loraloader": "loras",
+            "loraloadermodelonly": "loras",
+            "checkpointloadersimple": "checkpoints",
+            "unetloader": "diffusion_models",
+            "vaeloader": "vae",
+            "cliploader": "text_encoders",
+            "dualcliploader": "text_encoders",
+        }
+
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            class_type = str(node.get("class_type") or "").replace("_", "").lower()
+            fallback_category = class_categories.get(class_type)
+            for field, value in list(inputs.items()):
+                if not isinstance(value, str):
+                    continue
+                category = field_categories.get(str(field).lower())
+                if category is None and fallback_category and str(field).lower() in {
+                    "model_name", "model", "filename", "file_name"
+                }:
+                    category = fallback_category
+                if category is None:
+                    continue
+                try:
+                    inputs[field] = cls._normalize_model_reference(value, category)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid model path in ComfyUI node {node_id}, field '{field}': {exc}"
+                    ) from exc
+        return workflow
+
     def _workflow(self, step: dict[str, Any], context: dict[str, Any], execution_id: Any) -> dict[str, Any]:
         config = copy.deepcopy(step.get("configuration") or {})
-        workflow = config.get("workflow")
-        if not isinstance(workflow, dict):
-            raise ValueError(f"Workflow step '{step.get('key')}' has no workflow JSON.")
+        workflow = self._decode_workflow(config.get("workflow"))
         for binding in config.get("input_bindings") or []:
             source = binding.get("source_path") or binding.get("module_input_key")
             value = GenerationRuntimeContext.resolve(context, str(source or ""))
@@ -98,6 +202,7 @@ class GenerationRuntime:
             if isinstance(value, dict) and value.get("__generation_file__"):
                 value = self._upload_input(Path(value["local_path"]), str(execution_id))
             node.setdefault("inputs", {})[binding["input_field"]] = value
+        workflow = self._normalize_workflow_model_paths(workflow)
         result = self._execute_comfy(workflow, int(config.get("timeout_seconds") or 900))
         files = result["files"]
         mapped: dict[str, Any] = {"files": files, "provider_result": {"prompt_id": result["prompt_id"]}}
