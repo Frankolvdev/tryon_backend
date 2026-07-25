@@ -153,6 +153,7 @@ class RuntimeContextGeneratorService:
         config: RuntimeBuilderConfig,
         payload: Any,
         progress: ProgressCallback | None = None,
+        modal_volume_name: str | None = None,
     ) -> dict[str, Any]:
         notify = progress or (lambda _phase, _percent, _message: None)
         notify("preparing", 2, "Validando instalación local de ComfyUI…")
@@ -181,7 +182,7 @@ class RuntimeContextGeneratorService:
         for folder in ("models", "custom_nodes", "workflow", "scripts"):
             (output / folder).mkdir(parents=True, exist_ok=True)
 
-        generated = RuntimeBuilderService.generate(config)
+        generated = RuntimeBuilderService.generate(config, modal_volume_name=modal_volume_name)
 
         # La decisión real de copiar modelos pertenece a la exportación. Si el
         # usuario desmarca "Copiar modelos" y existe un Volume configurado, se
@@ -194,7 +195,7 @@ class RuntimeContextGeneratorService:
             generated["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(volume_path)
             generated["runtime_manifest"]["model_storage"] = "external-volume"
             if RuntimeBuilderService._is_modal(config):
-                volume_name = next(
+                volume_name = str(modal_volume_name or "").strip() or next(
                     (str(volume.get("name")) for volume in (config.volumes or []) if volume.get("name")),
                     f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models",
                 )

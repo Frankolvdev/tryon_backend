@@ -279,10 +279,11 @@ class RuntimeBuilderService:
     @staticmethod
     def _modal_app(volume_name: str, volume_path: str, runtime_name: str) -> str:
         # Docker Desktop and RunPod keep using scripts/startup.sh unchanged.
-        # Modal starts ComfyUI directly after snapshot restoration so its public
-        # web proxy supervises the real Python server process instead of a Bash
-        # wrapper that launches ComfyUI in the background.
-        return f'''import os
+        # Modal starts ComfyUI directly after snapshot restoration and exposes
+        # it through a small ASGI reverse proxy so long-lived WebSockets remain
+        # stable behind Modal's web ingress.
+        return f'''import asyncio
+import os
 import shlex
 import signal
 import socket
@@ -311,12 +312,11 @@ COMFYUI_ROOT = Path("/app/ComfyUI")
 COMFYUI_MAIN = COMFYUI_ROOT / "main.py"
 RUNTIME_ROOT = Path("/app/runtime")
 MODELS_ROOT = Path(os.getenv("MODELS_ROOT", VOLUME_PATH))
-WORKFLOWS_ROOT = Path(os.getenv("WORKFLOWS_ROOT", "/workflows"))
-COMFY_USER_ROOT = Path(os.getenv("COMFY_USER_ROOT", str(WORKFLOWS_ROOT)))
+COMFY_USER_ROOT = Path(os.getenv("COMFY_USER_ROOT", "/tmp/comfyui-user"))
 
 app = modal.App(APP_NAME)
 models_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
-image = modal.Image.from_dockerfile("Dockerfile.modal")
+image = modal.Image.from_dockerfile("Dockerfile.modal").pip_install("fastapi")
 
 
 def _port_is_ready() -> bool:
@@ -349,11 +349,7 @@ def _prepare_runtime_directories() -> None:
     (COMFYUI_ROOT / "models").mkdir(parents=True, exist_ok=True)
     (COMFY_USER_ROOT / "default" / "workflows").mkdir(parents=True, exist_ok=True)
     print(f"[runtime] Modelos externos registrados desde: {{MODELS_ROOT}}", flush=True)
-    print(
-        f"[runtime] Workflows persistentes registrados en: "
-        f"{{COMFY_USER_ROOT / 'default' / 'workflows'}}",
-        flush=True,
-    )
+    print(f"[runtime] Directorio temporal de usuario: {{COMFY_USER_ROOT}}", flush=True)
 
 
 def _run_performance_probe(env: dict[str, str]) -> None:
@@ -361,13 +357,106 @@ def _run_performance_probe(env: dict[str, str]) -> None:
     if not probe.is_file():
         return
     try:
-        subprocess.run(
-            [sys.executable, str(probe)],
-            env=env,
-            check=False,
-        )
+        subprocess.run([sys.executable, str(probe)], env=env, check=False)
     except OSError as exc:
         print(f"[modal] No se pudo ejecutar performance_probe.py: {{exc}}", flush=True)
+
+
+def _proxy_app():
+    from aiohttp import ClientSession, WSMsgType
+    from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+    from fastapi.responses import Response
+
+    web_app = FastAPI()
+    upstream_http = f"http://127.0.0.1:{{COMFYUI_PORT}}"
+    upstream_ws = f"ws://127.0.0.1:{{COMFYUI_PORT}}"
+    hop_headers = {{
+        "connection", "keep-alive", "proxy-authenticate",
+        "proxy-authorization", "te", "trailers",
+        "transfer-encoding", "upgrade", "content-length",
+    }}
+
+    def clean_headers(headers):
+        return {{k: v for k, v in headers.items() if k.lower() not in hop_headers and k.lower() != "host"}}
+
+    @web_app.api_route("/{{path:path}}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+    async def proxy_http(path: str, request: Request):
+        target = f"{{upstream_http}}/{{path}}"
+        if request.url.query:
+            target += f"?{{request.url.query}}"
+        body = await request.body()
+        async with ClientSession() as session:
+            async with session.request(
+                request.method,
+                target,
+                headers=clean_headers(request.headers),
+                data=body or None,
+                allow_redirects=False,
+            ) as upstream:
+                content = await upstream.read()
+                return Response(
+                    content=content,
+                    status_code=upstream.status,
+                    headers=clean_headers(upstream.headers),
+                    media_type=upstream.content_type if upstream.content_type else None,
+                )
+
+    @web_app.websocket("/{{path:path}}")
+    async def proxy_websocket(websocket: WebSocket, path: str):
+        target = f"{{upstream_ws}}/{{path}}"
+        query = websocket.scope.get("query_string", b"").decode("latin-1")
+        if query:
+            target += f"?{{query}}"
+        websocket_handshake_headers = hop_headers | {{
+            "host", "sec-websocket-key", "sec-websocket-version",
+            "sec-websocket-extensions", "sec-websocket-protocol",
+        }}
+        forwarded = {{
+            key.decode("latin-1"): value.decode("latin-1")
+            for key, value in websocket.scope.get("headers", [])
+            if key.decode("latin-1").lower() not in websocket_handshake_headers
+        }}
+        async with ClientSession() as session:
+            async with session.ws_connect(target, headers=forwarded, autoping=True) as upstream:
+                await websocket.accept()
+
+                async def client_to_upstream():
+                    try:
+                        while True:
+                            message = await websocket.receive()
+                            kind = message.get("type")
+                            if kind == "websocket.disconnect":
+                                break
+                            if message.get("text") is not None:
+                                await upstream.send_str(message["text"])
+                            elif message.get("bytes") is not None:
+                                await upstream.send_bytes(message["bytes"])
+                    except WebSocketDisconnect:
+                        pass
+                    finally:
+                        await upstream.close()
+
+                async def upstream_to_client():
+                    async for message in upstream:
+                        if message.type == WSMsgType.TEXT:
+                            await websocket.send_text(message.data)
+                        elif message.type == WSMsgType.BINARY:
+                            await websocket.send_bytes(message.data)
+                        elif message.type in {{WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}}:
+                            break
+
+                tasks = [
+                    asyncio.create_task(client_to_upstream()),
+                    asyncio.create_task(upstream_to_client()),
+                ]
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
+
+    return web_app
 
 
 @app.cls(
@@ -391,7 +480,6 @@ class ComfyUIServer:
         env["RUNTIME_PROVIDER"] = "modal"
         env["COMFYUI_PORT"] = str(COMFYUI_PORT)
         env["MODELS_ROOT"] = str(MODELS_ROOT)
-        env["WORKFLOWS_ROOT"] = str(WORKFLOWS_ROOT)
         env["COMFY_USER_ROOT"] = str(COMFY_USER_ROOT)
 
         _prepare_runtime_directories()
@@ -402,7 +490,7 @@ class ComfyUIServer:
             sys.executable,
             str(COMFYUI_MAIN),
             "--listen",
-            "0.0.0.0",
+            "127.0.0.1",
             "--port",
             str(COMFYUI_PORT),
             "--user-directory",
@@ -425,13 +513,9 @@ class ComfyUIServer:
         print("[modal] Preparando runtime CPU/GPU para snapshot, sin abrir el puerto.", flush=True)
         try:
             import torch
-
             if torch.cuda.is_available():
                 torch.cuda.init()
-                print(
-                    f"[modal] CUDA preparada para snapshot: {{torch.cuda.get_device_name(0)}}.",
-                    flush=True,
-                )
+                print(f"[modal] CUDA preparada para snapshot: {{torch.cuda.get_device_name(0)}}.", flush=True)
         except Exception as exc:
             print(f"[modal] Preparación CUDA diferida: {{exc}}", flush=True)
 
@@ -443,9 +527,9 @@ class ComfyUIServer:
         print("[modal] Snapshot restaurado; iniciando ComfyUI directamente.", flush=True)
         self._start_process()
 
-    @modal.web_server(port=COMFYUI_PORT, startup_timeout=STARTUP_TIMEOUT)
+    @modal.asgi_app()
     def comfyui(self):
-        pass
+        return _proxy_app()
 
     @modal.exit()
     def shutdown(self) -> None:
@@ -593,7 +677,10 @@ class ComfyUIServer:
         }
 
     @staticmethod
-    def generate(config: RuntimeBuilderConfig) -> dict:
+    def generate(
+        config: RuntimeBuilderConfig,
+        modal_volume_name: str | None = None,
+    ) -> dict:
         validation = RuntimeBuilderService.validate(config)
         if not validation["valid"]:
             errors = [item["message"] for item in validation["issues"] if item["level"] == "error"]
@@ -765,11 +852,13 @@ wait $COMFY_PID
         }
 
         if modal_enabled:
-            volume_name = f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models"
-            for volume in config.volumes or []:
-                if volume.get("name"):
-                    volume_name = str(volume["name"])
-                    break
+            volume_name = str(modal_volume_name or "").strip()
+            if not volume_name:
+                volume_name = f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models"
+                for volume in config.volumes or []:
+                    if volume.get("name"):
+                        volume_name = str(volume["name"])
+                        break
             result["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path, RuntimeBuilderService.sanitize_runtime_name(config.runtime_name))
             if external_models:
                 result["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(

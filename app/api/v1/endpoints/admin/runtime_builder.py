@@ -37,6 +37,7 @@ from app.schemas.runtime_builder import (
     RuntimeWorkspaceUpdate,
 )
 from app.services.runtime_build_execution_service import RuntimeBuildExecutionService
+from app.services.infrastructure_provider_service import InfrastructureProviderService
 from app.services.runtime_builder_service import RuntimeBuilderService
 from app.services.runtime_context_job_service import RuntimeContextJobService
 from app.services.runtime_import_service import RuntimeImportService
@@ -213,7 +214,11 @@ def validate_config(db: Session = Depends(get_db)):
 
 @router.post("/generate", response_model=RuntimeGeneratedFilesResponse)
 def generate_files(db: Session = Depends(get_db)):
-    return RuntimeBuilderService.generate(get_or_create(db))
+    modal_config = InfrastructureProviderService.get_modal(db)
+    return RuntimeBuilderService.generate(
+        get_or_create(db),
+        modal_volume_name=modal_config.volume_name,
+    )
 
 
 @router.get("/diagnostic", response_model=RuntimeDockerDiagnosticResponse)
