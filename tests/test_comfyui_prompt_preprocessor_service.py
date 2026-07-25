@@ -17,6 +17,14 @@ def test_normalizes_rgthree_lora_dictionary_keys():
                         "on": True,
                         "strength": 0.8,
                     },
+                    r"Klein\f2k_consis.safetensors": {
+                        "on": True,
+                        "strength": 0.7,
+                    },
+                    r"Klein\klein-9b_realism_slider_v2.safetensors": {
+                        "on": True,
+                        "strength": 0.5,
+                    },
                 }
             },
         }
@@ -25,9 +33,17 @@ def test_normalizes_rgthree_lora_dictionary_keys():
     normalized = comfyui_prompt_preprocessor_service.preprocess(prompt)
     loras = normalized["100"]["inputs"]["loras"]
 
-    assert "Klein/bfs_head_v1_flux-klein_9b_step3500_rank128.safetensors" in loras
+    assert (
+        "Klein/bfs_head_v1_flux-klein_9b_step3500_rank128.safetensors"
+        in loras
+    )
     assert "Klein/lenovo_flux_klein9b.safetensors" in loras
-    comfyui_prompt_preprocessor_service.assert_no_windows_model_paths(normalized)
+    assert "Klein/f2k_consis.safetensors" in loras
+    assert "Klein/klein-9b_realism_slider_v2.safetensors" in loras
+
+    comfyui_prompt_preprocessor_service.assert_no_windows_model_paths(
+        normalized
+    )
 
 
 def test_normalizes_regular_lora_values():
@@ -38,8 +54,13 @@ def test_normalizes_regular_lora_values():
             }
         }
     }
+
     normalized = comfyui_prompt_preprocessor_service.preprocess(prompt)
-    assert normalized["1"]["inputs"]["lora_name"] == "Klein/f2k_consis.safetensors"
+
+    assert (
+        normalized["1"]["inputs"]["lora_name"]
+        == "Klein/f2k_consis.safetensors"
+    )
 
 
 def test_preserves_free_prompt_text():
@@ -50,5 +71,6 @@ def test_preserves_free_prompt_text():
             }
         }
     }
+
     normalized = comfyui_prompt_preprocessor_service.preprocess(prompt)
     assert normalized == prompt

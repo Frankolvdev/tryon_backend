@@ -14,9 +14,6 @@ from app.schemas.runtime_builder import (
     RuntimeBuildResponse,
     RuntimeBuildBulkRequest,
     RuntimeBuildBulkResponse,
-    RuntimeDeploymentCreate,
-    RuntimeDeploymentProviderList,
-    RuntimeDeploymentResponse,
     RuntimeBuilderConfigResponse,
     RuntimeBuilderConfigUpdate,
     RuntimeContextGenerateRequest,
@@ -243,14 +240,13 @@ def create_build(
     db: Session = Depends(get_db),
 ):
     try:
-        build = RuntimeBuildExecutionService.create(db, get_or_create(db), payload.context_directory)
+        build = RuntimeBuildExecutionService.create(db, get_or_create(db))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     background_tasks.add_task(
         RuntimeBuildExecutionService.start,
         build.id,
         payload.push_after_build,
-        payload.no_cache,
     )
     return build
 
@@ -274,61 +270,6 @@ def publish(
         raise HTTPException(404, "Build no encontrado.")
     background_tasks.add_task(RuntimeBuildExecutionService.publish, item.id)
     return item
-
-
-@router.post("/builds/{build_id}/publish-modal", response_model=RuntimeBuildResponse)
-def publish_modal(
-    build_id: int,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    item = db.get(RuntimeBuilderBuild, build_id)
-    if not item:
-        raise HTTPException(404, "Build no encontrado.")
-    background_tasks.add_task(RuntimeBuildExecutionService.publish_modal, item.id)
-    return item
-
-
-@router.get("/deployment-providers", response_model=RuntimeDeploymentProviderList)
-def deployment_providers(db: Session = Depends(get_db)):
-    return {"items": RuntimeBuildExecutionService.deployment_providers(db)}
-
-
-@router.post("/builds/{build_id}/deployments", response_model=RuntimeDeploymentResponse)
-def create_deployment(
-    build_id: int,
-    payload: RuntimeDeploymentCreate,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    item = db.get(RuntimeBuilderBuild, build_id)
-    if not item:
-        raise HTTPException(404, "Build no encontrado.")
-    try:
-        deployment = RuntimeBuildExecutionService.create_deployment(db, item, payload.provider)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    background_tasks.add_task(
-        RuntimeBuildExecutionService.run_deployment,
-        item.id,
-        deployment["id"],
-    )
-    return deployment
-
-
-@router.get("/builds/{build_id}/deployments/{deployment_id}", response_model=RuntimeDeploymentResponse)
-def read_deployment(
-    build_id: int,
-    deployment_id: str,
-    db: Session = Depends(get_db),
-):
-    item = db.get(RuntimeBuilderBuild, build_id)
-    if not item:
-        raise HTTPException(404, "Build no encontrado.")
-    deployment = RuntimeBuildExecutionService.get_deployment(item, deployment_id)
-    if not deployment:
-        raise HTTPException(404, "Despliegue no encontrado.")
-    return deployment
 
 
 @router.post("/builds/{build_id}/activate", response_model=RuntimeBuildResponse)
@@ -544,28 +485,61 @@ def _save_mega3_settings(
     db.refresh(config)
 
 
+def _docker_image_reference(payload: RuntimeLaunchSettings) -> str:
+    image_name = str(payload.image_name or "").strip()
+    if image_name:
+        return image_name
+
+    build_name = str(payload.build_name or "").strip()
+    if not build_name:
+        return "tryon-runtime:latest"
+
+    last_slash = build_name.rfind("/")
+    last_colon = build_name.rfind(":")
+    return build_name if last_colon > last_slash else f"{build_name}:latest"
+
+
 def _runtime_command(payload: RuntimeLaunchSettings) -> RuntimeLaunchPreview:
-    parts = [
-        "docker run",
-        "--detach",
-        f"--name {payload.container_name}",
-        f"--restart {payload.restart_policy}",
-    ]
+    parts = ["docker run", "-it"]
+
+    # --rm no puede combinarse con una política de reinicio.
+    if payload.restart_policy == "no":
+        parts.append("--rm")
+    else:
+        parts.append(f"--restart {payload.restart_policy}")
+
+    if payload.container_name.strip():
+        parts.append(f"--name {payload.container_name.strip()}")
+
     if payload.gpu_mode in {"nvidia", "auto"}:
         parts.append("--gpus all")
+
     parts.append(f"-p {payload.host_port}:{payload.container_port}")
-    if payload.models_volume:
-        parts.append(f"-v {payload.models_volume}:{payload.models_mount_path}")
-    if payload.workflows_volume:
-        parts.append(
-            f"-v {payload.workflows_volume}:{payload.workflows_mount_path}"
-        )
-    if payload.output_volume:
-        parts.append(f"-v {payload.output_volume}:{payload.output_mount_path}")
-    parts.extend(payload.extra_arguments)
-    parts.append(payload.image_name)
+
+    mounts = (
+        (payload.models_volume, payload.models_mount_path),
+        (payload.workflows_volume, payload.workflows_mount_path),
+        (payload.output_volume, payload.output_mount_path),
+    )
+    for volume, mount_path in mounts:
+        normalized_volume = str(volume or "").strip()
+        normalized_mount = str(mount_path or "").strip()
+        if normalized_volume and normalized_mount:
+            parts.append(f"-v {normalized_volume}:{normalized_mount}")
+
+    for argument in payload.extra_arguments:
+        normalized_argument = str(argument or "").strip()
+        if normalized_argument:
+            parts.append(normalized_argument)
+
+    parts.append(_docker_image_reference(payload))
     lines = [parts[0]] + [f"  {item}" for item in parts[1:]]
-    return RuntimeLaunchPreview(command=" \\\n".join(lines), lines=lines)
+
+    return RuntimeLaunchPreview(
+        command=" \
+".join(lines),
+        lines=lines,
+    )
 
 
 @router.get(

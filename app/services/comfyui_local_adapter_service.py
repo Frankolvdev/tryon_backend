@@ -10,7 +10,9 @@ from uuid import uuid4
 import httpx
 
 from app.core.config import settings
-from app.services.comfyui_prompt_preprocessor_service import comfyui_prompt_preprocessor_service
+from app.services.comfyui_prompt_preprocessor_service import (
+    comfyui_prompt_preprocessor_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,10 +131,12 @@ class ComfyUILocalAdapterService:
         extra_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         resolved_client_id = client_id or uuid4().hex
-
-        normalized_workflow = comfyui_prompt_preprocessor_service.preprocess(workflow)
-        comfyui_prompt_preprocessor_service.assert_no_windows_model_paths(normalized_workflow)
-
+        normalized_workflow = comfyui_prompt_preprocessor_service.preprocess(
+            workflow
+        )
+        comfyui_prompt_preprocessor_service.assert_no_windows_model_paths(
+            normalized_workflow
+        )
         body: dict[str, Any] = {
             "prompt": normalized_workflow,
             "client_id": resolved_client_id,
