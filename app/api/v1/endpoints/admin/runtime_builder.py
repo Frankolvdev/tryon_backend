@@ -221,6 +221,13 @@ def diagnostic(db: Session = Depends(get_db)):
     return RuntimeBuildExecutionService.diagnostic(db)
 
 
+@router.get("/deployment-providers")
+def deployment_providers(db: Session = Depends(get_db)):
+    return {
+        "items": RuntimeBuildExecutionService.deployment_providers(db),
+    }
+
+
 @router.get("/builds", response_model=RuntimeBuildListResponse)
 def list_builds(
     limit: int = Query(50, ge=1, le=200),
@@ -295,6 +302,39 @@ def cancel(build_id: int, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(item)
     return item
+
+
+
+@router.post("/builds/{build_id}/deployments")
+def create_deployment(
+    build_id: int,
+    payload: dict,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+
+    provider = str(payload.get("provider") or "").strip()
+    if not provider:
+        raise HTTPException(422, "Selecciona un proveedor de despliegue.")
+
+    try:
+        deployment = RuntimeBuildExecutionService.create_deployment(
+            db,
+            item,
+            provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    background_tasks.add_task(
+        RuntimeBuildExecutionService.run_deployment,
+        item.id,
+        deployment["id"],
+    )
+    return deployment
 
 
 
