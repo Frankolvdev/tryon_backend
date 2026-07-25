@@ -378,6 +378,57 @@ except Exception:
     report["nvidia_driver"] = None
 print("[runtime-performance] " + json.dumps(report, ensure_ascii=False, sort_keys=True))
 '''
+        rgthree_lora_path_hotfix = r'''from __future__ import annotations
+
+import py_compile
+import re
+from pathlib import Path
+
+TARGET = Path("/app/ComfyUI/custom_nodes/rgthree-comfy/py/power_prompt_utils.py")
+MARKER = "TRYON HOTFIX: normalize Windows LoRA paths for Linux"
+NORMALIZATION = 'file_path = str(file_path).replace("\\\\", "/")'
+
+
+def main() -> None:
+    if not TARGET.is_file():
+        print("[HOTFIX] rgthree-comfy no está instalado; parche omitido.")
+        return
+
+    source = TARGET.read_text(encoding="utf-8")
+    if MARKER in source or NORMALIZATION in source:
+        print("[HOTFIX] La normalización de rutas de rgthree ya estaba aplicada.")
+        return
+
+    lines = source.splitlines(keepends=True)
+    signature_start = next(
+        (index for index, line in enumerate(lines) if re.match(r"^\s*def\s+get_lora_by_filename\s*\(", line)),
+        None,
+    )
+    if signature_start is None:
+        raise RuntimeError(f"No se encontró get_lora_by_filename en {TARGET}.")
+
+    signature_end = signature_start
+    while signature_end < len(lines) and not lines[signature_end].rstrip().endswith(":"):
+        signature_end += 1
+    if signature_end >= len(lines):
+        raise RuntimeError(f"La firma get_lora_by_filename está incompleta en {TARGET}.")
+
+    function_indent = re.match(r"^(\s*)", lines[signature_start]).group(1)
+    body_indent = function_indent + "    "
+    insertion = (
+        f"{body_indent}# {MARKER}\n"
+        f"{body_indent}{NORMALIZATION}\n"
+    )
+    lines.insert(signature_end + 1, insertion)
+    TARGET.write_text("".join(lines), encoding="utf-8", newline="\n")
+    py_compile.compile(str(TARGET), doraise=True)
+    print("[HOTFIX] Normalización de rutas de LoRA de rgthree aplicada.")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
         startup = f'''#!/usr/bin/env bash
 set -euo pipefail
 
@@ -419,6 +470,7 @@ fi
             "scripts/startup.sh": startup,
             "scripts/healthcheck.py": health,
             "scripts/performance_probe.py": performance_probe,
+            "scripts/apply_runtime_hotfixes.py": rgthree_lora_path_hotfix,
             ".dockerignore": "**/.git\n**/__pycache__\n**/*.pyc\n.venv\nnode_modules\n",
         }
         if generated.get("modal_app"):
@@ -472,6 +524,8 @@ fi
         if nodes:
             lines += [
                 f"COPY custom_nodes/ {comfy_target}/custom_nodes/",
+                "COPY scripts/apply_runtime_hotfixes.py /tmp/apply_runtime_hotfixes.py",
+                "RUN python /tmp/apply_runtime_hotfixes.py && rm -f /tmp/apply_runtime_hotfixes.py",
                 f"RUN find {comfy_target}/custom_nodes -type f -name requirements.txt -print | sort | while IFS= read -r req; do echo '[runtime] Installing' \"$req\"; sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|\\$)/Id\" \"$req\"; python -m pip install --constraint /tmp/runtime-constraints.txt -r \"$req\" || exit 1; done",
                 'RUN set -eu; check_output="$(python -m pip check 2>&1)" && { printf \'%s\\n\' "$check_output"; exit 0; }; check_status=$?; printf \'%s\\n\' "$check_output"; unexpected="$(printf \'%s\\n\' "$check_output" | sed -E \'/^decord 0\\.6\\.0 is not supported on this platform$/d; /^[[:space:]]*$/d\')"; if [ -n "$unexpected" ]; then echo \'[runtime] pip check encontró errores no permitidos.\' >&2; exit "$check_status"; fi; echo \'[runtime] Advertencia conocida ignorada: decord 0.6.0 no declara soporte para esta plataforma.\'',
                 "RUN python -c 'import sys, torch, transformers; assert sys.version_info[:2] == (3, 11); assert torch.version.cuda and torch.version.cuda.startswith(\"12.8\"); assert int(transformers.__version__.split(\".\")[0]) < 5; print(sys.version); print(torch.__version__, torch.version.cuda); print(transformers.__version__)'",
