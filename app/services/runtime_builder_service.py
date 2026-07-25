@@ -278,14 +278,23 @@ class RuntimeBuilderService:
 
     @staticmethod
     def _modal_app(volume_name: str, volume_path: str, runtime_name: str) -> str:
-        # Modal builds directly from the generated Dockerfile. GPU snapshots stay
-        # opt-in because the feature remains experimental and must be benchmarked.
+        # Modal snapshots are intentionally preserved. ComfyUI is started during
+        # the snap=True lifecycle phase, after which Modal captures CPU and GPU
+        # state. On restore, snap=False verifies that the listener survived and
+        # restarts it only when necessary.
         return f'''import os
+import signal
+import socket
+import subprocess
+import time
+
 import modal
 
 APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
 VOLUME_PATH = {json.dumps(volume_path)}
+COMFYUI_PORT = 8188
+STARTUP_TIMEOUT = int(os.getenv("TRYON_MODAL_STARTUP_TIMEOUT", "600"))
 
 GPU = os.getenv("TRYON_MODAL_GPU", "L40S")
 MIN_CONTAINERS = int(os.getenv("TRYON_MODAL_MIN_CONTAINERS", "0"))
@@ -298,7 +307,34 @@ app = modal.App(APP_NAME)
 models_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 image = modal.Image.from_dockerfile("Dockerfile")
 
-@app.function(
+
+def _port_is_ready() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", COMFYUI_PORT), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_until_ready(process: subprocess.Popen, timeout: int = STARTUP_TIMEOUT) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _port_is_ready():
+            print(f"[modal] ComfyUI listo en el puerto {{COMFYUI_PORT}}.", flush=True)
+            return
+        return_code = process.poll()
+        if return_code is not None:
+            raise RuntimeError(
+                f"ComfyUI terminó antes de abrir el puerto {{COMFYUI_PORT}} "
+                f"(código {{return_code}})."
+            )
+        time.sleep(1)
+    raise TimeoutError(
+        f"ComfyUI no abrió el puerto {{COMFYUI_PORT}} en {{timeout}} segundos."
+    )
+
+
+@app.cls(
     image=image,
     gpu=GPU,
     min_containers=MIN_CONTAINERS,
@@ -310,13 +346,58 @@ image = modal.Image.from_dockerfile("Dockerfile")
     experimental_options={{"enable_gpu_snapshot": True}},
 )
 @modal.concurrent(max_inputs=CONCURRENCY)
-@modal.web_server(8188, startup_timeout=600)
-def comfyui():
-    import subprocess
+class ComfyUIServer:
+    def _start_process(self) -> None:
+        env = os.environ.copy()
+        env["RUNTIME_PROVIDER"] = "modal"
+        env["COMFYUI_PORT"] = str(COMFYUI_PORT)
+        self.comfyui_process = subprocess.Popen(
+            ["/app/runtime/scripts/startup.sh"],
+            env=env,
+            start_new_session=True,
+        )
+        _wait_until_ready(self.comfyui_process)
 
-    subprocess.Popen([
-        "/app/runtime/scripts/startup.sh",
-    ])
+    @modal.enter(snap=True)
+    def initialize_for_snapshot(self) -> None:
+        print("[modal] Iniciando ComfyUI antes del snapshot CPU/GPU.", flush=True)
+        self._start_process()
+
+    @modal.enter(snap=False)
+    def restore_after_snapshot(self) -> None:
+        # A restored snapshot normally keeps the subprocess state. The probe
+        # handles platform/runtime changes where the listener must be recreated.
+        if _port_is_ready():
+            print("[modal] ComfyUI restaurado correctamente desde snapshot.", flush=True)
+            return
+
+        process = getattr(self, "comfyui_process", None)
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                process.wait(timeout=15)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
+
+        print("[modal] El listener no sobrevivió al restore; reiniciando ComfyUI.", flush=True)
+        self._start_process()
+
+    @modal.web_server(port=COMFYUI_PORT, startup_timeout=STARTUP_TIMEOUT)
+    def comfyui(self):
+        pass
+
+    @modal.exit()
+    def shutdown(self) -> None:
+        process = getattr(self, "comfyui_process", None)
+        if process is None or process.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            process.wait(timeout=15)
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
 '''
 
     @staticmethod
