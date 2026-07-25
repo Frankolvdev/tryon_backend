@@ -278,16 +278,18 @@ class RuntimeBuilderService:
 
     @staticmethod
     def _modal_app(volume_name: str, volume_path: str, runtime_name: str) -> str:
-        # Modal snapshots are intentionally preserved, but the HTTP listener is
-        # not created before the snapshot. Capturing an already-open ComfyUI
-        # socket can leave Modal's public proxy attached to stale restored state.
-        # The snapshot phase initializes the Python/CUDA runtime only; ComfyUI is
-        # started after restoration and Modal waits until port 8188 is healthy.
+        # Docker Desktop and RunPod keep using scripts/startup.sh unchanged.
+        # Modal starts ComfyUI directly after snapshot restoration so its public
+        # web proxy supervises the real Python server process instead of a Bash
+        # wrapper that launches ComfyUI in the background.
         return f'''import os
+import shlex
 import signal
 import socket
 import subprocess
+import sys
 import time
+from pathlib import Path
 
 import modal
 
@@ -303,6 +305,13 @@ MAX_CONTAINERS = int(os.getenv("TRYON_MODAL_MAX_CONTAINERS", "3"))
 CONCURRENCY = int(os.getenv("TRYON_MODAL_CONCURRENCY", "1"))
 SCALEDOWN_WINDOW = int(os.getenv("TRYON_MODAL_SCALEDOWN_WINDOW", "300"))
 EXECUTION_TIMEOUT = int(os.getenv("TRYON_MODAL_EXECUTION_TIMEOUT", "1800"))
+
+COMFYUI_ROOT = Path("/app/ComfyUI")
+COMFYUI_MAIN = COMFYUI_ROOT / "main.py"
+RUNTIME_ROOT = Path("/app/runtime")
+MODELS_ROOT = Path(os.getenv("MODELS_ROOT", VOLUME_PATH))
+WORKFLOWS_ROOT = Path(os.getenv("WORKFLOWS_ROOT", "/workflows"))
+COMFY_USER_ROOT = Path(os.getenv("COMFY_USER_ROOT", str(WORKFLOWS_ROOT)))
 
 app = modal.App(APP_NAME)
 models_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -335,6 +344,31 @@ def _wait_until_ready(process: subprocess.Popen, timeout: int = STARTUP_TIMEOUT)
     )
 
 
+def _prepare_runtime_directories() -> None:
+    (COMFYUI_ROOT / "models").mkdir(parents=True, exist_ok=True)
+    (COMFY_USER_ROOT / "default" / "workflows").mkdir(parents=True, exist_ok=True)
+    print(f"[runtime] Modelos externos registrados desde: {{MODELS_ROOT}}", flush=True)
+    print(
+        f"[runtime] Workflows persistentes registrados en: "
+        f"{{COMFY_USER_ROOT / 'default' / 'workflows'}}",
+        flush=True,
+    )
+
+
+def _run_performance_probe(env: dict[str, str]) -> None:
+    probe = RUNTIME_ROOT / "scripts" / "performance_probe.py"
+    if not probe.is_file():
+        return
+    try:
+        subprocess.run(
+            [sys.executable, str(probe)],
+            env=env,
+            check=False,
+        )
+    except OSError as exc:
+        print(f"[modal] No se pudo ejecutar performance_probe.py: {{exc}}", flush=True)
+
+
 @app.cls(
     image=image,
     gpu=GPU,
@@ -349,11 +383,35 @@ def _wait_until_ready(process: subprocess.Popen, timeout: int = STARTUP_TIMEOUT)
 @modal.concurrent(max_inputs=CONCURRENCY)
 class ComfyUIServer:
     def _start_process(self) -> None:
+        if not COMFYUI_MAIN.is_file():
+            raise RuntimeError(f"No se encontró ComfyUI en {{COMFYUI_MAIN}}.")
+
         env = os.environ.copy()
         env["RUNTIME_PROVIDER"] = "modal"
         env["COMFYUI_PORT"] = str(COMFYUI_PORT)
+        env["MODELS_ROOT"] = str(MODELS_ROOT)
+        env["WORKFLOWS_ROOT"] = str(WORKFLOWS_ROOT)
+        env["COMFY_USER_ROOT"] = str(COMFY_USER_ROOT)
+
+        _prepare_runtime_directories()
+        _run_performance_probe(env)
+
+        extra_args = shlex.split(env.get("COMFYUI_EXTRA_ARGS", ""))
+        command = [
+            sys.executable,
+            str(COMFYUI_MAIN),
+            "--listen",
+            "0.0.0.0",
+            "--port",
+            str(COMFYUI_PORT),
+            "--user-directory",
+            str(COMFY_USER_ROOT),
+            *extra_args,
+        ]
+        print(f"[modal] Iniciando ComfyUI directamente: {{shlex.join(command)}}", flush=True)
         self.comfyui_process = subprocess.Popen(
-            ["/app/runtime/scripts/startup.sh"],
+            command,
+            cwd=str(COMFYUI_ROOT),
             env=env,
             start_new_session=True,
         )
@@ -361,8 +419,6 @@ class ComfyUIServer:
 
     @modal.enter(snap=True)
     def initialize_for_snapshot(self) -> None:
-        # Preserve Modal CPU/GPU snapshots without snapshotting an open HTTP
-        # listener. ComfyUI itself is started only after the snapshot restore.
         os.environ["RUNTIME_PROVIDER"] = "modal"
         os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
         print("[modal] Preparando runtime CPU/GPU para snapshot, sin abrir el puerto.", flush=True)
@@ -376,18 +432,14 @@ class ComfyUIServer:
                     flush=True,
                 )
         except Exception as exc:
-            # Snapshotting remains enabled even if eager CUDA initialization is
-            # unavailable; ComfyUI will initialize CUDA during normal startup.
             print(f"[modal] Preparación CUDA diferida: {{exc}}", flush=True)
 
     @modal.enter(snap=False)
     def restore_after_snapshot(self) -> None:
-        # Start a fresh listener after restoration. This avoids restoring stale
-        # sockets/process state while retaining Modal's memory snapshot support.
         if _port_is_ready():
             print("[modal] El puerto ya estaba disponible después del restore.", flush=True)
             return
-        print("[modal] Snapshot restaurado; iniciando ComfyUI en puerto 8188.", flush=True)
+        print("[modal] Snapshot restaurado; iniciando ComfyUI directamente.", flush=True)
         self._start_process()
 
     @modal.web_server(port=COMFYUI_PORT, startup_timeout=STARTUP_TIMEOUT)
