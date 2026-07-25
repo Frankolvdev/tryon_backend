@@ -311,7 +311,8 @@ class RuntimeBuildExecutionService:
             if not cfg.volume_name: missing.append("Volume Name")
             if not engine.modal_gpu: missing.append("GPU")
             if engine.modal_max_containers < engine.modal_min_containers: missing.append("rango de contenedores")
-            if engine.modal_concurrency < 1: missing.append("concurrencia")
+            if engine.modal_concurrency < 1: missing.append("workflows simultáneos por GPU")
+            if engine.modal_input_concurrency < 1: missing.append("conexiones HTTP/WebSocket por contenedor")
             if missing:
                 raise ValueError("Completa Configuración Modal y Configuración del proveedor antes del deploy: " + ", ".join(missing) + ".")
             RuntimeBuildExecutionService._update_deployment(
@@ -341,6 +342,7 @@ class RuntimeBuildExecutionService:
                     "TRYON_MODAL_MIN_CONTAINERS": str(engine.modal_min_containers),
                     "TRYON_MODAL_MAX_CONTAINERS": str(engine.modal_max_containers),
                     "TRYON_MODAL_CONCURRENCY": str(engine.modal_concurrency),
+                    "TRYON_MODAL_INPUT_CONCURRENCY": str(engine.modal_input_concurrency),
                     "TRYON_MODAL_SCALEDOWN_WINDOW": str(engine.modal_scaledown_window_seconds),
                     "TRYON_MODAL_EXECUTION_TIMEOUT": str(engine.modal_execution_timeout_seconds),
                 },

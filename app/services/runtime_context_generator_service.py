@@ -381,6 +381,14 @@ print("[runtime-performance] " + json.dumps(report, ensure_ascii=False, sort_key
         startup = f'''#!/usr/bin/env bash
 set -euo pipefail
 
+# Compatibilidad con runtimes que pasan un comando explícito al ENTRYPOINT.
+# Docker Desktop y RunPod, al arrancar sin argumentos, conservan el flujo
+# tradicional definido debajo.
+if [ "$#" -gt 0 ]; then
+  echo "[runtime] Delegando el proceso solicitado: $*"
+  exec "$@"
+fi
+
 MODELS_ROOT="${{MODELS_ROOT:-/models}}"
 WORKFLOWS_ROOT="${{WORKFLOWS_ROOT:-/workflows}}"
 COMFY_USER_ROOT="${{COMFY_USER_ROOT:-$WORKFLOWS_ROOT}}"
@@ -423,6 +431,14 @@ fi
         }
         if generated.get("modal_app"):
             files["modal_app.py"] = generated["modal_app"]
+            # Modal debe construir una imagen sin el ENTRYPOINT de Docker/RunPod.
+            # De lo contrario startup.sh arranca ComfyUI antes de que el runtime
+            # de modal_app.py pueda controlar el lifecycle y publicar web_server.
+            files["Dockerfile.modal"] = RuntimeContextGeneratorService._modal_dockerfile(
+                config,
+                payload.copy_models,
+                payload.copy_custom_nodes,
+            )
         if generated.get("extra_model_paths"):
             files["extra_model_paths.yaml"] = generated["extra_model_paths"]
 
@@ -445,6 +461,22 @@ fi
             "warnings": warnings,
             "manifest": manifest,
         }
+
+    @staticmethod
+    def _modal_dockerfile(config: RuntimeBuilderConfig, models: bool, nodes: bool) -> str:
+        """Genera la imagen de Modal sin ENTRYPOINT ni HEALTHCHECK de Docker.
+
+        Modal inyecta y supervisa su propio proceso para ejecutar modal_app.py.
+        El Dockerfile normal se conserva intacto para Docker Desktop y RunPod.
+        """
+        dockerfile = RuntimeContextGeneratorService._dockerfile(config, models, nodes)
+        excluded_prefixes = ("ENTRYPOINT ", "CMD ", "HEALTHCHECK ")
+        lines = [
+            line
+            for line in dockerfile.splitlines()
+            if not line.lstrip().startswith(excluded_prefixes)
+        ]
+        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _dockerfile(config: RuntimeBuilderConfig, models: bool, nodes: bool) -> str:

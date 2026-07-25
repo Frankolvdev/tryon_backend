@@ -113,7 +113,7 @@ class AiProviderOrchestrationService:
         config = InfrastructureProviderService.get_modal(db)
         engine = ai_engine_settings_service.get(db)
         provider_ready = bool(config.enabled and config.token_id and config.token_secret and config.app_name and config.volume_name)
-        engine_ready = bool(engine.modal_gpu and engine.modal_max_containers >= engine.modal_min_containers and engine.modal_concurrency >= 1)
+        engine_ready = bool(engine.modal_gpu and engine.modal_max_containers >= engine.modal_min_containers and engine.modal_concurrency >= 1 and engine.modal_input_concurrency >= 1)
         available = provider_ready and engine_ready
         return {
             "provider": "modal", "enabled": bool(config.enabled), "configured": provider_ready, "available": available,

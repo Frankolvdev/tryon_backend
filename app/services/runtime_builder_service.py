@@ -302,7 +302,8 @@ STARTUP_TIMEOUT = int(os.getenv("TRYON_MODAL_STARTUP_TIMEOUT", "600"))
 GPU = os.getenv("TRYON_MODAL_GPU", "L40S")
 MIN_CONTAINERS = int(os.getenv("TRYON_MODAL_MIN_CONTAINERS", "0"))
 MAX_CONTAINERS = int(os.getenv("TRYON_MODAL_MAX_CONTAINERS", "3"))
-CONCURRENCY = int(os.getenv("TRYON_MODAL_CONCURRENCY", "1"))
+GENERATION_CONCURRENCY = int(os.getenv("TRYON_MODAL_CONCURRENCY", "1"))
+INPUT_CONCURRENCY = int(os.getenv("TRYON_MODAL_INPUT_CONCURRENCY", "1000"))
 SCALEDOWN_WINDOW = int(os.getenv("TRYON_MODAL_SCALEDOWN_WINDOW", "300"))
 EXECUTION_TIMEOUT = int(os.getenv("TRYON_MODAL_EXECUTION_TIMEOUT", "1800"))
 
@@ -380,7 +381,7 @@ def _run_performance_probe(env: dict[str, str]) -> None:
     enable_memory_snapshot=True,
     experimental_options={{"enable_gpu_snapshot": True}},
 )
-@modal.concurrent(max_inputs=CONCURRENCY)
+@modal.concurrent(max_inputs=INPUT_CONCURRENCY)
 class ComfyUIServer:
     def _start_process(self) -> None:
         if not COMFYUI_MAIN.is_file():

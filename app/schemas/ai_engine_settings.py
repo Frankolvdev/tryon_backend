@@ -20,6 +20,7 @@ class AiEngineSettingsUpdate(BaseModel):
     modal_min_containers: int = Field(default=0, ge=0, le=100)
     modal_max_containers: int = Field(default=3, ge=1, le=100)
     modal_concurrency: int = Field(default=1, ge=1, le=16)
+    modal_input_concurrency: int = Field(default=1000, ge=1, le=1000)
     modal_scaledown_window_seconds: int = Field(default=300, ge=60, le=3600)
     modal_execution_timeout_seconds: int = Field(default=1800, ge=60, le=86400)
 
