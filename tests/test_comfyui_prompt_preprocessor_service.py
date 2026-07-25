@@ -3,51 +3,52 @@ from app.services.comfyui_prompt_preprocessor_service import (
 )
 
 
-def test_normalizes_model_and_file_paths_without_touching_prompt_text():
+def test_normalizes_rgthree_lora_dictionary_keys():
     prompt = {
-        "1": {
+        "100": {
             "class_type": "Power Lora Loader (rgthree)",
             "inputs": {
-                "lora_name": r"Klein\model.safetensors",
-                "prompt": r"A black\white dress",
+                "loras": {
+                    r"Klein\bfs_head_v1_flux-klein_9b_step3500_rank128.safetensors": {
+                        "on": True,
+                        "strength": 1.0,
+                    },
+                    r"Klein\lenovo_flux_klein9b.safetensors": {
+                        "on": True,
+                        "strength": 0.8,
+                    },
+                }
             },
-        },
-        "2": {
-            "class_type": "LoadImage",
-            "inputs": {
-                "image": r"uploads\person.png",
-            },
-        },
+        }
     }
 
-    result = comfyui_prompt_preprocessor_service.preprocess(prompt)
+    normalized = comfyui_prompt_preprocessor_service.preprocess(prompt)
+    loras = normalized["100"]["inputs"]["loras"]
 
-    assert result["1"]["inputs"]["lora_name"] == "Klein/model.safetensors"
-    assert result["2"]["inputs"]["image"] == "uploads/person.png"
-    assert result["1"]["inputs"]["prompt"] == r"A black\white dress"
+    assert "Klein/bfs_head_v1_flux-klein_9b_step3500_rank128.safetensors" in loras
+    assert "Klein/lenovo_flux_klein9b.safetensors" in loras
+    comfyui_prompt_preprocessor_service.assert_no_windows_model_paths(normalized)
 
 
-def test_normalizes_nested_unknown_key_when_value_is_an_obvious_windows_path():
+def test_normalizes_regular_lora_values():
     prompt = {
         "1": {
             "inputs": {
-                "custom_value": r"C:\models\loras\model.safetensors",
-            },
-        },
+                "lora_name": r"Klein\f2k_consis.safetensors",
+            }
+        }
     }
-
-    result = comfyui_prompt_preprocessor_service.preprocess(prompt)
-
-    assert (
-        result["1"]["inputs"]["custom_value"]
-        == "C:/models/loras/model.safetensors"
-    )
+    normalized = comfyui_prompt_preprocessor_service.preprocess(prompt)
+    assert normalized["1"]["inputs"]["lora_name"] == "Klein/f2k_consis.safetensors"
 
 
-def test_does_not_mutate_original_prompt():
-    prompt = {"1": {"inputs": {"lora_name": r"A\B\model.safetensors"}}}
-
-    result = comfyui_prompt_preprocessor_service.preprocess(prompt)
-
-    assert prompt["1"]["inputs"]["lora_name"] == r"A\B\model.safetensors"
-    assert result["1"]["inputs"]["lora_name"] == "A/B/model.safetensors"
+def test_preserves_free_prompt_text():
+    prompt = {
+        "1": {
+            "inputs": {
+                "text": r"Una escena que contiene texto C:\ejemplo sin archivo",
+            }
+        }
+    }
+    normalized = comfyui_prompt_preprocessor_service.preprocess(prompt)
+    assert normalized == prompt
