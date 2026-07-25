@@ -4,6 +4,7 @@ import time
 from typing import Any, Callable
 
 import httpx
+from fastapi.encoders import jsonable_encoder
 
 from app.common.exceptions import AppException
 from app.schemas.infrastructure_provider import ModalProviderConfig
@@ -43,7 +44,11 @@ class ModalPipelineAdapterService:
                 timeout=httpx.Timeout(connect=60.0, read=float(timeout_seconds), write=300.0, pool=60.0),
                 follow_redirects=True,
             ) as client:
-                response = client.post(self._endpoint(config), json=payload, headers=headers)
+                response = client.post(
+                    self._endpoint(config),
+                    json=jsonable_encoder(payload),
+                    headers=headers,
+                )
         except httpx.TimeoutException as exc:
             raise TimeoutError(f"Modal pipeline exceeded {timeout_seconds} seconds.") from exc
         except httpx.HTTPError as exc:
