@@ -118,11 +118,6 @@ class RuntimeBuildCreate(BaseModel):
     push_after_build: bool = False
 
 
-
-
-class RuntimeBuildDeployRequest(BaseModel):
-    provider: Literal["modal"] = "modal"
-
 class RuntimeBuildBulkRequest(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=200)
 
@@ -130,6 +125,39 @@ class RuntimeBuildBulkRequest(BaseModel):
 class RuntimeBuildBulkResponse(BaseModel):
     affected_ids: list[int] = Field(default_factory=list)
     skipped_ids: list[int] = Field(default_factory=list)
+
+
+class RuntimeDeploymentCreate(BaseModel):
+    provider: Literal["modal"]
+
+
+class RuntimeDeploymentResponse(BaseModel):
+    id: str
+    build_id: int
+    provider: str
+    status: Literal["queued", "running", "deployed", "failed"]
+    phase: str
+    progress: int
+    message: str
+    logs: str
+    error: str | None = None
+    app_name: str | None = None
+    image_tag: str | None = None
+    volume_name: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class RuntimeDeploymentProvider(BaseModel):
+    key: str
+    label: str
+    enabled: bool
+    configured: bool
+
+
+class RuntimeDeploymentProviderList(BaseModel):
+    items: list[RuntimeDeploymentProvider]
 
 
 class RuntimeBuildResponse(BaseModel):

@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, threading
+import json, os, shutil, subprocess, threading, uuid
 from pathlib import Path
 from app.common.time import utc_now
 from app.db.database import SessionLocal
@@ -196,20 +196,163 @@ class RuntimeBuildExecutionService:
 
 
     @staticmethod
-    def _deployment_state(build, provider: str, **values):
-        manifest = dict(build.manifest or {})
-        deployments = dict(manifest.get("deployments") or {})
-        current = dict(deployments.get(provider) or {})
-        current.update(values)
-        deployments[provider] = current
-        manifest["deployments"] = deployments
-        build.manifest = manifest
+    def deployment_providers(db):
+        from app.services.infrastructure_provider_service import InfrastructureProviderService
+        modal = InfrastructureProviderService.get_modal(db)
+        return [{
+            "key": "modal",
+            "label": "Modal",
+            "enabled": bool(modal.enabled),
+            "configured": bool(modal.token_id and modal.token_secret),
+        }]
 
     @staticmethod
-    def deploy(build_id: int, provider: str):
-        if provider != "modal":
-            raise ValueError(f"Proveedor de despliegue no soportado: {provider}")
-        RuntimeBuildExecutionService.publish_modal(build_id)
+    def _deployment_store(build):
+        manifest = dict(build.manifest or {})
+        deployments = dict(manifest.get("deployments") or {})
+        return manifest, deployments
+
+    @staticmethod
+    def get_deployment(build, deployment_id):
+        _, deployments = RuntimeBuildExecutionService._deployment_store(build)
+        item = deployments.get(deployment_id)
+        return dict(item) if item else None
+
+    @staticmethod
+    def _save_deployment(db, build, deployment):
+        manifest, deployments = RuntimeBuildExecutionService._deployment_store(build)
+        deployments[deployment["id"]] = dict(deployment)
+        manifest["deployments"] = deployments
+        manifest["latest_deployment_id"] = deployment["id"]
+        build.manifest = manifest
+        db.add(build)
+        db.commit()
+        db.refresh(build)
+        return deployment
+
+    @staticmethod
+    def create_deployment(db, build, provider):
+        if build.status not in {"succeeded", "published", "active"}:
+            raise ValueError("La compilación debe finalizar correctamente antes de desplegarse.")
+        providers = {item["key"]: item for item in RuntimeBuildExecutionService.deployment_providers(db)}
+        selected = providers.get(provider)
+        if not selected:
+            raise ValueError("El proveedor seleccionado no está soportado.")
+        if not selected["enabled"] or not selected["configured"]:
+            raise ValueError(f"Configura y activa {selected['label']} en Proveedores de infraestructura.")
+        now = utc_now().isoformat()
+        deployment = {
+            "id": uuid.uuid4().hex,
+            "build_id": build.id,
+            "provider": provider,
+            "status": "queued",
+            "phase": "queued",
+            "progress": 0,
+            "message": "Despliegue en cola.",
+            "logs": "[deploy:0/6] Despliegue creado.\n",
+            "error": None,
+            "app_name": None,
+            "image_tag": build.image_tag,
+            "volume_name": None,
+            "created_at": now,
+            "started_at": None,
+            "finished_at": None,
+        }
+        return RuntimeBuildExecutionService._save_deployment(db, build, deployment)
+
+    @staticmethod
+    def _update_deployment(db, build, deployment, *, status=None, phase=None, progress=None, message=None, log=None, error=None, **extra):
+        if status is not None:
+            deployment["status"] = status
+        if phase is not None:
+            deployment["phase"] = phase
+        if progress is not None:
+            deployment["progress"] = progress
+        if message is not None:
+            deployment["message"] = message
+        if error is not None:
+            deployment["error"] = error
+        if log:
+            deployment["logs"] = (deployment.get("logs") or "") + log.rstrip() + "\n"
+        deployment.update(extra)
+        RuntimeBuildExecutionService._save_deployment(db, build, deployment)
+
+    @staticmethod
+    def run_deployment(build_id, deployment_id):
+        from app.services.infrastructure_provider_service import InfrastructureProviderService
+        db = SessionLocal()
+        try:
+            build = db.get(RuntimeBuilderBuild, build_id)
+            if not build:
+                return
+            deployment = RuntimeBuildExecutionService.get_deployment(build, deployment_id)
+            if not deployment:
+                return
+            deployment["started_at"] = utc_now().isoformat()
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment, status="running", phase="validating-provider", progress=8,
+                message="Validando proveedor.", log="[deploy:1/6] Validando proveedor seleccionado.",
+            )
+            if deployment["provider"] != "modal":
+                raise ValueError("El proveedor seleccionado todavía no tiene adaptador de despliegue.")
+            cfg = InfrastructureProviderService.get_modal(db)
+            if not cfg.enabled or not cfg.token_id or not cfg.token_secret:
+                raise ValueError("Activa y configura Modal en Proveedores de infraestructura.")
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment, phase="validating-credentials", progress=20,
+                message="Validando credenciales.", log="[deploy:2/6] Credenciales y configuración de Modal validadas.",
+                app_name=cfg.app_name, volume_name=cfg.volume_name,
+            )
+            executable = shutil.which("modal")
+            if not executable:
+                raise ValueError("Modal CLI no está instalado en el backend. Ejecuta: pip install modal")
+            context = Path(build.context_path or "").expanduser().resolve()
+            app_file = context / "modal_app.py"
+            if not app_file.is_file():
+                raise ValueError("La compilación no contiene modal_app.py. Regenera el runtime antes de desplegar.")
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment, phase="preparing-runtime", progress=35,
+                message="Preparando compilación.", log=f"[deploy:3/6] Contexto validado: {context}",
+            )
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment, phase="publishing-image", progress=48,
+                message="Publicando imagen y aplicación en Modal.", log=f"[deploy:4/6] Ejecutando modal deploy para {cfg.app_name}.",
+            )
+            proc = subprocess.Popen(
+                [executable, "deploy", str(app_file)], cwd=str(context),
+                env=InfrastructureProviderService._modal_env(cfg),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            )
+            progress = 48
+            for line in proc.stdout or []:
+                progress = min(85, progress + 2)
+                RuntimeBuildExecutionService._update_deployment(
+                    db, build, deployment, progress=progress,
+                    message="Modal está procesando el despliegue.", log=f"[modal] {line.rstrip()}",
+                )
+            if proc.wait() != 0:
+                raise RuntimeError("modal deploy terminó con error.")
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment, phase="verifying-deployment", progress=92,
+                message="Verificando despliegue.", log="[deploy:5/6] Modal aceptó el despliegue; verificando resultado.",
+            )
+            deployment["finished_at"] = utc_now().isoformat()
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment, status="deployed", phase="completed", progress=100,
+                message="Despliegue completado.", log="[deploy:6/6] Despliegue completado correctamente.",
+            )
+        except Exception as exc:
+            build = db.get(RuntimeBuilderBuild, build_id)
+            if build:
+                deployment = RuntimeBuildExecutionService.get_deployment(build, deployment_id)
+                if deployment:
+                    deployment["finished_at"] = utc_now().isoformat()
+                    RuntimeBuildExecutionService._update_deployment(
+                        db, build, deployment, status="failed", phase="failed",
+                        message="El despliegue falló.", log=f"[deploy:error] {exc}", error=str(exc),
+                    )
+        finally:
+            db.close()
 
     @staticmethod
     def publish_modal(build_id):
@@ -218,60 +361,39 @@ class RuntimeBuildExecutionService:
         try:
             build=db.get(RuntimeBuilderBuild,build_id)
             if not build or build.status not in {'succeeded','published','active'}:
-                raise ValueError('El build debe finalizar correctamente antes de desplegarlo en Modal.')
-            previous_status = build.status
-            RuntimeBuildExecutionService._deployment_state(
-                build, 'modal', status='preparing', provider='modal', image_tag=build.image_tag,
-                started_at=utc_now().isoformat(), finished_at=None, error=None, app_name=None,
-            )
-            build.status='publishing'; build.phase='modal-preparing'; build.progress=92
-            RuntimeBuildExecutionService._append(db,build,'[modal:1/5] Preparando despliegue de la compilación seleccionada…','modal-preparing',92)
-
+                raise ValueError('El build debe finalizar correctamente antes de subirlo a Modal.')
             cfg=InfrastructureProviderService.get_modal(db)
             if not cfg.enabled or not cfg.token_id or not cfg.token_secret:
                 raise ValueError('Activa y configura Modal en Proveedores de infraestructura.')
-            RuntimeBuildExecutionService._deployment_state(build,'modal',status='validating',app_name=cfg.app_name,volume_name=cfg.volume_name)
-            RuntimeBuildExecutionService._append(db,build,'[modal:2/5] Credenciales y configuración validadas.','modal-validating',94)
-
             executable=shutil.which('modal')
             if not executable:
                 raise ValueError('Modal CLI no está instalado en el backend. Ejecuta: pip install modal')
             context=Path(build.context_path or '').expanduser().resolve()
             app_file=context/'modal_app.py'
-            dockerfile=context/'Dockerfile'
-            if not context.is_dir() or not app_file.is_file() or not dockerfile.is_file():
-                raise ValueError('La compilación seleccionada no contiene un contexto Modal válido. Vuelve a exportar el runtime y recompila.')
-            RuntimeBuildExecutionService._deployment_state(build,'modal',status='deploying',context_path=str(context))
-            RuntimeBuildExecutionService._append(db,build,f'[modal:3/5] Contexto validado: {context}','modal-context',95)
-            RuntimeBuildExecutionService._append(db,build,f'[modal:4/5] Ejecutando modal deploy para {cfg.app_name}…','modal-deploying',96)
-
+            if not app_file.is_file():
+                raise ValueError('La compilación seleccionada no contiene modal_app.py. Vuelve a generar el runtime con soporte Modal.')
+            build.status='publishing'
+            RuntimeBuildExecutionService._append(db,build,f'[modal] Publicando compilación {build.image_tag} desde {context}...','publishing',95)
             proc=subprocess.Popen(
                 [executable,'deploy',str(app_file)],
                 cwd=str(context),
                 env=InfrastructureProviderService._modal_env(cfg),
                 stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,
             )
-            output_lines=[]
             for line in proc.stdout or []:
-                clean=line.rstrip()
-                output_lines.append(clean)
-                RuntimeBuildExecutionService._append(db,build,f'[modal] {clean}','modal-deploying',98)
+                RuntimeBuildExecutionService._append(db,build,f'[modal] {line.rstrip()}','publishing',98)
             if proc.wait()!=0:
                 raise RuntimeError('modal deploy terminó con error.')
-
-            build.status = previous_status if previous_status in {'published','active'} else 'succeeded'
-            build.phase='modal-deployed'; build.progress=100; build.error_message=None
-            RuntimeBuildExecutionService._deployment_state(
-                build,'modal',status='deployed',app_name=cfg.app_name,volume_name=cfg.volume_name,
-                finished_at=utc_now().isoformat(),last_output='\n'.join(output_lines[-30:]),error=None,
-            )
-            RuntimeBuildExecutionService._append(db,build,f'[modal:5/5] Despliegue completado en la app {cfg.app_name}.','modal-deployed',100)
+            build.published=True
+            build.status='published'
+            build.phase='modal-published'
+            build.progress=100
+            RuntimeBuildExecutionService._append(db,build,f'[modal] Compilación publicada en la app {cfg.app_name}.')
         except Exception as exc:
             build=db.get(RuntimeBuilderBuild,build_id)
             if build:
-                build.status='failed'; build.phase='modal-failed'; build.error_message=str(exc)
-                RuntimeBuildExecutionService._deployment_state(build,'modal',status='failed',finished_at=utc_now().isoformat(),error=str(exc))
-                RuntimeBuildExecutionService._append(db,build,f'[modal:error] {exc}','modal-failed',100)
+                build.status='failed'; build.phase='failed'; build.error_message=str(exc)
+                RuntimeBuildExecutionService._append(db,build,f'[modal:error] {exc}')
         finally:
             db.close()
 

@@ -10,11 +10,13 @@ from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_project import RuntimeProject
 from app.schemas.runtime_builder import (
     RuntimeBuildCreate,
-    RuntimeBuildDeployRequest,
     RuntimeBuildListResponse,
     RuntimeBuildResponse,
     RuntimeBuildBulkRequest,
     RuntimeBuildBulkResponse,
+    RuntimeDeploymentCreate,
+    RuntimeDeploymentProviderList,
+    RuntimeDeploymentResponse,
     RuntimeBuilderConfigResponse,
     RuntimeBuilderConfigUpdate,
     RuntimeContextGenerateRequest,
@@ -273,34 +275,59 @@ def publish(
     return item
 
 
-@router.post("/builds/{build_id}/deploy", response_model=RuntimeBuildResponse)
-def deploy_build(
-    build_id: int,
-    payload: RuntimeBuildDeployRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    item = db.get(RuntimeBuilderBuild, build_id)
-    if not item:
-        raise HTTPException(404, "Build no encontrado.")
-    if item.status not in {"succeeded", "published", "active"}:
-        raise HTTPException(422, "La compilación debe finalizar correctamente antes de desplegarse.")
-    background_tasks.add_task(RuntimeBuildExecutionService.deploy, item.id, payload.provider)
-    return item
-
-
 @router.post("/builds/{build_id}/publish-modal", response_model=RuntimeBuildResponse)
-def publish_modal_compat(
+def publish_modal(
     build_id: int,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """Compatibilidad con el botón anterior; delega al proceso unificado."""
     item = db.get(RuntimeBuilderBuild, build_id)
     if not item:
         raise HTTPException(404, "Build no encontrado.")
-    background_tasks.add_task(RuntimeBuildExecutionService.deploy, item.id, "modal")
+    background_tasks.add_task(RuntimeBuildExecutionService.publish_modal, item.id)
     return item
+
+
+@router.get("/deployment-providers", response_model=RuntimeDeploymentProviderList)
+def deployment_providers(db: Session = Depends(get_db)):
+    return {"items": RuntimeBuildExecutionService.deployment_providers(db)}
+
+
+@router.post("/builds/{build_id}/deployments", response_model=RuntimeDeploymentResponse)
+def create_deployment(
+    build_id: int,
+    payload: RuntimeDeploymentCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+    try:
+        deployment = RuntimeBuildExecutionService.create_deployment(db, item, payload.provider)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    background_tasks.add_task(
+        RuntimeBuildExecutionService.run_deployment,
+        item.id,
+        deployment["id"],
+    )
+    return deployment
+
+
+@router.get("/builds/{build_id}/deployments/{deployment_id}", response_model=RuntimeDeploymentResponse)
+def read_deployment(
+    build_id: int,
+    deployment_id: str,
+    db: Session = Depends(get_db),
+):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+    deployment = RuntimeBuildExecutionService.get_deployment(item, deployment_id)
+    if not deployment:
+        raise HTTPException(404, "Despliegue no encontrado.")
+    return deployment
 
 
 @router.post("/builds/{build_id}/activate", response_model=RuntimeBuildResponse)
