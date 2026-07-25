@@ -315,7 +315,7 @@ MODELS_ROOT = Path(os.getenv("MODELS_ROOT", VOLUME_PATH))
 COMFY_USER_ROOT = Path(os.getenv("COMFY_USER_ROOT", "/tmp/comfyui-user"))
 COMFY_DATABASE_URL = os.getenv(
     "COMFY_DATABASE_URL",
-    f"sqlite:///{COMFY_USER_ROOT / 'comfyui.db'}",
+    f"sqlite:///{{COMFY_USER_ROOT / 'comfyui.db'}}",
 )
 
 app = modal.App(APP_NAME)
