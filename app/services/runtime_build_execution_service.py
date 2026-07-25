@@ -132,8 +132,8 @@ class RuntimeBuildExecutionService:
         db.add(build); db.commit(); db.refresh(build); return build
 
     @staticmethod
-    def start(build_id:int, push_after_build=False):
-        threading.Thread(target=RuntimeBuildExecutionService._run,args=(build_id,push_after_build),daemon=True).start()
+    def start(build_id:int, push_after_build=False, no_cache=False):
+        threading.Thread(target=RuntimeBuildExecutionService._run,args=(build_id,push_after_build,no_cache),daemon=True).start()
 
     @staticmethod
     def _append(db, build, line, phase=None, progress=None):
@@ -143,7 +143,7 @@ class RuntimeBuildExecutionService:
         db.add(build); db.commit()
 
     @staticmethod
-    def _run(build_id, push_after_build):
+    def _run(build_id, push_after_build, no_cache=False):
         db=SessionLocal()
         try:
             build=db.get(RuntimeBuilderBuild,build_id); cfg=db.get(RuntimeBuilderConfig,build.runtime_config_id)
@@ -157,7 +157,11 @@ class RuntimeBuildExecutionService:
                 raise RuntimeError(str(exc)) from exc
             build.context_path=str(ctx)
             RuntimeBuildExecutionService._append(db,build,f"[runtime-builder] Usando exportación persistida: {ctx}","building",12)
-            cmd=['docker','build','--platform',cfg.target_platform,'-t',build.image_tag,'-f',str(ctx/'Dockerfile'),str(ctx)]
+            cmd=['docker','build']
+            if no_cache:
+                cmd.append('--no-cache')
+                RuntimeBuildExecutionService._append(db,build,'[runtime-builder] Recompilación limpia solicitada: Docker build sin caché.','building',14)
+            cmd += ['--platform',cfg.target_platform,'-t',build.image_tag,'-f',str(ctx/'Dockerfile'),str(ctx)]
             proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
             for line in proc.stdout or []:
                 db.refresh(build)
@@ -177,6 +181,29 @@ class RuntimeBuildExecutionService:
             build=db.get(RuntimeBuilderBuild,build_id)
             if build and build.status!='cancelled': build.status='failed'; build.phase='failed'; build.error_message=str(exc); build.finished_at=utc_now(); RuntimeBuildExecutionService._append(db,build,f"[error] {exc}")
         finally: db.close()
+
+    @staticmethod
+    def clear_build_cache(db, build):
+        try:
+            result = subprocess.run(
+                ["docker", "builder", "prune", "--all", "--force"],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+            )
+        except FileNotFoundError as exc:
+            raise ValueError("Docker no está disponible en el host del backend.") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("La limpieza de caché excedió el tiempo permitido.") from exc
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        if result.returncode != 0:
+            raise ValueError(output or "Docker no pudo limpiar la caché de compilación.")
+        RuntimeBuildExecutionService._append(
+            db,
+            build,
+            "[runtime-builder] Caché global de Docker BuildKit eliminada. La imagen final, los volúmenes, modelos y workflows se conservaron.",
+        )
+        return {"success": True, "message": output or "Caché de compilación eliminada."}
 
     @staticmethod
     def publish(build_id):

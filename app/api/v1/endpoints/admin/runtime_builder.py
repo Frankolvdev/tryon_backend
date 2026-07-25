@@ -240,13 +240,14 @@ def create_build(
     db: Session = Depends(get_db),
 ):
     try:
-        build = RuntimeBuildExecutionService.create(db, get_or_create(db))
+        build = RuntimeBuildExecutionService.create(db, get_or_create(db), payload.context_directory)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     background_tasks.add_task(
         RuntimeBuildExecutionService.start,
         build.id,
         payload.push_after_build,
+        payload.no_cache,
     )
     return build
 
@@ -284,6 +285,21 @@ def publish_modal(
     background_tasks.add_task(RuntimeBuildExecutionService.publish_modal, item.id)
     return item
 
+
+
+
+@router.post("/builds/{build_id}/clear-cache")
+def clear_build_cache(build_id: int, db: Session = Depends(get_db)):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+    if item.status in {"building", "pending", "validating", "publishing"}:
+        raise HTTPException(409, "No se puede limpiar la caché mientras la compilación está activa.")
+    try:
+        result = RuntimeBuildExecutionService.clear_build_cache(db, item)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return result
 
 @router.post("/builds/{build_id}/activate", response_model=RuntimeBuildResponse)
 def activate(build_id: int, db: Session = Depends(get_db)):

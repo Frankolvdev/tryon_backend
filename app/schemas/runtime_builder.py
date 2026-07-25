@@ -116,6 +116,8 @@ class RuntimeGeneratedFilesResponse(BaseModel):
 
 class RuntimeBuildCreate(BaseModel):
     push_after_build: bool = False
+    context_directory: str | None = None
+    no_cache: bool = False
 
 
 class RuntimeBuildBulkRequest(BaseModel):
