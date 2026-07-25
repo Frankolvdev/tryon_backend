@@ -679,6 +679,17 @@ class ComfyUIServer:
         health_port = 8188
         entrypoint = f"""#!/usr/bin/env bash
 set -euo pipefail
+
+# Modal ejecuta su propio runtime pasando el comando como argumentos al
+# ENTRYPOINT de la imagen. Debemos cederle el control con exec "$@"; de lo
+# contrario este script inicia ComfyUI por su cuenta y el lifecycle de
+# modal_app.py nunca llega a ejecutarse. En Docker Desktop/RunPod normalmente
+# no se pasan argumentos, por lo que se conserva el flujo tradicional.
+if [ "$#" -gt 0 ]; then
+  echo "[runtime] Delegando el proceso al runtime de Modal/Docker: $*"
+  exec "$@"
+fi
+
 MODELS_ROOT="${{MODELS_ROOT:-/models}}"
 WORKFLOWS_ROOT="${{WORKFLOWS_ROOT:-/workflows}}"
 COMFY_USER_ROOT="${{COMFY_USER_ROOT:-$WORKFLOWS_ROOT}}"
