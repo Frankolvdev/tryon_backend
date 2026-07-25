@@ -430,7 +430,7 @@ def _run_performance_probe(env: dict[str, str]) -> None:
 
 def _proxy_app():
     from aiohttp import ClientSession, WSMsgType
-    from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.responses import Response
 
     web_app = FastAPI()
@@ -452,6 +452,29 @@ def _proxy_app():
         if any(key.lower() == "referer" for key in forwarded):
             forwarded["Referer"] = f"{{upstream_http}}/"
         return forwarded
+
+    @web_app.post("/api/tryon/pipeline")
+    async def execute_tryon_pipeline(request: Request):
+        """Execute one complete workflow/Python pipeline in this GPU container."""
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Pipeline payload must be a JSON object.")
+        if payload.get("runtime_contract") != "tryon.generation-runtime/v1":
+            raise HTTPException(status_code=400, detail="Unsupported Generation Runtime contract.")
+
+        runtime_worker = RUNTIME_ROOT / "runpod_worker"
+        if str(runtime_worker) not in sys.path:
+            sys.path.insert(0, str(runtime_worker))
+        try:
+            from generation_runtime import GenerationRuntime
+            runtime = GenerationRuntime(comfy_url=upstream_http)
+            result = await asyncio.to_thread(runtime.execute, payload)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return result
 
     @web_app.api_route("/{{path:path}}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     async def proxy_http(path: str, request: Request):

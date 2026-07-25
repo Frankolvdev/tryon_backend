@@ -35,6 +35,7 @@ from app.services.generation_module_result_service import generation_module_resu
 from app.services.storage_service import storage_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
 from app.services.infrastructure_provider_service import infrastructure_provider_service
+from app.services.modal_pipeline_adapter_service import modal_pipeline_adapter_service
 from app.services.generation_job_queue_service import generation_job_queue_service
 from app.services.generation_job_orchestrator_service import generation_job_orchestrator_service
 from app.services.generation_runtime import (
@@ -361,18 +362,101 @@ class GenerationModuleRuntimeService:
         }
 
     def _run_modal_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
-        """Reserved full-pipeline dispatch point for Modal.
+        """Dispatch the entire module to one Modal GPU container.
 
-        MegaZIP 1 registers Modal end-to-end without changing the existing
-        local or RunPod executors. MegaZIP 2 installs the transport/runtime
-        implementation at this exact boundary.
+        Local Docker, RunPod and simulated execution paths remain untouched.
+        Modal receives the same generation-runtime/v1 contract already used
+        for complete remote pipelines and returns every configured module output.
         """
         config = infrastructure_provider_service.get_modal(db)
         if not config.enabled:
             raise AppException("Modal is selected for this module, but the Modal provider is disabled.")
         if not config.runtime_url:
             raise AppException("Modal is selected for this module, but no Modal Runtime URL is configured.")
-        raise AppException("Modal pipeline transport is pending MegaZIP 2; local, RunPod and simulated engines remain unchanged.")
+
+        with self._lock:
+            current = self._items[execution_id].model_copy(deep=True)
+
+        timeout = max(
+            int(config.timeout_seconds or 900),
+            sum(
+                int((step.get("configuration") or {}).get("timeout_seconds") or 300)
+                for step in module.get("steps", [])
+                if step.get("is_enabled")
+            ),
+        )
+        provider = RuntimeProviderRegistry.get(GenerationExecutionEngine.MODAL)
+        payload = {
+            "runtime_contract": "tryon.generation-runtime/v1",
+            "provider": {"key": provider.key, "remote": provider.remote},
+            "execution_id": str(execution_id),
+            "module": copy.deepcopy(module),
+            "context": self._serialize_remote_value(db, current.context),
+        }
+
+        with self._lock:
+            item = self._items[execution_id]
+            item.provider_status = "DISPATCHING"
+            item.dispatch_attempts += 1
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=utc_now(),
+                message="Dispatching the complete generation pipeline to Modal.",
+            ))
+            generation_module_execution_store_service.save(item.model_copy(deep=True))
+
+        result = modal_pipeline_adapter_service.execute_pipeline(
+            config,
+            payload=payload,
+            timeout_seconds=timeout,
+            progress_callback=lambda progress, message, meta=None: self._remote_module_progress(
+                execution_id, progress, message, meta or {}
+            ),
+            cancellation_callback=lambda: self.get(execution_id).cancel_requested,
+        )
+        output = result.get("output")
+        if not isinstance(output, dict):
+            raise RuntimeError("Modal Generation Runtime returned an invalid output payload.")
+        if output.get("runtime_contract") != "tryon.generation-runtime/v1":
+            raise RuntimeError("Modal worker does not support the required Generation Runtime contract.")
+        if output.get("status") != "completed":
+            raise RuntimeError(str(output.get("error") or "Modal Generation Runtime failed."))
+
+        remote_steps = output.get("steps") or []
+        with self._lock:
+            item = self._items[execution_id]
+            for index, remote_step in enumerate(remote_steps):
+                if index >= len(item.steps) or not isinstance(remote_step, dict):
+                    continue
+                state = item.steps[index]
+                state.status = str(remote_step.get("status") or state.status)
+                state.duration_ms = int(remote_step.get("duration_ms") or 0)
+                state.outputs = self._materialize_modal_files(
+                    remote_step.get("outputs") or {}, execution_id
+                )
+                state.error = remote_step.get("error")
+
+            normalized_outputs = self._materialize_modal_files(
+                output.get("outputs") or {}, execution_id
+            )
+            item.outputs = self._persist_final_outputs(
+                db, execution_id=execution_id, user_id=item.user_id, outputs=normalized_outputs
+            )
+            remote_context = output.get("context")
+            if isinstance(remote_context, dict):
+                item.context = self._materialize_modal_files(remote_context, execution_id)
+            item.runtime_metrics = copy.deepcopy(output.get("metrics") or {})
+            item.provider_metrics = {
+                "provider": "modal",
+                "execution_time_ms": result.get("execution_time_ms"),
+                "runtime_url": result.get("runtime_url"),
+            }
+            item.status = "completed"
+            item.progress = 100
+            item.provider_status = "COMPLETED"
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=utc_now(),
+                message="Modal completed the entire generation pipeline in one GPU container.",
+            ))
 
     def _run_remote_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
         """Dispatch an entire generation module as one RunPod Serverless job."""
@@ -488,6 +572,44 @@ class GenerationModuleRuntimeService:
             return {key: self._serialize_remote_value(db, item) for key, item in value.items()}
         if isinstance(value, list):
             return [self._serialize_remote_value(db, item) for item in value]
+        return value
+
+    def _materialize_modal_files(self, value: Any, execution_id: UUID) -> Any:
+        """Convert Modal data-URI files into backend-owned temporary files."""
+        if isinstance(value, dict) and value.get("__generation_file__"):
+            data = value.get("data")
+            if isinstance(data, str) and data.startswith("data:") and ";base64," in data:
+                header, encoded = data.split(",", 1)
+                content_type = str(value.get("content_type") or header[5:].split(";", 1)[0] or "application/octet-stream")
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                except Exception as exc:
+                    raise AppException("Modal returned an invalid base64 file payload.") from exc
+                filename = Path(str(value.get("filename") or uuid4().hex)).name
+                directory = Path(tempfile.gettempdir()) / "tryon-modal-results" / str(execution_id)
+                directory.mkdir(parents=True, exist_ok=True)
+                target = directory / f"{uuid4().hex[:10]}-{filename}"
+                target.write_bytes(content)
+                normalized = {
+                    "__generation_file__": True,
+                    "temporary": True,
+                    "local_path": str(target),
+                    "filename": filename,
+                    "content_type": content_type,
+                    "size_bytes": len(content),
+                }
+                if value.get("node_id") is not None:
+                    normalized["node_id"] = str(value.get("node_id"))
+                return normalized
+            normalized = dict(value)
+            normalized.pop("data", None)
+            normalized.pop("encoding", None)
+            normalized["__generation_file__"] = True
+            return normalized
+        if isinstance(value, dict):
+            return {key: self._materialize_modal_files(item, execution_id) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._materialize_modal_files(item, execution_id) for item in value]
         return value
 
     def _normalize_remote_files(self, value: Any, downloaded: list[dict[str, Any]]) -> Any:
