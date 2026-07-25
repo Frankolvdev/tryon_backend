@@ -272,6 +272,19 @@ def publish(
     return item
 
 
+@router.post("/builds/{build_id}/publish-modal", response_model=RuntimeBuildResponse)
+def publish_modal(
+    build_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+    background_tasks.add_task(RuntimeBuildExecutionService.publish_modal, item.id)
+    return item
+
+
 @router.post("/builds/{build_id}/activate", response_model=RuntimeBuildResponse)
 def activate(build_id: int, db: Session = Depends(get_db)):
     item = db.get(RuntimeBuilderBuild, build_id)

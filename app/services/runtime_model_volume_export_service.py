@@ -12,6 +12,7 @@ from typing import Any, Callable
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.services.runtime_context_generator_service import RuntimeContextGeneratorService
 from app.services.docker_file_manager_service import DockerFileManagerService
+from app.services.modal_file_manager_service import ModalFileManagerService
 
 ProgressCallback = Callable[[str, int, str], None]
 
@@ -234,6 +235,19 @@ class RuntimeModelVolumeExportService:
             manifest["docker_destination"] = {"volume": docker_volume, "path": docker_path}
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
+        if destination_type == "modal":
+            from app.db.database import SessionLocal
+            session = SessionLocal()
+            try:
+                from app.services.infrastructure_provider_service import InfrastructureProviderService
+                modal_config = InfrastructureProviderService.get_modal(session)
+                notify("modal-copy", 94, f"Subiendo archivos al volumen Modal {modal_config.volume_name}…")
+                ModalFileManagerService.copy_tree(session, models_root, modal_config.volume_name, docker_path, payload.overwrite)
+                manifest["modal_destination"] = {"volume": modal_config.volume_name, "path": docker_path}
+                manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+            finally:
+                session.close()
+
         notify("completed", 99, "Modelos organizados para Volume.")
         return {
             "success": True,
@@ -251,7 +265,7 @@ class RuntimeModelVolumeExportService:
             "models_overwritten": overwritten,
             "errors": 0,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
-            "destination": {"type": destination_type, "volume": docker_volume, "path": docker_path} if destination_type == "docker_volume" else {"type": "local", "path": str(output)},
+            "destination": ({"type": "docker_volume", "volume": docker_volume, "path": docker_path} if destination_type == "docker_volume" else ({"type": "modal", "path": docker_path} if destination_type == "modal" else {"type": "local", "path": str(output)})),
             "bytes_copied": bytes_copied,
             "warnings": warnings,
             "manifest": manifest,

@@ -194,6 +194,50 @@ class RuntimeBuildExecutionService:
             if build: build.status='failed'; build.error_message=str(exc); RuntimeBuildExecutionService._append(db,build,f"[error] {exc}")
         finally: db.close()
 
+
+    @staticmethod
+    def publish_modal(build_id):
+        from app.services.infrastructure_provider_service import InfrastructureProviderService
+        db=SessionLocal()
+        try:
+            build=db.get(RuntimeBuilderBuild,build_id)
+            if not build or build.status not in {'succeeded','published','active'}:
+                raise ValueError('El build debe finalizar correctamente antes de subirlo a Modal.')
+            cfg=InfrastructureProviderService.get_modal(db)
+            if not cfg.enabled or not cfg.token_id or not cfg.token_secret:
+                raise ValueError('Activa y configura Modal en Proveedores de infraestructura.')
+            executable=shutil.which('modal')
+            if not executable:
+                raise ValueError('Modal CLI no está instalado en el backend. Ejecuta: pip install modal')
+            context=Path(build.context_path or '').expanduser().resolve()
+            app_file=context/'modal_app.py'
+            if not app_file.is_file():
+                raise ValueError('La compilación seleccionada no contiene modal_app.py. Vuelve a generar el runtime con soporte Modal.')
+            build.status='publishing'
+            RuntimeBuildExecutionService._append(db,build,f'[modal] Publicando compilación {build.image_tag} desde {context}...','publishing',95)
+            proc=subprocess.Popen(
+                [executable,'deploy',str(app_file)],
+                cwd=str(context),
+                env=InfrastructureProviderService._modal_env(cfg),
+                stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,
+            )
+            for line in proc.stdout or []:
+                RuntimeBuildExecutionService._append(db,build,f'[modal] {line.rstrip()}','publishing',98)
+            if proc.wait()!=0:
+                raise RuntimeError('modal deploy terminó con error.')
+            build.published=True
+            build.status='published'
+            build.phase='modal-published'
+            build.progress=100
+            RuntimeBuildExecutionService._append(db,build,f'[modal] Compilación publicada en la app {cfg.app_name}.')
+        except Exception as exc:
+            build=db.get(RuntimeBuilderBuild,build_id)
+            if build:
+                build.status='failed'; build.phase='failed'; build.error_message=str(exc)
+                RuntimeBuildExecutionService._append(db,build,f'[modal:error] {exc}')
+        finally:
+            db.close()
+
     @staticmethod
     def activate(db, build):
         if not build.published: raise ValueError('Publica la imagen antes de activarla.')
