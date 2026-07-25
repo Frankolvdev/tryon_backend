@@ -588,22 +588,38 @@ class ComfyUIServer:
     def initialize_for_snapshot(self) -> None:
         os.environ["RUNTIME_PROVIDER"] = "modal"
         os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
-        print("[modal] Preparando runtime CPU/GPU para snapshot, sin abrir el puerto.", flush=True)
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.init()
-                print(f"[modal] CUDA preparada para snapshot: {{torch.cuda.get_device_name(0)}}.", flush=True)
-        except Exception as exc:
-            print(f"[modal] Preparación CUDA diferida: {{exc}}", flush=True)
+        print("[modal] Iniciando ComfyUI antes del snapshot de memoria.", flush=True)
+        self._start_process()
+        print(
+            "[modal] ComfyUI inicializado y listo; creando snapshot de memoria.",
+            flush=True,
+        )
 
     @modal.enter(snap=False)
     def restore_after_snapshot(self) -> None:
+        process = getattr(self, "comfyui_process", None)
+        if process is None:
+            raise RuntimeError(
+                "El snapshot no restauró la referencia al proceso de ComfyUI."
+            )
+
+        return_code = process.poll()
+        if return_code is not None:
+            raise RuntimeError(
+                f"ComfyUI no sobrevivió al restore del snapshot "
+                f"(código {{return_code}})."
+            )
+
         if _port_is_ready():
-            print("[modal] El puerto ya estaba disponible después del restore.", flush=True)
+            print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
             return
-        print("[modal] Snapshot restaurado; iniciando ComfyUI directamente.", flush=True)
-        self._start_process()
+
+        print(
+            "[modal] Snapshot restaurado; esperando que ComfyUI reactive el puerto.",
+            flush=True,
+        )
+        _wait_until_ready(process)
+        print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
 
     @modal.asgi_app()
     def comfyui(self):
