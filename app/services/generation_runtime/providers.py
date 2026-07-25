@@ -27,6 +27,10 @@ class RuntimeProviderRegistry:
             key="simulated", engine=GenerationExecutionEngine.SIMULATED, remote=False,
             supports_single_job_module_runtime=True,
         ),
+        GenerationExecutionEngine.MODAL: RuntimeProviderDescriptor(
+            key="modal", engine=GenerationExecutionEngine.MODAL, remote=True,
+            supports_single_job_module_runtime=True,
+        ),
     }
 
     @classmethod

@@ -34,6 +34,7 @@ from app.services.generation_module_billing_service import generation_module_bil
 from app.services.generation_module_result_service import generation_module_result_service
 from app.services.storage_service import storage_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
+from app.services.infrastructure_provider_service import infrastructure_provider_service
 from app.services.generation_job_queue_service import generation_job_queue_service
 from app.services.generation_job_orchestrator_service import generation_job_orchestrator_service
 from app.services.generation_runtime import (
@@ -242,6 +243,7 @@ class GenerationModuleRuntimeService:
         return {
             "local_docker": comfyui_local_adapter_service.health(),
             "runpod_serverless": runpod_health,
+            "modal": self._modal_health(db),
             "simulated": {"available": True, "mode": "deterministic", "supports_cancel": True, "supports_progress": True},
             "orchestrator": generation_job_orchestrator_service.status(),
         }
@@ -253,7 +255,7 @@ class GenerationModuleRuntimeService:
             item = self._items[execution_id]
             item.status = "running"; item.started_at = started
             item.queue_position = None
-            item.provider_status = "running_local" if item.engine == GenerationExecutionEngine.LOCAL_DOCKER else ("dispatching_to_runpod" if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS else "running_simulation")
+            item.provider_status = ("running_local" if item.engine == GenerationExecutionEngine.LOCAL_DOCKER else ("dispatching_to_runpod" if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS else ("dispatching_to_modal" if item.engine == GenerationExecutionEngine.MODAL else "running_simulation")))
             item.heartbeat_at = started
             item.logs.append(GenerationModuleExecutionLog(timestamp=started, message="Execution started by the unified provider worker."))
             running_snapshot = item.model_copy(deep=True)
@@ -261,6 +263,9 @@ class GenerationModuleRuntimeService:
         try:
             if running_snapshot.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:
                 self._run_remote_module(db, execution_id, module)
+                return
+            if running_snapshot.engine == GenerationExecutionEngine.MODAL:
+                self._run_modal_module(db, execution_id, module)
                 return
             steps = [s for s in sorted(module["steps"], key=lambda row: row["position"]) if s["is_enabled"]]
             for index, step in enumerate(steps):
@@ -340,6 +345,34 @@ class GenerationModuleRuntimeService:
                 final_snapshot = item.model_copy(deep=True)
             db.close()
             generation_module_execution_store_service.save(final_snapshot)
+
+
+    @staticmethod
+    def _modal_health(db: Session) -> dict[str, Any]:
+        config = infrastructure_provider_service.get_modal(db)
+        return {
+            "available": bool(config.enabled and config.runtime_url),
+            "enabled": config.enabled,
+            "runtime_url": config.runtime_url,
+            "mode": "remote_pipeline",
+            "supports_cancel": False,
+            "supports_progress": True,
+            "error": None if (config.enabled and config.runtime_url) else "Modal provider is disabled or its runtime URL is not configured.",
+        }
+
+    def _run_modal_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
+        """Reserved full-pipeline dispatch point for Modal.
+
+        MegaZIP 1 registers Modal end-to-end without changing the existing
+        local or RunPod executors. MegaZIP 2 installs the transport/runtime
+        implementation at this exact boundary.
+        """
+        config = infrastructure_provider_service.get_modal(db)
+        if not config.enabled:
+            raise AppException("Modal is selected for this module, but the Modal provider is disabled.")
+        if not config.runtime_url:
+            raise AppException("Modal is selected for this module, but no Modal Runtime URL is configured.")
+        raise AppException("Modal pipeline transport is pending MegaZIP 2; local, RunPod and simulated engines remain unchanged.")
 
     def _run_remote_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
         """Dispatch an entire generation module as one RunPod Serverless job."""

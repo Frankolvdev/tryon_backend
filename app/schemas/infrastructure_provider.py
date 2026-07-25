@@ -7,6 +7,7 @@ class ModalProviderConfig(BaseModel):
     token_secret: str = Field(default="", max_length=1000)
     environment: str = Field(default="main", min_length=1, max_length=120)
     app_name: str = Field(default="tryon-generation-runtime", min_length=1, max_length=120)
+    runtime_url: str = Field(default="", max_length=1000)
     volume_name: str = Field(default="tryon-models", min_length=1, max_length=120)
     gpu: str = Field(default="L40S", min_length=1, max_length=120)
     timeout_seconds: int = Field(default=900, ge=60, le=86400)

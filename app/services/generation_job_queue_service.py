@@ -36,6 +36,8 @@ class GenerationJobQueueService:
             return "local"
         if value == GenerationExecutionEngine.RUNPOD_SERVERLESS.value:
             return "runpod"
+        if value == GenerationExecutionEngine.MODAL.value:
+            return "modal"
         return "simulated"
 
     def _queue_key(self, queue_name: str) -> str:
@@ -106,7 +108,7 @@ class GenerationJobQueueService:
 
     def depths(self) -> dict[str, int]:
         result: dict[str, int] = {}
-        for name in ("local", "runpod", "simulated"):
+        for name in ("local", "runpod", "modal", "simulated"):
             try:
                 result[name] = int(redis_client.get_client().llen(self._queue_key(name)))
             except RedisError:
