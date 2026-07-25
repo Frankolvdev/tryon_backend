@@ -67,6 +67,7 @@ from app.api.v1.endpoints.admin import (
     users,
     webhooks,
     workflow_definitions,
+    infrastructure_providers,
 )
 
 admin_router = APIRouter()
@@ -337,3 +338,5 @@ admin_router.include_router(
 )
 
 admin_router.include_router(user_library.router, tags=["User Library Admin"])
+
+admin_router.include_router(infrastructure_providers.router, tags=["Admin - Infrastructure Providers"])
