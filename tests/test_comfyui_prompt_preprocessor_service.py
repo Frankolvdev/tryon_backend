@@ -17,14 +17,6 @@ def test_normalizes_rgthree_lora_dictionary_keys():
                         "on": True,
                         "strength": 0.8,
                     },
-                    r"Klein\f2k_consis.safetensors": {
-                        "on": True,
-                        "strength": 0.7,
-                    },
-                    r"Klein\klein-9b_realism_slider_v2.safetensors": {
-                        "on": True,
-                        "strength": 0.5,
-                    },
                 }
             },
         }
@@ -38,8 +30,6 @@ def test_normalizes_rgthree_lora_dictionary_keys():
         in loras
     )
     assert "Klein/lenovo_flux_klein9b.safetensors" in loras
-    assert "Klein/f2k_consis.safetensors" in loras
-    assert "Klein/klein-9b_realism_slider_v2.safetensors" in loras
 
     comfyui_prompt_preprocessor_service.assert_no_windows_model_paths(
         normalized

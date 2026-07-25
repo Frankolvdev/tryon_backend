@@ -13,62 +13,24 @@ class PromptPreprocessorResult:
 
 
 class ComfyUIPromptPreprocessorService:
-    """Normaliza rutas del prompt sin modificar rgthree ni otros Custom Nodes."""
+    """Preprocesa prompts de ComfyUI sin modificar Custom Nodes."""
 
     _PATH_KEYS = {
-        "path",
-        "file_path",
-        "filepath",
-        "filename",
-        "file_name",
-        "image",
-        "image_path",
-        "mask",
-        "mask_path",
-        "lora",
-        "loras",
-        "lora_name",
-        "lora_path",
-        "ckpt_name",
-        "checkpoint",
-        "checkpoint_name",
-        "checkpoint_path",
-        "vae",
-        "vae_name",
-        "vae_path",
-        "control_net_name",
-        "controlnet",
-        "controlnet_name",
-        "controlnet_path",
-        "clip_name",
-        "clip_path",
-        "clip_vision",
-        "clip_vision_name",
-        "clip_vision_path",
-        "embedding",
-        "embedding_name",
-        "embedding_path",
-        "style_model",
-        "style_model_name",
-        "style_model_path",
-        "upscale_model",
-        "upscale_model_name",
-        "upscale_model_path",
-        "model",
-        "model_name",
-        "model_path",
-        "unet_name",
-        "diffusion_model",
-        "diffusion_model_name",
-        "audio_encoder_name",
-        "photomaker_model_name",
-        "output_path",
-        "output_directory",
-        "subfolder",
-        "directory",
-        "folder",
+        "path", "file_path", "filepath", "filename", "file_name",
+        "image", "image_path", "mask", "mask_path",
+        "lora", "loras", "lora_name", "lora_path",
+        "ckpt_name", "checkpoint", "checkpoint_name", "checkpoint_path",
+        "vae", "vae_name", "vae_path",
+        "control_net_name", "controlnet", "controlnet_name", "controlnet_path",
+        "clip_name", "clip_path", "clip_vision", "clip_vision_name",
+        "clip_vision_path", "embedding", "embedding_name", "embedding_path",
+        "style_model", "style_model_name", "style_model_path",
+        "upscale_model", "upscale_model_name", "upscale_model_path",
+        "model", "model_name", "model_path", "unet_name",
+        "diffusion_model", "diffusion_model_name", "audio_encoder_name",
+        "photomaker_model_name", "output_path", "output_directory",
+        "subfolder", "directory", "folder",
     }
-
     _PATH_KEY_PATTERN = re.compile(
         r"(?:^|_)(?:path|file|filename|folder|directory|"
         r"lora|loras|checkpoint|ckpt|vae|controlnet|control_net|"
@@ -123,8 +85,8 @@ class ComfyUIPromptPreprocessorService:
             for key, item in value.items():
                 output_key = key
 
-                # rgthree Power Lora Loader guarda los nombres como claves
-                # dentro de inputs.loras.
+                # rgthree Power Lora Loader almacena cada LoRA como una clave
+                # dentro de inputs.loras, no necesariamente como un valor.
                 if isinstance(key, str) and cls._should_normalize_dict_key(
                     parent_key=parent_key,
                     key=key,
@@ -245,10 +207,10 @@ class ComfyUIPromptPreprocessorService:
         visit(prompt)
 
         if invalid:
-            unique = ", ".join(sorted(set(invalid))[:10])
+            paths = ", ".join(sorted(set(invalid))[:10])
             raise ValueError(
                 "The ComfyUI prompt still contains Windows model paths: "
-                f"{unique}"
+                f"{paths}"
             )
 
 
