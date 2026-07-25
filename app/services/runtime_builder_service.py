@@ -290,6 +290,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import modal
@@ -349,9 +350,70 @@ def _wait_until_ready(process: subprocess.Popen, timeout: int = STARTUP_TIMEOUT)
     )
 
 
+def _ensure_linux_machine_id() -> None:
+    """Provide the machine-id expected by ComfyUI-Execute-Python on Modal."""
+    primary = Path("/etc/machine-id")
+    dbus = Path("/var/lib/dbus/machine-id")
+
+    machine_id = ""
+    if primary.is_file():
+        try:
+            candidate = primary.read_text(encoding="utf-8").strip().lower()
+            if len(candidate) == 32 and all(char in "0123456789abcdef" for char in candidate):
+                machine_id = candidate
+        except OSError:
+            pass
+    if not machine_id:
+        machine_id = uuid.uuid4().hex
+
+    primary.parent.mkdir(parents=True, exist_ok=True)
+    primary.write_text(machine_id + "\n", encoding="utf-8")
+    dbus.parent.mkdir(parents=True, exist_ok=True)
+    dbus.write_text(machine_id + "\n", encoding="utf-8")
+    print(f"[runtime] Linux machine-id preparado para Execute Python: {{machine_id[:8]}}…", flush=True)
+
+
+def _ensure_sam3_volume_link() -> None:
+    """Expose the external SAM3 tree where TBG-SAM3 scans it directly."""
+    source = MODELS_ROOT / "sam3"
+    target = COMFYUI_ROOT / "models" / "sam3"
+
+    if not source.is_dir():
+        print(f"[runtime] SAM3 no enlazado: no existe el directorio {{source}}.", flush=True)
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        try:
+            if target.resolve() == source.resolve():
+                print(f"[runtime] SAM3 ya enlazado: {{target}} -> {{source}}", flush=True)
+                return
+        except OSError:
+            pass
+        target.unlink()
+    elif target.exists():
+        if target.is_dir() and not any(target.iterdir()):
+            target.rmdir()
+        else:
+            raise RuntimeError(
+                f"No se puede crear el enlace SAM3 porque {{target}} ya existe "
+                "y contiene datos. No se eliminó ni sobrescribió nada."
+            )
+
+    target.symlink_to(source, target_is_directory=True)
+    if not target.is_dir():
+        raise RuntimeError(f"No se pudo crear el enlace SAM3: {{target}} -> {{source}}")
+    print(f"[runtime] SAM3 enlazado desde el Volume: {{target}} -> {{source}}", flush=True)
+    checkpoint = source / "sam3.pt"
+    if not checkpoint.is_file():
+        print(f"[runtime] Advertencia: no se encontró {{checkpoint}}.", flush=True)
+
+
 def _prepare_runtime_directories() -> None:
     (COMFYUI_ROOT / "models").mkdir(parents=True, exist_ok=True)
     (COMFY_USER_ROOT / "default" / "workflows").mkdir(parents=True, exist_ok=True)
+    _ensure_linux_machine_id()
+    _ensure_sam3_volume_link()
     print(f"[runtime] Modelos externos registrados desde: {{MODELS_ROOT}}", flush=True)
     print(f"[runtime] Directorio temporal de usuario: {{COMFY_USER_ROOT}}", flush=True)
 
