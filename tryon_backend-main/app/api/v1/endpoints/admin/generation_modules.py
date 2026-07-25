@@ -1,0 +1,557 @@
+from datetime import datetime
+from fastapi import APIRouter, Depends, Query, Request, Response
+from sqlalchemy.orm import Session
+
+from app.api.v1.deps import get_db
+from app.api.v1.guards.admin_guard import admin_guard
+from app.common.generation_module_enums import GenerationExecutionEngine
+from app.models.user import User
+from app.schemas.generation_module import (
+    GenerationModuleCreate,
+    GenerationModuleListResponse,
+    GenerationModuleResponse,
+    GenerationModuleUpdate,
+)
+from app.schemas.generation_module_authoring import (
+    GenerationModuleStepsReorderRequest,
+    PythonSourceAnalysisRequest,
+    PythonSourceAnalysisResponse,
+    PythonStepCreateRequest,
+    PythonStepUpdateRequest,
+    WorkflowStepBindingsUpdate,
+    WorkflowStepUpdateRequest,
+    WorkflowStepImportRequest,
+    WorkflowValidationResponse,
+)
+from app.services.audit_service import audit_service
+from app.services.generation_module_service import generation_module_service
+from app.services.generation_module_security_service import generation_module_security_service
+from app.services.generation_module_upload_service import generation_module_upload_service
+from app.services.generation_module_authoring_service import (
+    generation_module_authoring_service,
+)
+
+router = APIRouter()
+
+
+@router.get("/generation-modules", response_model=GenerationModuleListResponse)
+def list_generation_modules(
+    key: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    engine: GenerationExecutionEngine | None = Query(default=None),
+    is_active: bool | None = Query(default=None),
+    search: str | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_service.list_modules(
+        db,
+        key=key,
+        category=category,
+        engine=engine.value if engine else None,
+        is_active=is_active,
+        search=search,
+        skip=skip,
+        limit=limit,
+    )
+
+
+# Static execution-history route intentionally lives outside the
+# /generation-modules/{module_id} namespace. FastAPI matches routes in
+# declaration order, so a path such as "execution-history" would otherwise
+# be parsed as an integer module_id and return HTTP 422.
+from app.schemas.generation_module_operations import GenerationExecutionListResponse, GenerationExecutionBulkRequest, GenerationExecutionBulkResponse
+from app.services.generation_module_runtime_service import generation_module_runtime_service
+
+
+@router.get("/generation-module-executions", response_model=GenerationExecutionListResponse)
+def list_all_generation_module_executions(
+    module_id: int | None = Query(default=None),
+    status: str | None = Query(default=None),
+    engine: GenerationExecutionEngine | None = Query(default=None),
+    user_id: int | None = Query(default=None, ge=1),
+    search: str | None = Query(default=None),
+    created_from: datetime | None = Query(default=None),
+    created_to: datetime | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    current_admin: User = Depends(admin_guard),
+):
+    items, total = generation_module_runtime_service.list(
+        module_id=module_id,
+        status=status,
+        engine=engine.value if engine else None,
+        user_id=user_id,
+        search=search,
+        created_from=created_from,
+        created_to=created_to,
+        skip=skip,
+        limit=limit,
+    )
+    return GenerationExecutionListResponse(
+        items=items, total=total, skip=skip, limit=limit
+    )
+
+
+@router.get("/generation-modules/{module_id}", response_model=GenerationModuleResponse)
+def get_generation_module(
+    module_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_service.get_response(db, module_id=module_id)
+
+
+@router.post(
+    "/generation-modules", response_model=GenerationModuleResponse, status_code=201
+)
+def create_generation_module(
+    data: GenerationModuleCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_service.create(
+        db, data=data, created_by_user_id=current_admin.id
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_created",
+        entity_type="generation_module",
+        entity_id=str(result.id),
+        description=f"Created generation module {result.key} version {result.version}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.patch(
+    "/generation-modules/{module_id}", response_model=GenerationModuleResponse
+)
+def update_generation_module(
+    module_id: int,
+    data: GenerationModuleUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_service.update(db, module_id=module_id, data=data)
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_updated",
+        entity_type="generation_module",
+        entity_id=str(module_id),
+        description=f"Updated generation module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.delete("/generation-modules/{module_id}", status_code=204)
+def delete_generation_module(
+    module_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    generation_module_service.delete(db, module_id=module_id)
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_deleted",
+        entity_type="generation_module",
+        entity_id=str(module_id),
+        description=f"Deleted generation module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return Response(status_code=204)
+
+
+@router.post(
+    "/generation-modules/workflows/validate",
+    response_model=WorkflowValidationResponse,
+)
+def validate_generation_module_workflow(
+    workflow_json: dict,
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_authoring_service.validate_workflow(workflow_json)
+
+
+@router.post(
+    "/generation-modules/{module_id}/steps/workflow",
+    response_model=GenerationModuleResponse,
+    status_code=201,
+)
+def import_generation_module_workflow_step(
+    module_id: int,
+    data: WorkflowStepImportRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.import_workflow_step(
+        db, module_id=module_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_workflow_imported",
+        entity_type="generation_module",
+        entity_id=str(module_id),
+        description=f"Imported workflow step {data.key} into generation module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.patch(
+    "/generation-modules/{module_id}/steps/{step_id}/workflow",
+    response_model=GenerationModuleResponse,
+)
+def update_generation_module_workflow_step(
+    module_id: int,
+    step_id: int,
+    data: WorkflowStepUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.update_workflow_step(
+        db, module_id=module_id, step_id=step_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_workflow_step_updated",
+        entity_type="generation_module_step",
+        entity_id=str(step_id),
+        description=f"Updated workflow generation module step {step_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.patch(
+    "/generation-modules/{module_id}/steps/{step_id}/workflow-bindings",
+    response_model=GenerationModuleResponse,
+)
+def update_generation_module_workflow_bindings(
+    module_id: int,
+    step_id: int,
+    data: WorkflowStepBindingsUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.update_workflow_bindings(
+        db, module_id=module_id, step_id=step_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_workflow_bindings_updated",
+        entity_type="generation_module_step",
+        entity_id=str(step_id),
+        description=f"Updated workflow bindings for generation module step {step_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.post(
+    "/generation-modules/python/analyze",
+    response_model=PythonSourceAnalysisResponse,
+)
+def analyze_generation_module_python_source(
+    data: PythonSourceAnalysisRequest,
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_authoring_service.analyze_python_source(
+        data.source_code, data.entrypoint
+    )
+
+
+@router.post(
+    "/generation-modules/{module_id}/steps/python",
+    response_model=GenerationModuleResponse,
+    status_code=201,
+)
+def create_generation_module_python_step(
+    module_id: int,
+    data: PythonStepCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.create_python_step(
+        db, module_id=module_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_python_step_created",
+        entity_type="generation_module",
+        entity_id=str(module_id),
+        description=f"Created Python step {data.key} in generation module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.patch(
+    "/generation-modules/{module_id}/steps/{step_id}/python",
+    response_model=GenerationModuleResponse,
+)
+def update_generation_module_python_step(
+    module_id: int,
+    step_id: int,
+    data: PythonStepUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.update_python_step(
+        db, module_id=module_id, step_id=step_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_python_step_updated",
+        entity_type="generation_module_step",
+        entity_id=str(step_id),
+        description=f"Updated Python generation module step {step_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.put(
+    "/generation-modules/{module_id}/steps/reorder",
+    response_model=GenerationModuleResponse,
+)
+def reorder_generation_module_steps(
+    module_id: int,
+    data: GenerationModuleStepsReorderRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.reorder_steps(
+        db, module_id=module_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_steps_reordered",
+        entity_type="generation_module",
+        entity_id=str(module_id),
+        description=f"Reordered steps for generation module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.delete(
+    "/generation-modules/{module_id}/steps/{step_id}",
+    response_model=GenerationModuleResponse,
+)
+def delete_generation_module_step(
+    module_id: int,
+    step_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.delete_step(
+        db, module_id=module_id, step_id=step_id
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_step_deleted",
+        entity_type="generation_module_step",
+        entity_id=str(step_id),
+        description=f"Deleted generation module step {step_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+# Generation module test runtime
+from uuid import UUID
+from app.schemas.generation_module_runtime import GenerationModuleExecutionCreate, GenerationModuleExecutionResponse
+from app.services.generation_module_runtime_service import generation_module_runtime_service
+
+
+@router.post("/generation-modules/{module_id}/executions", response_model=GenerationModuleExecutionResponse, status_code=202)
+async def execute_generation_module(
+    module_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    # Administrative tests deliberately have no billable user owner.
+    # Files are still materialized normally, but runtime creation receives
+    # user_id=None so token validation and token charging are both skipped.
+    data = await generation_module_upload_service.parse_execution_request(
+        db, module_id=module_id, request=request, user_id=None
+    )
+    result = generation_module_runtime_service.create(
+        db, module_id=module_id, data=data, user_id=None
+    )
+    audit_service.create_log(db, actor_user_id=current_admin.id, action="admin_generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started {result.engine.value if hasattr(result.engine, 'value') else result.engine} execution for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
+    return result
+
+
+
+
+@router.post("/generation-modules/executions/bulk-cancel", response_model=GenerationExecutionBulkResponse)
+def bulk_cancel_generation_module_executions(data: GenerationExecutionBulkRequest, current_admin: User = Depends(admin_guard)):
+    affected, skipped = [], []
+    for execution_id in data.ids:
+        try:
+            item = generation_module_runtime_service.get(execution_id)
+            if item.status not in {"queued", "running"}:
+                skipped.append(execution_id)
+                continue
+            generation_module_runtime_service.cancel(execution_id)
+            affected.append(execution_id)
+        except Exception:
+            skipped.append(execution_id)
+    return GenerationExecutionBulkResponse(affected_ids=affected, skipped_ids=skipped)
+
+
+@router.post("/generation-modules/executions/bulk-delete", response_model=GenerationExecutionBulkResponse)
+def bulk_delete_generation_module_executions(data: GenerationExecutionBulkRequest, current_admin: User = Depends(admin_guard)):
+    affected, skipped = [], []
+    for execution_id in data.ids:
+        try:
+            item = generation_module_runtime_service.get(execution_id)
+            if item.status not in {"completed", "failed", "cancelled"}:
+                skipped.append(execution_id)
+                continue
+            generation_module_runtime_service.delete(execution_id)
+            affected.append(execution_id)
+        except Exception:
+            skipped.append(execution_id)
+    return GenerationExecutionBulkResponse(affected_ids=affected, skipped_ids=skipped)
+
+
+@router.get("/generation-modules/executions/{execution_id}", response_model=GenerationModuleExecutionResponse)
+def get_generation_module_execution(
+    execution_id: UUID,
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_runtime_service.get(execution_id)
+
+
+@router.post("/generation-modules/executions/{execution_id}/cancel", response_model=GenerationModuleExecutionResponse)
+def cancel_generation_module_execution(
+    execution_id: UUID,
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_runtime_service.cancel(execution_id)
+
+@router.get("/generation-modules/runtime/health")
+def generation_module_runtime_health(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return generation_module_runtime_service.health(db)
+
+
+@router.get("/generation-modules/runtime/security")
+def generation_module_runtime_security(
+    current_admin: User = Depends(admin_guard),
+):
+    items, total = generation_module_runtime_service.list(skip=0, limit=1000)
+    return {
+        "policy": generation_module_security_service.policy(),
+        "active_executions": sum(1 for item in items if item.status in {"queued", "running"}),
+        "active_user_executions": sum(1 for item in items if item.user_id is not None and item.status in {"queued", "running"}),
+        "tracked_executions": total,
+    }
+
+# Versioning, import/export and execution history.
+from app.schemas.generation_module_operations import (
+    GenerationExecutionListResponse,
+    GenerationExecutionRetryRequest,
+    GenerationModuleCloneRequest,
+    GenerationModuleExportResponse,
+    GenerationModuleImportRequest,
+    GenerationModulePublishRequest,
+    GenerationModuleVersionListResponse,
+)
+from app.services.generation_module_operations_service import generation_module_operations_service
+
+
+@router.get("/generation-modules/{module_id}/versions", response_model=GenerationModuleVersionListResponse)
+def list_generation_module_versions(module_id: int, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.list_versions(db, module_id=module_id)
+
+
+@router.post("/generation-modules/{module_id}/clone", response_model=GenerationModuleResponse, status_code=201)
+def clone_generation_module(module_id: int, data: GenerationModuleCloneRequest, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.clone(db, module_id=module_id, data=data, user_id=current_admin.id)
+
+
+@router.post("/generation-modules/{module_id}/publish", response_model=GenerationModuleResponse)
+def publish_generation_module(module_id: int, data: GenerationModulePublishRequest, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.publish(db, module_id=module_id, data=data)
+
+
+@router.get("/generation-modules/{module_id}/export", response_model=GenerationModuleExportResponse)
+def export_generation_module(module_id: int, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.export(db, module_id=module_id)
+
+
+@router.post("/generation-modules/import", response_model=GenerationModuleResponse, status_code=201)
+def import_generation_module(data: GenerationModuleImportRequest, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_operations_service.import_module(db, data=data, user_id=current_admin.id)
+
+
+@router.get("/generation-modules/execution-history", response_model=GenerationExecutionListResponse)
+def list_generation_module_executions(
+    module_id: int | None = Query(default=None),
+    user_id: int | None = Query(default=None, ge=1),
+    status: str | None = Query(default=None),
+    engine: str | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=200),
+    created_from: datetime | None = Query(default=None),
+    created_to: datetime | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    current_admin: User = Depends(admin_guard),
+):
+    items, total = generation_module_runtime_service.list(
+        module_id=module_id,
+        user_id=user_id,
+        status=status,
+        engine=engine,
+        search=search,
+        created_from=created_from,
+        created_to=created_to,
+        skip=skip,
+        limit=limit,
+    )
+    return GenerationExecutionListResponse(items=items, total=total, skip=skip, limit=limit)
+
+
+@router.post("/generation-modules/executions/{execution_id}/retry", response_model=GenerationModuleExecutionResponse, status_code=202)
+def retry_generation_module_execution(execution_id: UUID, data: GenerationExecutionRetryRequest, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    return generation_module_runtime_service.retry(db, execution_id, engine=data.engine)

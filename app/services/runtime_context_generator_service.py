@@ -149,6 +149,37 @@ class RuntimeContextGeneratorService:
         return changed
 
     @staticmethod
+    def _copy_generation_runtime(output: Path) -> list[str]:
+        """Copy the canonical remote pipeline runtime into every exported image.
+
+        Modal and RunPod use the same generation-runtime/v1 implementation.
+        Keeping one canonical source prevents the exported Modal endpoint from
+        existing without the code that actually executes workflow/Python steps.
+        """
+        backend_root = Path(__file__).resolve().parents[2]
+        source = backend_root / "runpod_worker" / "generation_runtime"
+        if not source.is_dir() or not (source / "runtime.py").is_file():
+            raise RuntimeError(
+                "No se encontró runpod_worker/generation_runtime en el backend. "
+                "No se puede exportar un runtime remoto funcional."
+            )
+        target = output / "runpod_worker" / "generation_runtime"
+        shutil.copytree(
+            source,
+            target,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
+        )
+        init_file = output / "runpod_worker" / "__init__.py"
+        init_file.parent.mkdir(parents=True, exist_ok=True)
+        init_file.touch(exist_ok=True)
+        return [
+            str(path.relative_to(output)).replace("\\", "/")
+            for path in target.rglob("*")
+            if path.is_file()
+        ]
+
+    @staticmethod
     def generate(
         config: RuntimeBuilderConfig,
         payload: Any,
@@ -182,6 +213,7 @@ class RuntimeContextGeneratorService:
         for folder in ("models", "custom_nodes", "workflow", "scripts"):
             (output / folder).mkdir(parents=True, exist_ok=True)
 
+        remote_runtime_files = RuntimeContextGeneratorService._copy_generation_runtime(output)
         generated = RuntimeBuilderService.generate(config, modal_volume_name=modal_volume_name)
 
         # La decisión real de copiar modelos pertenece a la exportación. Si el
@@ -431,7 +463,22 @@ fi
             ".dockerignore": "**/.git\n**/__pycache__\n**/*.pyc\n.venv\nnode_modules\n",
         }
         if generated.get("modal_app"):
-            files["modal_app.py"] = generated["modal_app"]
+            modal_app = generated["modal_app"]
+            required_modal_fragments = (
+                'TRYON_PIPELINE_ROUTE = "/api/tryon/pipeline"',
+                "@web_app.post(TRYON_PIPELINE_ROUTE)",
+                'TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"',
+                'from generation_runtime import GenerationRuntime',
+            )
+            missing_fragments = [
+                fragment for fragment in required_modal_fragments if fragment not in modal_app
+            ]
+            if missing_fragments:
+                raise RuntimeError(
+                    "El generador produjo un modal_app.py incompleto. "
+                    f"Faltan componentes obligatorios: {missing_fragments}"
+                )
+            files["modal_app.py"] = modal_app
             # Modal debe construir una imagen sin el ENTRYPOINT de Docker/RunPod.
             # De lo contrario startup.sh arranca ComfyUI antes de que el runtime
             # de modal_app.py pueda controlar el lifecycle y publicar web_server.
@@ -458,7 +505,7 @@ fi
             "models_copied": models_copied,
             "custom_nodes_copied": nodes_copied,
             "bytes_copied": total,
-            "files_generated": sorted(files),
+            "files_generated": sorted(set(files) | set(remote_runtime_files)),
             "warnings": warnings,
             "manifest": manifest,
         }
@@ -514,6 +561,7 @@ fi
         elif external_models:
             lines.append(f"COPY extra_model_paths.yaml {comfy_target}/extra_model_paths.yaml")
         lines += [
+            f"COPY runpod_worker/ {workdir}/runtime/runpod_worker/",
             f"COPY scripts/ {workdir}/runtime/scripts/",
             f"RUN chmod +x {workdir}/runtime/scripts/startup.sh",
             f"WORKDIR {comfy_target}",

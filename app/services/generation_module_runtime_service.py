@@ -424,10 +424,19 @@ class GenerationModuleRuntimeService:
         remote_steps = output.get("steps") or []
         with self._lock:
             item = self._items[execution_id]
+            states_by_key = {
+                str(state.step_key): state
+                for state in item.steps
+                if getattr(state, "step_key", None) is not None
+            }
             for index, remote_step in enumerate(remote_steps):
-                if index >= len(item.steps) or not isinstance(remote_step, dict):
+                if not isinstance(remote_step, dict):
                     continue
-                state = item.steps[index]
+                state = states_by_key.get(str(remote_step.get("step_key") or ""))
+                if state is None:
+                    if index >= len(item.steps):
+                        continue
+                    state = item.steps[index]
                 state.status = str(remote_step.get("status") or state.status)
                 state.duration_ms = int(remote_step.get("duration_ms") or 0)
                 state.outputs = self._materialize_modal_files(

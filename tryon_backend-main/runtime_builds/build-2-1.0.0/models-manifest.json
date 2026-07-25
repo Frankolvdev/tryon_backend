@@ -1,0 +1,85 @@
+{
+  "models": [
+    {
+      "name": "flux2-vae.safetensors",
+      "model_type": "vae",
+      "source_url": null,
+      "target_path": "vae/flux2-vae.safetensors",
+      "sha256": null,
+      "strategy": "volume",
+      "enabled": true
+    },
+    {
+      "name": "qwen_3_8b.safetensors",
+      "model_type": "clip",
+      "source_url": null,
+      "target_path": "text_encoders/qwen_3_8b.safetensors",
+      "sha256": null,
+      "strategy": "volume",
+      "enabled": true
+    },
+    {
+      "name": "bfs_head_v1_flux-klein_9b_step3500_rank128.safetensors",
+      "model_type": "lora",
+      "source_url": null,
+      "target_path": "loras/Klein/bfs_head_v1_flux-klein_9b_step3500_rank128.safetensors",
+      "sha256": null,
+      "strategy": "volume",
+      "enabled": true
+    },
+    {
+      "name": "lenovo_flux_klein9b.safetensors",
+      "model_type": "lora",
+      "source_url": null,
+      "target_path": "loras/Klein/lenovo_flux_klein9b.safetensors",
+      "sha256": null,
+      "strategy": "volume",
+      "enabled": true
+    },
+    {
+      "name": "Flux2-Klein-9B-True-v2-bf16.safetensors",
+      "model_type": "diffusion_model",
+      "source_url": null,
+      "target_path": "unet/Flux2-Klein-9B-True-v2-bf16.safetensors",
+      "sha256": null,
+      "strategy": "volume",
+      "enabled": true
+    },
+    {
+      "name": "sam3.pt",
+      "model_type": "other",
+      "source_url": null,
+      "target_path": "sam3/sam3.pt",
+      "sha256": null,
+      "strategy": "volume",
+      "enabled": true
+    },
+    {
+      "name": "f2k_consis.safetensors",
+      "model_type": "lora",
+      "source_url": null,
+      "target_path": "loras/Klein/f2k_consis.safetensors",
+      "sha256": null,
+      "strategy": "volume",
+      "enabled": true
+    },
+    {
+      "name": "klein-9b_realism_slider_v2.safetensors",
+      "model_type": "lora",
+      "source_url": null,
+      "target_path": "loras/Klein/klein-9b_realism_slider_v2.safetensors",
+      "sha256": null,
+      "strategy": "volume",
+      "enabled": true
+    },
+    {
+      "name": "realDream_klein9BV1.safetensors",
+      "model_type": "diffusion_model",
+      "source_url": null,
+      "target_path": "diffusion_models/realDream_klein9BV1.safetensors",
+      "sha256": null,
+      "strategy": "volume",
+      "enabled": true
+    }
+  ]
+}

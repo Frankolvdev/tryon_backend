@@ -299,6 +299,8 @@ APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
 VOLUME_PATH = {json.dumps(volume_path)}
 COMFYUI_PORT = 8188
+TRYON_PIPELINE_ROUTE = "/api/tryon/pipeline"
+TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"
 STARTUP_TIMEOUT = int(os.getenv("TRYON_MODAL_STARTUP_TIMEOUT", "600"))
 
 GPU = os.getenv("TRYON_MODAL_GPU", "L40S")
@@ -453,7 +455,7 @@ def _proxy_app():
             forwarded["Referer"] = f"{{upstream_http}}/"
         return forwarded
 
-    @web_app.post("/api/tryon/pipeline")
+    @web_app.post(TRYON_PIPELINE_ROUTE)
     async def execute_tryon_pipeline(request: Request):
         """Execute one complete workflow/Python pipeline in this GPU container."""
         try:
@@ -462,7 +464,7 @@ def _proxy_app():
             raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Pipeline payload must be a JSON object.")
-        if payload.get("runtime_contract") != "tryon.generation-runtime/v1":
+        if payload.get("runtime_contract") != TRYON_RUNTIME_CONTRACT:
             raise HTTPException(status_code=400, detail="Unsupported Generation Runtime contract.")
 
         runtime_worker = RUNTIME_ROOT / "runpod_worker"
@@ -475,6 +477,15 @@ def _proxy_app():
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return result
+
+    @web_app.get("/api/tryon/runtime")
+    async def tryon_runtime_info():
+        return {{
+            "provider": "modal",
+            "runtime_contract": TRYON_RUNTIME_CONTRACT,
+            "pipeline_route": TRYON_PIPELINE_ROUTE,
+            "pipeline_method": "POST",
+        }}
 
     @web_app.api_route("/{{path:path}}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     async def proxy_http(path: str, request: Request):
