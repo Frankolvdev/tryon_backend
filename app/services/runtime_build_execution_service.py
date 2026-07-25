@@ -7,6 +7,7 @@ from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_project import RuntimeProject
 from app.models.runpod_config import RunPodConfig
 from app.services.runtime_builder_service import RuntimeBuilderService
+from app.services.ai_engine_settings_service import ai_engine_settings_service
 
 ROOT = Path(os.getenv("RUNTIME_BUILDS_DIR", "runtime_builds")).resolve()
 ROOT.mkdir(parents=True, exist_ok=True)
@@ -300,8 +301,19 @@ class RuntimeBuildExecutionService:
             if deployment["provider"] != "modal":
                 raise ValueError("El proveedor seleccionado todavía no tiene adaptador de despliegue.")
             cfg = InfrastructureProviderService.get_modal(db)
-            if not cfg.enabled or not cfg.token_id or not cfg.token_secret:
-                raise ValueError("Activa y configura Modal en Proveedores de infraestructura.")
+            engine = ai_engine_settings_service.get(db)
+            missing = []
+            if not cfg.enabled: missing.append("activar Modal")
+            if not cfg.token_id: missing.append("Token ID")
+            if not cfg.token_secret: missing.append("Token Secret")
+            if not cfg.environment: missing.append("Environment")
+            if not cfg.app_name: missing.append("App Name")
+            if not cfg.volume_name: missing.append("Volume Name")
+            if not engine.modal_gpu: missing.append("GPU")
+            if engine.modal_max_containers < engine.modal_min_containers: missing.append("rango de contenedores")
+            if engine.modal_concurrency < 1: missing.append("concurrencia")
+            if missing:
+                raise ValueError("Completa Configuración Modal y Configuración del proveedor antes del deploy: " + ", ".join(missing) + ".")
             RuntimeBuildExecutionService._update_deployment(
                 db, build, deployment, phase="validating-credentials", progress=20,
                 message="Validando credenciales.", log="[deploy:2/6] Credenciales y configuración de Modal validadas.",
@@ -324,7 +336,14 @@ class RuntimeBuildExecutionService:
             )
             proc = subprocess.Popen(
                 [executable, "deploy", str(app_file)], cwd=str(context),
-                env=InfrastructureProviderService._modal_env(cfg),
+                env={**InfrastructureProviderService._modal_env(cfg),
+                    "TRYON_MODAL_GPU": engine.modal_gpu,
+                    "TRYON_MODAL_MIN_CONTAINERS": str(engine.modal_min_containers),
+                    "TRYON_MODAL_MAX_CONTAINERS": str(engine.modal_max_containers),
+                    "TRYON_MODAL_CONCURRENCY": str(engine.modal_concurrency),
+                    "TRYON_MODAL_SCALEDOWN_WINDOW": str(engine.modal_scaledown_window_seconds),
+                    "TRYON_MODAL_EXECUTION_TIMEOUT": str(engine.modal_execution_timeout_seconds),
+                },
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
             )
             progress = 48

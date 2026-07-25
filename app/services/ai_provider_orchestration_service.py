@@ -9,6 +9,8 @@ from app.services.runtime_settings_service import runtime_settings_service
 from app.repositories.system_setting_repository import system_setting_repository
 from app.schemas.system_setting import SystemSettingUpdate
 from app.services.system_setting_service import system_setting_service
+from app.services.infrastructure_provider_service import InfrastructureProviderService
+from app.services.ai_engine_settings_service import ai_engine_settings_service
 
 
 class AiProviderOrchestrationService:
@@ -106,6 +108,19 @@ class AiProviderOrchestrationService:
             },
         }
 
+
+    def _modal_health(self, db: Session) -> dict:
+        config = InfrastructureProviderService.get_modal(db)
+        engine = ai_engine_settings_service.get(db)
+        provider_ready = bool(config.enabled and config.token_id and config.token_secret and config.app_name and config.volume_name)
+        engine_ready = bool(engine.modal_gpu and engine.modal_max_containers >= engine.modal_min_containers and engine.modal_concurrency >= 1)
+        available = provider_ready and engine_ready
+        return {
+            "provider": "modal", "enabled": bool(config.enabled), "configured": provider_ready, "available": available,
+            "message": "Modal listo para despliegues." if available else "Completa Configuración Modal y Configuración del proveedor.",
+            "details": {"app_name": config.app_name, "volume_name": config.volume_name, "gpu": engine.modal_gpu},
+        }
+
     def overview(self, db: Session) -> dict:
         mode = runtime_settings_service.get_string(
             db,
@@ -119,6 +134,7 @@ class AiProviderOrchestrationService:
             self._simulated_health(db),
             self._comfyui_health(db),
             self._runpod_health(db),
+            self._modal_health(db),
         ]
 
         fallback_order = [

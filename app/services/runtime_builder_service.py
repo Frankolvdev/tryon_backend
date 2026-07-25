@@ -280,11 +280,19 @@ class RuntimeBuilderService:
     def _modal_app(volume_name: str, volume_path: str, runtime_name: str) -> str:
         # Modal builds directly from the generated Dockerfile. GPU snapshots stay
         # opt-in because the feature remains experimental and must be benchmarked.
-        return f'''import modal
+        return f'''import os
+import modal
 
 APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
 VOLUME_PATH = {json.dumps(volume_path)}
+
+GPU = os.getenv("TRYON_MODAL_GPU", "L40S")
+MIN_CONTAINERS = int(os.getenv("TRYON_MODAL_MIN_CONTAINERS", "0"))
+MAX_CONTAINERS = int(os.getenv("TRYON_MODAL_MAX_CONTAINERS", "3"))
+CONCURRENCY = int(os.getenv("TRYON_MODAL_CONCURRENCY", "1"))
+SCALEDOWN_WINDOW = int(os.getenv("TRYON_MODAL_SCALEDOWN_WINDOW", "300"))
+EXECUTION_TIMEOUT = int(os.getenv("TRYON_MODAL_EXECUTION_TIMEOUT", "1800"))
 
 app = modal.App(APP_NAME)
 models_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -292,13 +300,16 @@ image = modal.Image.from_dockerfile("Dockerfile")
 
 @app.function(
     image=image,
-    gpu=["L40S", "A100-80GB", "H100"],
+    gpu=GPU,
+    min_containers=MIN_CONTAINERS,
+    max_containers=MAX_CONTAINERS,
     volumes={{VOLUME_PATH: models_volume}},
-    timeout=1800,
-    scaledown_window=60,
+    timeout=EXECUTION_TIMEOUT,
+    scaledown_window=SCALEDOWN_WINDOW,
     enable_memory_snapshot=True,
     experimental_options={{"enable_gpu_snapshot": True}},
 )
+@modal.concurrent(max_inputs=CONCURRENCY)
 @modal.web_server(8000, startup_timeout=600)
 def comfyui():
     import subprocess
