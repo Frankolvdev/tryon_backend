@@ -214,6 +214,9 @@ class RuntimeModelVolumeAnalyzeRequest(BaseModel):
 class RuntimeModelVolumeExportRequest(BaseModel):
     comfyui_path: str = Field(min_length=1, max_length=2000)
     output_directory: str | None = Field(default=None, max_length=2000)
+    destination_type: Literal["local", "docker_volume"] = "local"
+    docker_volume: str | None = Field(default=None, max_length=255)
+    docker_path: str = Field(default="", max_length=2000)
     calculate_sha256: bool = True
     overwrite: bool = False
     skip_identical: bool = True
@@ -224,11 +227,18 @@ class RuntimeModelVolumeExportResponse(BaseModel):
     output_directory: str
     models_directory: str
     manifest_path: str
+    destination_type: str = "local"
+    docker_volume: str | None = None
+    docker_path: str | None = None
     models_detected: int
     models_found: int
     models_missing: int
     models_copied: int
     models_skipped: int
+    models_overwritten: int = 0
+    errors: int = 0
+    elapsed_seconds: float = 0
+    destination: dict | None = None
     bytes_copied: int
     warnings: list[str]
     manifest: dict
@@ -266,3 +276,36 @@ class RuntimeProjectResponse(RuntimeWorkspaceUpdate):
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+class RuntimeModelExportSettings(BaseModel):
+    comfyui_path: str = ""
+    output_directory: str = ""
+    destination_type: Literal["local", "docker_volume"] = "local"
+    docker_volume: str = ""
+    docker_path: str = ""
+    calculate_sha256: bool = True
+    overwrite: bool = False
+    skip_identical: bool = True
+
+
+class RuntimeLaunchSettings(BaseModel):
+    build_name: str = "tryon-runtime"
+    image_name: str = "tryon-runtime:latest"
+    container_name: str = "tryon-comfyui"
+    host_port: int = Field(default=8190, ge=1, le=65535)
+    container_port: int = Field(default=8188, ge=1, le=65535)
+    models_volume: str = ""
+    workflows_volume: str = ""
+    output_volume: str = ""
+    models_mount_path: str = "/app/ComfyUI/models"
+    workflows_mount_path: str = "/app/ComfyUI/user/default/workflows"
+    output_mount_path: str = "/app/ComfyUI/output"
+    gpu_mode: Literal["auto", "nvidia", "none"] = "nvidia"
+    restart_policy: Literal["no", "always", "unless-stopped", "on-failure"] = "unless-stopped"
+    extra_arguments: list[str] = Field(default_factory=list)
+
+
+class RuntimeLaunchPreview(BaseModel):
+    command: str
+    lines: list[str]

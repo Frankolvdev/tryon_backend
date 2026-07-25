@@ -299,67 +299,41 @@ def cancel(build_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/builds/bulk-cancel", response_model=RuntimeBuildBulkResponse)
-def bulk_cancel_builds(
-    payload: RuntimeBuildBulkRequest,
-    db: Session = Depends(get_db),
-):
+def bulk_cancel_builds(payload: RuntimeBuildBulkRequest, db: Session = Depends(get_db)):
     active_statuses = {"building", "pending", "validating", "publishing"}
-    items = (
-        db.query(RuntimeBuilderBuild)
-        .filter(RuntimeBuilderBuild.id.in_(payload.ids))
-        .all()
-    )
+    items = db.query(RuntimeBuilderBuild).filter(RuntimeBuilderBuild.id.in_(payload.ids)).all()
     by_id = {item.id: item for item in items}
     affected_ids: list[int] = []
     skipped_ids: list[int] = []
-
     for build_id in payload.ids:
         item = by_id.get(build_id)
         if item is None or item.status not in active_statuses:
             skipped_ids.append(build_id)
             continue
-
         item.status = "cancelled"
         item.phase = "cancelled"
         db.add(item)
         affected_ids.append(build_id)
-
     db.commit()
-    return RuntimeBuildBulkResponse(
-        affected_ids=affected_ids,
-        skipped_ids=skipped_ids,
-    )
+    return RuntimeBuildBulkResponse(affected_ids=affected_ids, skipped_ids=skipped_ids)
 
 
 @router.post("/builds/bulk-delete", response_model=RuntimeBuildBulkResponse)
-def bulk_delete_builds(
-    payload: RuntimeBuildBulkRequest,
-    db: Session = Depends(get_db),
-):
+def bulk_delete_builds(payload: RuntimeBuildBulkRequest, db: Session = Depends(get_db)):
     active_statuses = {"building", "pending", "validating", "publishing"}
-    items = (
-        db.query(RuntimeBuilderBuild)
-        .filter(RuntimeBuilderBuild.id.in_(payload.ids))
-        .all()
-    )
+    items = db.query(RuntimeBuilderBuild).filter(RuntimeBuilderBuild.id.in_(payload.ids)).all()
     by_id = {item.id: item for item in items}
     affected_ids: list[int] = []
     skipped_ids: list[int] = []
-
     for build_id in payload.ids:
         item = by_id.get(build_id)
         if item is None or item.status in active_statuses or item.active:
             skipped_ids.append(build_id)
             continue
-
         db.delete(item)
         affected_ids.append(build_id)
-
     db.commit()
-    return RuntimeBuildBulkResponse(
-        affected_ids=affected_ids,
-        skipped_ids=skipped_ids,
-    )
+    return RuntimeBuildBulkResponse(affected_ids=affected_ids, skipped_ids=skipped_ids)
 
 @router.post("/import/scan-path")
 def import_scan_path(payload: RuntimeImportPathRequest):
