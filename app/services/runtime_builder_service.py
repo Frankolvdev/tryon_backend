@@ -310,7 +310,7 @@ image = modal.Image.from_dockerfile("Dockerfile")
     experimental_options={{"enable_gpu_snapshot": True}},
 )
 @modal.concurrent(max_inputs=CONCURRENCY)
-@modal.web_server(8000, startup_timeout=600)
+@modal.web_server(8188, startup_timeout=600)
 def comfyui():
     import subprocess
 
@@ -534,8 +534,8 @@ def comfyui():
             )
         ) + "\n"
 
-        comfy_args = "--listen 0.0.0.0 --port 8000" if modal_enabled else "--listen 127.0.0.1 --port 8188"
-        health_port = 8000 if modal_enabled else 8188
+        comfy_args = "--listen 0.0.0.0 --port 8188" if modal_enabled else "--listen 127.0.0.1 --port 8188"
+        health_port = 8188
         entrypoint = f"""#!/usr/bin/env bash
 set -euo pipefail
 MODELS_ROOT="${{MODELS_ROOT:-/models}}"
