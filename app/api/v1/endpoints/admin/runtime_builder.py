@@ -10,6 +10,7 @@ from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.models.runtime_project import RuntimeProject
 from app.schemas.runtime_builder import (
     RuntimeBuildCreate,
+    RuntimeBuildDeployRequest,
     RuntimeBuildListResponse,
     RuntimeBuildResponse,
     RuntimeBuildBulkRequest,
@@ -240,14 +241,13 @@ def create_build(
     db: Session = Depends(get_db),
 ):
     try:
-        build = RuntimeBuildExecutionService.create(db, get_or_create(db), payload.context_directory)
+        build = RuntimeBuildExecutionService.create(db, get_or_create(db))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     background_tasks.add_task(
         RuntimeBuildExecutionService.start,
         build.id,
         payload.push_after_build,
-        payload.no_cache,
     )
     return build
 
@@ -273,33 +273,35 @@ def publish(
     return item
 
 
-@router.post("/builds/{build_id}/publish-modal", response_model=RuntimeBuildResponse)
-def publish_modal(
+@router.post("/builds/{build_id}/deploy", response_model=RuntimeBuildResponse)
+def deploy_build(
     build_id: int,
+    payload: RuntimeBuildDeployRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     item = db.get(RuntimeBuilderBuild, build_id)
     if not item:
         raise HTTPException(404, "Build no encontrado.")
-    background_tasks.add_task(RuntimeBuildExecutionService.publish_modal, item.id)
+    if item.status not in {"succeeded", "published", "active"}:
+        raise HTTPException(422, "La compilación debe finalizar correctamente antes de desplegarse.")
+    background_tasks.add_task(RuntimeBuildExecutionService.deploy, item.id, payload.provider)
     return item
 
 
-
-
-@router.post("/builds/{build_id}/clear-cache")
-def clear_build_cache(build_id: int, db: Session = Depends(get_db)):
+@router.post("/builds/{build_id}/publish-modal", response_model=RuntimeBuildResponse)
+def publish_modal_compat(
+    build_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Compatibilidad con el botón anterior; delega al proceso unificado."""
     item = db.get(RuntimeBuilderBuild, build_id)
     if not item:
         raise HTTPException(404, "Build no encontrado.")
-    if item.status in {"building", "pending", "validating", "publishing"}:
-        raise HTTPException(409, "No se puede limpiar la caché mientras la compilación está activa.")
-    try:
-        result = RuntimeBuildExecutionService.clear_build_cache(db, item)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    return result
+    background_tasks.add_task(RuntimeBuildExecutionService.deploy, item.id, "modal")
+    return item
+
 
 @router.post("/builds/{build_id}/activate", response_model=RuntimeBuildResponse)
 def activate(build_id: int, db: Session = Depends(get_db)):

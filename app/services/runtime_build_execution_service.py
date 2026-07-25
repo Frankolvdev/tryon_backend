@@ -132,8 +132,8 @@ class RuntimeBuildExecutionService:
         db.add(build); db.commit(); db.refresh(build); return build
 
     @staticmethod
-    def start(build_id:int, push_after_build=False, no_cache=False):
-        threading.Thread(target=RuntimeBuildExecutionService._run,args=(build_id,push_after_build,no_cache),daemon=True).start()
+    def start(build_id:int, push_after_build=False):
+        threading.Thread(target=RuntimeBuildExecutionService._run,args=(build_id,push_after_build),daemon=True).start()
 
     @staticmethod
     def _append(db, build, line, phase=None, progress=None):
@@ -143,7 +143,7 @@ class RuntimeBuildExecutionService:
         db.add(build); db.commit()
 
     @staticmethod
-    def _run(build_id, push_after_build, no_cache=False):
+    def _run(build_id, push_after_build):
         db=SessionLocal()
         try:
             build=db.get(RuntimeBuilderBuild,build_id); cfg=db.get(RuntimeBuilderConfig,build.runtime_config_id)
@@ -157,11 +157,7 @@ class RuntimeBuildExecutionService:
                 raise RuntimeError(str(exc)) from exc
             build.context_path=str(ctx)
             RuntimeBuildExecutionService._append(db,build,f"[runtime-builder] Usando exportación persistida: {ctx}","building",12)
-            cmd=['docker','build']
-            if no_cache:
-                cmd.append('--no-cache')
-                RuntimeBuildExecutionService._append(db,build,'[runtime-builder] Recompilación limpia solicitada: Docker build sin caché.','building',14)
-            cmd += ['--platform',cfg.target_platform,'-t',build.image_tag,'-f',str(ctx/'Dockerfile'),str(ctx)]
+            cmd=['docker','build','--platform',cfg.target_platform,'-t',build.image_tag,'-f',str(ctx/'Dockerfile'),str(ctx)]
             proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
             for line in proc.stdout or []:
                 db.refresh(build)
@@ -183,29 +179,6 @@ class RuntimeBuildExecutionService:
         finally: db.close()
 
     @staticmethod
-    def clear_build_cache(db, build):
-        try:
-            result = subprocess.run(
-                ["docker", "builder", "prune", "--all", "--force"],
-                capture_output=True,
-                text=True,
-                timeout=1800,
-            )
-        except FileNotFoundError as exc:
-            raise ValueError("Docker no está disponible en el host del backend.") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ValueError("La limpieza de caché excedió el tiempo permitido.") from exc
-        output = ((result.stdout or "") + (result.stderr or "")).strip()
-        if result.returncode != 0:
-            raise ValueError(output or "Docker no pudo limpiar la caché de compilación.")
-        RuntimeBuildExecutionService._append(
-            db,
-            build,
-            "[runtime-builder] Caché global de Docker BuildKit eliminada. La imagen final, los volúmenes, modelos y workflows se conservaron.",
-        )
-        return {"success": True, "message": output or "Caché de compilación eliminada."}
-
-    @staticmethod
     def publish(build_id):
         db=SessionLocal()
         try:
@@ -223,45 +196,82 @@ class RuntimeBuildExecutionService:
 
 
     @staticmethod
+    def _deployment_state(build, provider: str, **values):
+        manifest = dict(build.manifest or {})
+        deployments = dict(manifest.get("deployments") or {})
+        current = dict(deployments.get(provider) or {})
+        current.update(values)
+        deployments[provider] = current
+        manifest["deployments"] = deployments
+        build.manifest = manifest
+
+    @staticmethod
+    def deploy(build_id: int, provider: str):
+        if provider != "modal":
+            raise ValueError(f"Proveedor de despliegue no soportado: {provider}")
+        RuntimeBuildExecutionService.publish_modal(build_id)
+
+    @staticmethod
     def publish_modal(build_id):
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         db=SessionLocal()
         try:
             build=db.get(RuntimeBuilderBuild,build_id)
             if not build or build.status not in {'succeeded','published','active'}:
-                raise ValueError('El build debe finalizar correctamente antes de subirlo a Modal.')
+                raise ValueError('El build debe finalizar correctamente antes de desplegarlo en Modal.')
+            previous_status = build.status
+            RuntimeBuildExecutionService._deployment_state(
+                build, 'modal', status='preparing', provider='modal', image_tag=build.image_tag,
+                started_at=utc_now().isoformat(), finished_at=None, error=None, app_name=None,
+            )
+            build.status='publishing'; build.phase='modal-preparing'; build.progress=92
+            RuntimeBuildExecutionService._append(db,build,'[modal:1/5] Preparando despliegue de la compilación seleccionada…','modal-preparing',92)
+
             cfg=InfrastructureProviderService.get_modal(db)
             if not cfg.enabled or not cfg.token_id or not cfg.token_secret:
                 raise ValueError('Activa y configura Modal en Proveedores de infraestructura.')
+            RuntimeBuildExecutionService._deployment_state(build,'modal',status='validating',app_name=cfg.app_name,volume_name=cfg.volume_name)
+            RuntimeBuildExecutionService._append(db,build,'[modal:2/5] Credenciales y configuración validadas.','modal-validating',94)
+
             executable=shutil.which('modal')
             if not executable:
                 raise ValueError('Modal CLI no está instalado en el backend. Ejecuta: pip install modal')
             context=Path(build.context_path or '').expanduser().resolve()
             app_file=context/'modal_app.py'
-            if not app_file.is_file():
-                raise ValueError('La compilación seleccionada no contiene modal_app.py. Vuelve a generar el runtime con soporte Modal.')
-            build.status='publishing'
-            RuntimeBuildExecutionService._append(db,build,f'[modal] Publicando compilación {build.image_tag} desde {context}...','publishing',95)
+            dockerfile=context/'Dockerfile'
+            if not context.is_dir() or not app_file.is_file() or not dockerfile.is_file():
+                raise ValueError('La compilación seleccionada no contiene un contexto Modal válido. Vuelve a exportar el runtime y recompila.')
+            RuntimeBuildExecutionService._deployment_state(build,'modal',status='deploying',context_path=str(context))
+            RuntimeBuildExecutionService._append(db,build,f'[modal:3/5] Contexto validado: {context}','modal-context',95)
+            RuntimeBuildExecutionService._append(db,build,f'[modal:4/5] Ejecutando modal deploy para {cfg.app_name}…','modal-deploying',96)
+
             proc=subprocess.Popen(
                 [executable,'deploy',str(app_file)],
                 cwd=str(context),
                 env=InfrastructureProviderService._modal_env(cfg),
                 stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,
             )
+            output_lines=[]
             for line in proc.stdout or []:
-                RuntimeBuildExecutionService._append(db,build,f'[modal] {line.rstrip()}','publishing',98)
+                clean=line.rstrip()
+                output_lines.append(clean)
+                RuntimeBuildExecutionService._append(db,build,f'[modal] {clean}','modal-deploying',98)
             if proc.wait()!=0:
                 raise RuntimeError('modal deploy terminó con error.')
-            build.published=True
-            build.status='published'
-            build.phase='modal-published'
-            build.progress=100
-            RuntimeBuildExecutionService._append(db,build,f'[modal] Compilación publicada en la app {cfg.app_name}.')
+
+            build.status = previous_status if previous_status in {'published','active'} else 'succeeded'
+            build.phase='modal-deployed'; build.progress=100; build.error_message=None
+            RuntimeBuildExecutionService._deployment_state(
+                build,'modal',status='deployed',app_name=cfg.app_name,volume_name=cfg.volume_name,
+                finished_at=utc_now().isoformat(),last_output='\n'.join(output_lines[-30:]),error=None,
+            )
+            RuntimeBuildExecutionService._append(db,build,f'[modal:5/5] Despliegue completado en la app {cfg.app_name}.','modal-deployed',100)
         except Exception as exc:
             build=db.get(RuntimeBuilderBuild,build_id)
             if build:
-                build.status='failed'; build.phase='failed'; build.error_message=str(exc)
-                RuntimeBuildExecutionService._append(db,build,f'[modal:error] {exc}')
+                build.status='failed'; build.phase='modal-failed'; build.error_message=str(exc)
+                RuntimeBuildExecutionService._deployment_state(build,'modal',status='failed',finished_at=utc_now().isoformat(),error=str(exc))
+                RuntimeBuildExecutionService._append(db,build,f'[modal:error] {exc}','modal-failed',100)
         finally:
             db.close()
 

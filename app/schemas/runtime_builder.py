@@ -116,9 +116,12 @@ class RuntimeGeneratedFilesResponse(BaseModel):
 
 class RuntimeBuildCreate(BaseModel):
     push_after_build: bool = False
-    context_directory: str | None = None
-    no_cache: bool = False
 
+
+
+
+class RuntimeBuildDeployRequest(BaseModel):
+    provider: Literal["modal"] = "modal"
 
 class RuntimeBuildBulkRequest(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=200)
