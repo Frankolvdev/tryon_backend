@@ -313,6 +313,10 @@ COMFYUI_MAIN = COMFYUI_ROOT / "main.py"
 RUNTIME_ROOT = Path("/app/runtime")
 MODELS_ROOT = Path(os.getenv("MODELS_ROOT", VOLUME_PATH))
 COMFY_USER_ROOT = Path(os.getenv("COMFY_USER_ROOT", "/tmp/comfyui-user"))
+COMFY_DATABASE_URL = os.getenv(
+    "COMFY_DATABASE_URL",
+    f"sqlite:///{COMFY_USER_ROOT / 'comfyui.db'}",
+)
 
 app = modal.App(APP_NAME)
 models_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -379,6 +383,14 @@ def _proxy_app():
     def clean_headers(headers):
         return {{k: v for k, v in headers.items() if k.lower() not in hop_headers and k.lower() != "host"}}
 
+    def upstream_request_headers(headers):
+        forwarded = clean_headers(headers)
+        if any(key.lower() == "origin" for key in forwarded):
+            forwarded["Origin"] = upstream_http
+        if any(key.lower() == "referer" for key in forwarded):
+            forwarded["Referer"] = f"{{upstream_http}}/"
+        return forwarded
+
     @web_app.api_route("/{{path:path}}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     async def proxy_http(path: str, request: Request):
         target = f"{{upstream_http}}/{{path}}"
@@ -389,7 +401,7 @@ def _proxy_app():
             async with session.request(
                 request.method,
                 target,
-                headers=clean_headers(request.headers),
+                headers=upstream_request_headers(request.headers),
                 data=body or None,
                 allow_redirects=False,
             ) as upstream:
@@ -416,6 +428,7 @@ def _proxy_app():
             for key, value in websocket.scope.get("headers", [])
             if key.decode("latin-1").lower() not in websocket_handshake_headers
         }}
+        forwarded["Origin"] = upstream_http
         async with ClientSession() as session:
             async with session.ws_connect(target, headers=forwarded, autoping=True) as upstream:
                 await websocket.accept()
@@ -481,6 +494,7 @@ class ComfyUIServer:
         env["COMFYUI_PORT"] = str(COMFYUI_PORT)
         env["MODELS_ROOT"] = str(MODELS_ROOT)
         env["COMFY_USER_ROOT"] = str(COMFY_USER_ROOT)
+        env["COMFY_DATABASE_URL"] = COMFY_DATABASE_URL
 
         _prepare_runtime_directories()
         _run_performance_probe(env)
@@ -495,6 +509,8 @@ class ComfyUIServer:
             str(COMFYUI_PORT),
             "--user-directory",
             str(COMFY_USER_ROOT),
+            "--database-url",
+            COMFY_DATABASE_URL,
             *extra_args,
         ]
         print(f"[modal] Iniciando ComfyUI directamente: {{shlex.join(command)}}", flush=True)
