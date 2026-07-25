@@ -367,9 +367,9 @@ def _ensure_linux_machine_id() -> None:
         machine_id = uuid.uuid4().hex
 
     primary.parent.mkdir(parents=True, exist_ok=True)
-    primary.write_text(machine_id + "\n", encoding="utf-8")
+    primary.write_text(machine_id + "\\n", encoding="utf-8")
     dbus.parent.mkdir(parents=True, exist_ok=True)
-    dbus.write_text(machine_id + "\n", encoding="utf-8")
+    dbus.write_text(machine_id + "\\n", encoding="utf-8")
     print(f"[runtime] Linux machine-id preparado para Execute Python: {{machine_id[:8]}}…", flush=True)
 
 
