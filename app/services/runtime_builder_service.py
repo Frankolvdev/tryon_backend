@@ -278,10 +278,11 @@ class RuntimeBuilderService:
 
     @staticmethod
     def _modal_app(volume_name: str, volume_path: str, runtime_name: str) -> str:
-        # Modal snapshots are intentionally preserved. ComfyUI is started during
-        # the snap=True lifecycle phase, after which Modal captures CPU and GPU
-        # state. On restore, snap=False verifies that the listener survived and
-        # restarts it only when necessary.
+        # Modal snapshots are intentionally preserved, but the HTTP listener is
+        # not created before the snapshot. Capturing an already-open ComfyUI
+        # socket can leave Modal's public proxy attached to stale restored state.
+        # The snapshot phase initializes the Python/CUDA runtime only; ComfyUI is
+        # started after restoration and Modal waits until port 8188 is healthy.
         return f'''import os
 import signal
 import socket
@@ -360,26 +361,33 @@ class ComfyUIServer:
 
     @modal.enter(snap=True)
     def initialize_for_snapshot(self) -> None:
-        print("[modal] Iniciando ComfyUI antes del snapshot CPU/GPU.", flush=True)
-        self._start_process()
+        # Preserve Modal CPU/GPU snapshots without snapshotting an open HTTP
+        # listener. ComfyUI itself is started only after the snapshot restore.
+        os.environ["RUNTIME_PROVIDER"] = "modal"
+        os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
+        print("[modal] Preparando runtime CPU/GPU para snapshot, sin abrir el puerto.", flush=True)
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.init()
+                print(
+                    f"[modal] CUDA preparada para snapshot: {{torch.cuda.get_device_name(0)}}.",
+                    flush=True,
+                )
+        except Exception as exc:
+            # Snapshotting remains enabled even if eager CUDA initialization is
+            # unavailable; ComfyUI will initialize CUDA during normal startup.
+            print(f"[modal] Preparación CUDA diferida: {{exc}}", flush=True)
 
     @modal.enter(snap=False)
     def restore_after_snapshot(self) -> None:
-        # A restored snapshot normally keeps the subprocess state. The probe
-        # handles platform/runtime changes where the listener must be recreated.
+        # Start a fresh listener after restoration. This avoids restoring stale
+        # sockets/process state while retaining Modal's memory snapshot support.
         if _port_is_ready():
-            print("[modal] ComfyUI restaurado correctamente desde snapshot.", flush=True)
+            print("[modal] El puerto ya estaba disponible después del restore.", flush=True)
             return
-
-        process = getattr(self, "comfyui_process", None)
-        if process is not None and process.poll() is None:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                process.wait(timeout=15)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                pass
-
-        print("[modal] El listener no sobrevivió al restore; reiniciando ComfyUI.", flush=True)
+        print("[modal] Snapshot restaurado; iniciando ComfyUI en puerto 8188.", flush=True)
         self._start_process()
 
     @modal.web_server(port=COMFYUI_PORT, startup_timeout=STARTUP_TIMEOUT)
