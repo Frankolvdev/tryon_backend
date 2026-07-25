@@ -25,7 +25,6 @@ from app.schemas.generation_module_runtime import (
     GenerationModuleStepExecution,
 )
 from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
-from app.services.comfyui_prompt_preprocessor_service import comfyui_prompt_preprocessor_service
 from app.services.generation_module_service import generation_module_service
 from app.services.generation_module_file_materializer_service import generation_module_file_materializer_service
 from app.services.generation_module_security_service import generation_module_security_service
@@ -616,7 +615,6 @@ class GenerationModuleRuntimeService:
                     materialized.append(cached)
                 value = cached.get("relative_name") or cached.get("target_name") or cached.get("filename")
             node.setdefault("inputs", {})[binding["input_field"]] = value
-        workflow = comfyui_prompt_preprocessor_service.preprocess(workflow)
         return workflow, configuration, materialized
 
 
