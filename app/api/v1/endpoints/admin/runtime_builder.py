@@ -243,13 +243,14 @@ def create_build(
     db: Session = Depends(get_db),
 ):
     try:
-        build = RuntimeBuildExecutionService.create(db, get_or_create(db))
+        build = RuntimeBuildExecutionService.create(db, get_or_create(db), payload.context_directory)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     background_tasks.add_task(
         RuntimeBuildExecutionService.start,
         build.id,
         payload.push_after_build,
+        payload.no_cache,
     )
     return build
 

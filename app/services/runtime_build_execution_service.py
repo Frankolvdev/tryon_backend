@@ -132,8 +132,8 @@ class RuntimeBuildExecutionService:
         db.add(build); db.commit(); db.refresh(build); return build
 
     @staticmethod
-    def start(build_id:int, push_after_build=False):
-        threading.Thread(target=RuntimeBuildExecutionService._run,args=(build_id,push_after_build),daemon=True).start()
+    def start(build_id:int, push_after_build=False, no_cache=False):
+        threading.Thread(target=RuntimeBuildExecutionService._run,args=(build_id,push_after_build,no_cache),daemon=True).start()
 
     @staticmethod
     def _append(db, build, line, phase=None, progress=None):
@@ -143,7 +143,7 @@ class RuntimeBuildExecutionService:
         db.add(build); db.commit()
 
     @staticmethod
-    def _run(build_id, push_after_build):
+    def _run(build_id, push_after_build, no_cache=False):
         db=SessionLocal()
         try:
             build=db.get(RuntimeBuilderBuild,build_id); cfg=db.get(RuntimeBuilderConfig,build.runtime_config_id)
@@ -157,7 +157,11 @@ class RuntimeBuildExecutionService:
                 raise RuntimeError(str(exc)) from exc
             build.context_path=str(ctx)
             RuntimeBuildExecutionService._append(db,build,f"[runtime-builder] Usando exportación persistida: {ctx}","building",12)
-            cmd=['docker','build','--platform',cfg.target_platform,'-t',build.image_tag,'-f',str(ctx/'Dockerfile'),str(ctx)]
+            cmd=['docker','build','--platform',cfg.target_platform,'-t',build.image_tag,'-f',str(ctx/'Dockerfile')]
+            if no_cache:
+                RuntimeBuildExecutionService._append(db,build,'[runtime-builder] Compilación sin caché activada: se ignorarán las layers anteriores.','building',12)
+                cmd.append('--no-cache')
+            cmd.append(str(ctx))
             proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
             for line in proc.stdout or []:
                 db.refresh(build)
