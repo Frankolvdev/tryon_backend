@@ -282,7 +282,8 @@ class RuntimeBuilderService:
         # Modal starts ComfyUI directly after snapshot restoration and exposes
         # it through a small ASGI reverse proxy so long-lived WebSockets remain
         # stable behind Modal's web ingress.
-        return f'''import asyncio
+        return rf'''import asyncio
+import json
 import os
 import shlex
 import signal
@@ -299,7 +300,6 @@ APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
 VOLUME_PATH = {json.dumps(volume_path)}
 COMFYUI_PORT = 8188
-TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"
 STARTUP_TIMEOUT = int(os.getenv("TRYON_MODAL_STARTUP_TIMEOUT", "600"))
 
 GPU = os.getenv("TRYON_MODAL_GPU", "L40S")
@@ -324,6 +324,22 @@ COMFY_DATABASE_URL = os.getenv(
 app = modal.App(APP_NAME)
 models_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 image = modal.Image.from_dockerfile("Dockerfile.modal").pip_install("fastapi")
+
+
+def _modal_trace(event: str, *, role: str, **fields) -> None:
+    payload = {{
+        "event": event,
+        "role": role,
+        "task_id": os.getenv("MODAL_TASK_ID"),
+        "container_id": os.getenv("MODAL_CONTAINER_ID"),
+        "function_call_id": os.getenv("MODAL_FUNCTION_CALL_ID"),
+        "function_id": os.getenv("MODAL_FUNCTION_ID"),
+        "region": os.getenv("MODAL_REGION"),
+        "image_id": os.getenv("MODAL_IMAGE_ID"),
+        "timestamp": time.time(),
+        **fields,
+    }}
+    print("[tryon-modal-trace] " + json.dumps(payload, ensure_ascii=False, default=str), flush=True)
 
 
 def _port_is_ready() -> bool:
@@ -369,9 +385,9 @@ def _ensure_linux_machine_id() -> None:
         machine_id = uuid.uuid4().hex
 
     primary.parent.mkdir(parents=True, exist_ok=True)
-    primary.write_text(machine_id + "\\n", encoding="utf-8")
+    primary.write_text(machine_id + "\n", encoding="utf-8")
     dbus.parent.mkdir(parents=True, exist_ok=True)
-    dbus.write_text(machine_id + "\\n", encoding="utf-8")
+    dbus.write_text(machine_id + "\n", encoding="utf-8")
     print(f"[runtime] Linux machine-id preparado para Execute Python: {{machine_id[:8]}}…", flush=True)
 
 
@@ -455,28 +471,53 @@ def _proxy_app():
             forwarded["Referer"] = f"{{upstream_http}}/"
         return forwarded
 
-    async def _validated_payload(request: Request):
+    @web_app.post("/api/tryon/pipeline")
+    async def execute_tryon_pipeline(request: Request):
+        """Execute one complete workflow/Python pipeline in this GPU container."""
         try:
             payload = await request.json()
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="Pipeline payload must be a JSON object.")
-        if payload.get("runtime_contract") != TRYON_RUNTIME_CONTRACT:
-            raise HTTPException(status_code=400, detail="Unsupported Generation Runtime contract.")
-        return payload
 
-    @web_app.get("/api/tryon/runtime")
-    async def tryon_runtime_info():
-        return {{
-            "provider": "modal",
-            "runtime_contract": TRYON_RUNTIME_CONTRACT,
-            "role": "comfyui_gpu_proxy",
-            "pipeline_api": "Backend invokes ComfyUIServer.run_pipeline directly through the Modal SDK.",
-        }}
+        if not isinstance(payload, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="Pipeline payload must be a JSON object.",
+            )
+
+        if payload.get("runtime_contract") != "tryon.generation-runtime/v1":
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported Generation Runtime contract.",
+            )
+
+        runtime_worker = RUNTIME_ROOT / "runpod_worker"
+        if str(runtime_worker) not in sys.path:
+            sys.path.insert(0, str(runtime_worker))
+
+        try:
+            from generation_runtime import GenerationRuntime
+
+            runtime = GenerationRuntime(comfy_url=upstream_http)
+            result = await asyncio.to_thread(runtime.execute, payload)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        return result
 
     @web_app.api_route("/{{path:path}}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     async def proxy_http(path: str, request: Request):
+        _modal_trace(
+            "proxy_http_request",
+            role="web_proxy",
+            method=request.method,
+            path=f"/{{path}}",
+            query=str(request.url.query or ""),
+            user_agent=request.headers.get("user-agent"),
+            origin=request.headers.get("origin"),
+            referer=request.headers.get("referer"),
+            forwarded_for=request.headers.get("x-forwarded-for"),
+        )
         target = f"{{upstream_http}}/{{path}}"
         if request.url.query:
             target += f"?{{request.url.query}}"
@@ -499,6 +540,15 @@ def _proxy_app():
 
     @web_app.websocket("/{{path:path}}")
     async def proxy_websocket(websocket: WebSocket, path: str):
+        headers = websocket.headers
+        _modal_trace(
+            "proxy_websocket_connect",
+            role="web_proxy",
+            path=f"/{{path}}",
+            user_agent=headers.get("user-agent"),
+            origin=headers.get("origin"),
+            forwarded_for=headers.get("x-forwarded-for"),
+        )
         target = f"{{upstream_ws}}/{{path}}"
         query = websocket.scope.get("query_string", b"").decode("latin-1")
         if query:
@@ -552,6 +602,11 @@ def _proxy_app():
                 await asyncio.gather(*pending, return_exceptions=True)
                 for task in done:
                     task.result()
+                _modal_trace(
+                    "proxy_websocket_disconnect",
+                    role="web_proxy",
+                    path=f"/{{path}}",
+                )
 
     return web_app
 
@@ -608,6 +663,7 @@ class ComfyUIServer:
 
     @modal.enter(snap=True)
     def initialize_for_snapshot(self) -> None:
+        _modal_trace("container_snapshot_initialize", role="pipeline_server")
         os.environ["RUNTIME_PROVIDER"] = "modal"
         os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
         print("[modal] Iniciando ComfyUI antes del snapshot de memoria.", flush=True)
@@ -619,6 +675,7 @@ class ComfyUIServer:
 
     @modal.enter(snap=False)
     def restore_after_snapshot(self) -> None:
+        _modal_trace("container_restore_start", role="pipeline_server")
         process = getattr(self, "comfyui_process", None)
         if process is None:
             raise RuntimeError(
@@ -634,6 +691,7 @@ class ComfyUIServer:
 
         if _port_is_ready():
             print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
+            _modal_trace("container_ready", role="pipeline_server", restored_from_snapshot=True)
             return
 
         print(
@@ -642,6 +700,7 @@ class ComfyUIServer:
         )
         _wait_until_ready(process)
         print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
+        _modal_trace("container_ready", role="pipeline_server", restored_from_snapshot=True)
 
     @modal.method()
     def run_pipeline(self, payload):
@@ -649,15 +708,37 @@ class ComfyUIServer:
             raise ValueError("Pipeline payload must be a JSON object.")
         if payload.get("runtime_contract") != TRYON_RUNTIME_CONTRACT:
             raise ValueError("Unsupported Generation Runtime contract.")
+        execution_id = str(payload.get("execution_id") or "")
+        _modal_trace("pipeline_start", role="pipeline_server", execution_id=execution_id)
         runtime_worker = RUNTIME_ROOT / "runpod_worker"
         if str(runtime_worker) not in sys.path:
             sys.path.insert(0, str(runtime_worker))
         from generation_runtime import GenerationRuntime
         runtime = GenerationRuntime(comfy_url=f"http://127.0.0.1:{{COMFYUI_PORT}}")
-        return runtime.execute(payload)
+        started = time.monotonic()
+        try:
+            result = runtime.execute(payload)
+        except BaseException as exc:
+            _modal_trace(
+                "pipeline_error",
+                role="pipeline_server",
+                execution_id=execution_id,
+                error_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+            raise
+        _modal_trace(
+            "pipeline_end",
+            role="pipeline_server",
+            execution_id=execution_id,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            status=result.get("status") if isinstance(result, dict) else None,
+        )
+        return result
 
     @modal.exit()
     def shutdown(self) -> None:
+        _modal_trace("container_exit", role="pipeline_server")
         process = getattr(self, "comfyui_process", None)
         if process is None or process.poll() is not None:
             return
@@ -721,6 +802,7 @@ class ComfyUIWebProxy:
 
     @modal.enter(snap=True)
     def initialize_for_snapshot(self) -> None:
+        _modal_trace("container_snapshot_initialize", role="web_proxy")
         os.environ["RUNTIME_PROVIDER"] = "modal"
         os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
         print("[modal] Iniciando ComfyUI antes del snapshot de memoria.", flush=True)
@@ -732,6 +814,7 @@ class ComfyUIWebProxy:
 
     @modal.enter(snap=False)
     def restore_after_snapshot(self) -> None:
+        _modal_trace("container_restore_start", role="web_proxy")
         process = getattr(self, "comfyui_process", None)
         if process is None:
             raise RuntimeError(
@@ -747,6 +830,7 @@ class ComfyUIWebProxy:
 
         if _port_is_ready():
             print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
+            _modal_trace("container_ready", role="web_proxy", restored_from_snapshot=True)
             return
 
         print(
@@ -755,6 +839,7 @@ class ComfyUIWebProxy:
         )
         _wait_until_ready(process)
         print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
+        _modal_trace("container_ready", role="web_proxy", restored_from_snapshot=True)
 
     @modal.asgi_app(requires_proxy_auth=True)
     def comfyui(self):
@@ -762,6 +847,7 @@ class ComfyUIWebProxy:
 
     @modal.exit()
     def shutdown(self) -> None:
+        _modal_trace("container_exit", role="web_proxy")
         process = getattr(self, "comfyui_process", None)
         if process is None or process.poll() is not None:
             return
@@ -772,7 +858,6 @@ class ComfyUIWebProxy:
             return
         except subprocess.TimeoutExpired:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-
 '''
 
     @staticmethod

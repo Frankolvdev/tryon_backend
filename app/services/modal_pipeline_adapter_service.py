@@ -131,6 +131,15 @@ class ModalPipelineAdapterService:
         return text.rsplit(".", 1)[-1]
 
     def submit_pipeline(self, config: ModalProviderConfig, *, payload: dict[str, Any]) -> str:
+        execution_id = str(payload.get("execution_id") or "")
+        sdk_version = str(getattr(self._modal(), "__version__", "unknown"))
+        logger.warning(
+            "[backend-modal-spawn-start] execution_id=%s app_name=%s environment=%s sdk_version=%s",
+            execution_id,
+            str(config.app_name or "").strip(),
+            str(config.environment or "main").strip() or "main",
+            sdk_version,
+        )
         try:
             call = self._worker(config).run_pipeline.spawn(jsonable_encoder(payload))
         except Exception as exc:
@@ -140,10 +149,11 @@ class ModalPipelineAdapterService:
             raise AppException("Modal did not return a FunctionCall ID.")
         with self._calls_lock:
             self._calls[call_id] = call
-        logger.info(
-            "Modal FunctionCall submitted: call_id=%s sdk_version=%s",
+        logger.warning(
+            "[backend-modal-spawn-created] execution_id=%s call_id=%s sdk_version=%s",
+            execution_id,
             call_id,
-            str(getattr(self._modal(), "__version__", "unknown")),
+            sdk_version,
         )
         return call_id
 
@@ -201,7 +211,7 @@ class ModalPipelineAdapterService:
             errors: list[dict[str, str | int]] = []
 
             logger.warning(
-                "Starting Modal hard cancellation: call_id=%s sdk_version=%s waits=50s+20s",
+                "[backend-modal-cancel-start] call_id=%s sdk_version=%s waits=50s+20s",
                 call_id,
                 sdk_version,
             )
@@ -210,7 +220,7 @@ class ModalPipelineAdapterService:
                 try:
                     call.cancel(terminate_containers=True)
                     logger.warning(
-                        "Modal hard cancellation request sent: call_id=%s attempt=%s",
+                        "[backend-modal-cancel-sent] call_id=%s attempt=%s",
                         call_id,
                         attempt,
                     )
@@ -224,7 +234,7 @@ class ModalPipelineAdapterService:
                         "message": str(exc),
                     })
                     logger.exception(
-                        "Modal hard cancellation request failed before confirmation: "
+                        "[backend-modal-cancel-error] request failed before confirmation: "
                         "call_id=%s attempt=%s sdk_version=%s",
                         call_id,
                         attempt,
@@ -355,7 +365,7 @@ class ModalPipelineAdapterService:
 
             request_sent = sent_attempt_1 or sent_attempt_2
             logger.error(
-                "Modal did not confirm cancellation after 50s + 20s: "
+                "[backend-modal-cancel-unconfirmed] Modal did not confirm cancellation after 50s + 20s: "
                 "call_id=%s request_sent=%s errors=%s",
                 call_id,
                 request_sent,
