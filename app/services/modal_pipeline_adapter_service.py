@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Callable
@@ -8,6 +9,9 @@ from fastapi.encoders import jsonable_encoder
 
 from app.common.exceptions import AppException
 from app.schemas.infrastructure_provider import ModalProviderConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 class ModalTransientTransportError(AppException):
@@ -143,58 +147,153 @@ class ModalPipelineAdapterService:
         call_id: str,
         timeout_seconds: int = 90,
     ) -> dict[str, Any]:
+        """Cancel a Modal call with two hard-cancellation attempts.
+
+        The first attempt terminates the containers immediately and waits up to
+        50 seconds for Modal confirmation. If confirmation is unavailable, the
+        same hard cancellation is sent again and checked for another 20
+        seconds. Modal control-plane errors are logged but never prevent the
+        retry or the final local cancellation result.
+        """
+        del timeout_seconds  # Kept for backward compatibility with existing callers.
+
         modal = self._modal()
         call = self._call(config, call_id)
-        try:
-            # Hard cancellation is intentional for GPU generation. Once the workflow
-            # has been submitted to ComfyUI, cancelling only the Modal input can leave
-            # the internal prompt consuming GPU in the reused container. Terminating
-            # the container guarantees that both the FunctionCall and ComfyUI process
-            # stop before the execution is confirmed as cancelled.
-            call.cancel(terminate_containers=True)
-        except Exception as exc:
-            if not self._is_cancelled_exception(exc):
-                raise AppException(f"Could not cancel Modal FunctionCall {call_id}: {exc}") from exc
 
-        deadline = time.monotonic() + max(5, int(timeout_seconds))
-        while time.monotonic() < deadline:
+        def request_hard_cancellation(attempt: int) -> None:
             try:
-                graph = call.get_call_graph()
-                states = [self._graph_status_name(node) for node in graph]
-                if states and all(state in self._TERMINAL_GRAPH_STATES for state in states):
-                    if "TERMINATED" in states:
+                call.cancel(terminate_containers=True)
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                # The call may already be cancelled/terminated or Modal's
+                # control plane may be temporarily unavailable. In either
+                # case, continue checking and allow the next attempt.
+                logger.warning(
+                    "Modal hard cancellation attempt %s failed for FunctionCall %s: %s",
+                    attempt,
+                    call_id,
+                    exc,
+                    exc_info=True,
+                )
+
+        def wait_for_confirmation(wait_seconds: int, attempt: int) -> dict[str, Any] | None:
+            deadline = time.monotonic() + max(1, int(wait_seconds))
+            while time.monotonic() < deadline:
+                try:
+                    graph = call.get_call_graph()
+                    states = [self._graph_status_name(node) for node in graph]
+                    if states and all(state in self._TERMINAL_GRAPH_STATES for state in states):
+                        if "TERMINATED" in states:
+                            return {
+                                "status": "cancelled",
+                                "confirmed": True,
+                                "forced": False,
+                                "attempts": attempt,
+                                "call_id": call_id,
+                                "states": states,
+                            }
+                        # Do not silently convert a genuinely completed or
+                        # failed execution into a cancellation/refund.
+                        raise AppException(
+                            f"Modal FunctionCall {call_id} reached terminal state "
+                            f"without TERMINATED: {states}"
+                        )
+                except AppException:
+                    raise
+                except BaseException as exc:
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    if self._is_cancelled_exception(exc):
                         return {
                             "status": "cancelled",
                             "confirmed": True,
+                            "forced": False,
+                            "attempts": attempt,
                             "call_id": call_id,
-                            "states": states,
                         }
-                    raise AppException(
-                        f"Modal FunctionCall {call_id} reached terminal state without TERMINATED: {states}"
+                    logger.warning(
+                        "Could not read Modal call graph while confirming cancellation "
+                        "of FunctionCall %s (attempt %s): %s",
+                        call_id,
+                        attempt,
+                        exc,
                     )
-            except Exception as exc:
-                if self._is_cancelled_exception(exc):
-                    return {"status": "cancelled", "confirmed": True, "call_id": call_id}
-                # Call graph is best-effort. Verify through get() as a fallback.
-            try:
-                call.get(timeout=0)
-            except (TimeoutError, modal.exception.TimeoutError):
-                time.sleep(0.5)
-                continue
-            except BaseException as exc:
-                if self._is_cancelled_exception(exc):
-                    return {"status": "cancelled", "confirmed": True, "call_id": call_id}
-                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                    raise
+
+                try:
+                    call.get(timeout=0)
+                except (TimeoutError, modal.exception.TimeoutError):
+                    time.sleep(0.5)
+                    continue
+                except BaseException as exc:
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    if self._is_cancelled_exception(exc):
+                        return {
+                            "status": "cancelled",
+                            "confirmed": True,
+                            "forced": False,
+                            "attempts": attempt,
+                            "call_id": call_id,
+                        }
+                    # Transport/control-plane errors must not abort cancellation.
+                    logger.warning(
+                        "Could not query Modal FunctionCall %s while confirming "
+                        "cancellation (attempt %s): %s",
+                        call_id,
+                        attempt,
+                        exc,
+                    )
+                    time.sleep(0.5)
+                    continue
+
+                # A normal result means the call really completed before the
+                # cancellation was confirmed. Preserve the previous protection
+                # against incorrectly refunding a completed execution.
                 raise AppException(
-                    f"Modal FunctionCall {call_id} ended while cancellation was pending: {exc}"
-                ) from exc
-            raise AppException(
-                f"Modal FunctionCall {call_id} completed before cancellation could be confirmed."
+                    f"Modal FunctionCall {call_id} completed before cancellation "
+                    "could be confirmed."
+                )
+            return None
+
+        request_hard_cancellation(attempt=1)
+        confirmed = wait_for_confirmation(wait_seconds=50, attempt=1)
+        if confirmed is not None:
+            return confirmed
+
+        # Refresh the FunctionCall reference before retrying. If restoration
+        # fails because Modal is temporarily unavailable, retain the original
+        # handle and still perform the second attempt safely.
+        try:
+            call = self._call(config, call_id)
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            logger.warning(
+                "Could not refresh Modal FunctionCall %s before hard cancellation "
+                "attempt 2; reusing the existing handle: %s",
+                call_id,
+                exc,
+                exc_info=True,
             )
-        raise AppException(
-            f"Modal did not confirm FunctionCall {call_id} cancellation within {timeout_seconds} seconds."
+
+        request_hard_cancellation(attempt=2)
+        confirmed = wait_for_confirmation(wait_seconds=20, attempt=2)
+        if confirmed is not None:
+            return confirmed
+
+        logger.error(
+            "Modal did not confirm cancellation of FunctionCall %s after two hard "
+            "cancellation attempts (50s + 20s). Closing it locally as cancelled.",
+            call_id,
         )
+        return {
+            "status": "cancelled",
+            "confirmed": False,
+            "forced": True,
+            "attempts": 2,
+            "call_id": call_id,
+        }
 
     def execute_pipeline(
         self,
