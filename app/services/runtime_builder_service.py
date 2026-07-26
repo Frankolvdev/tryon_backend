@@ -479,45 +479,21 @@ def _runtime_control_app():
             options = await request.json()
         except Exception:
             options = {{}}
-        wait_timeout = max(5, min(int(options.get("wait_timeout_seconds") or 90), 300))
         terminate = bool(options.get("terminate_containers", True))
         call = modal.FunctionCall.from_id(call_id)
         try:
+            # Modal documents that cancel() returns after the inputs have been
+            # stopped and marked TERMINATED. No follow-up get() polling is
+            # required and doing so could race with result retention.
             await call.cancel.aio(terminate_containers=terminate)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Modal cancellation request failed: {{exc}}") from exc
-
-        deadline = time.monotonic() + wait_timeout
-        while time.monotonic() < deadline:
-            try:
-                result = await call.get.aio(timeout=0)
-                return {{
-                    "status": "completed",
-                    "confirmed": False,
-                    "call_id": call_id,
-                    "result": result,
-                }}
-            except TimeoutError:
-                await asyncio.sleep(0.5)
-            except modal.exception.OutputExpiredError:
-                return {{
-                    "status": "cancelled",
-                    "confirmed": True,
-                    "call_id": call_id,
-                    "terminate_containers": terminate,
-                }}
-            except Exception as exc:
-                name = exc.__class__.__name__.lower()
-                message = str(exc)
-                if "cancel" in name or "cancel" in message.lower() or "terminated" in message.lower():
-                    return {{
-                        "status": "cancelled",
-                        "confirmed": True,
-                        "call_id": call_id,
-                        "terminate_containers": terminate,
-                    }}
-                raise HTTPException(status_code=502, detail=message) from exc
-        raise HTTPException(status_code=504, detail="Modal cancellation was not confirmed before timeout.")
+        return {{
+            "status": "cancelled",
+            "confirmed": True,
+            "call_id": call_id,
+            "terminate_containers": terminate,
+        }}
 
     @web_app.get("/api/tryon/runtime")
     async def tryon_runtime_info():
