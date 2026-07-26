@@ -466,7 +466,11 @@ fi
             modal_app = generated["modal_app"]
             required_modal_fragments = (
                 'TRYON_PIPELINE_ROUTE = "/api/tryon/pipeline"',
-                "@web_app.post(TRYON_PIPELINE_ROUTE)",
+                '@web_app.post(f"{TRYON_PIPELINE_ROUTE}/submit")',
+                '@web_app.get(f"{TRYON_PIPELINE_ROUTE}/result/{call_id}")',
+                '@web_app.post(f"{TRYON_PIPELINE_ROUTE}/cancel/{call_id}")',
+                'modal.FunctionCall.from_id(call_id)',
+                'call.cancel(terminate_containers=terminate)',
                 'TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"',
                 'from generation_runtime import GenerationRuntime',
             )
