@@ -211,14 +211,14 @@ class ModalPipelineAdapterService:
             errors: list[dict[str, str | int]] = []
 
             logger.warning(
-                "[backend-modal-cancel-start] call_id=%s sdk_version=%s waits=50s+20s",
+                "[backend-modal-cancel-start] call_id=%s sdk_version=%s terminate_containers=false waits=50s+20s",
                 call_id,
                 sdk_version,
             )
 
             def request_hard_cancellation(attempt: int) -> bool:
                 try:
-                    call.cancel(terminate_containers=True)
+                    call.cancel()
                     logger.warning(
                         "[backend-modal-cancel-sent] call_id=%s attempt=%s",
                         call_id,
@@ -374,7 +374,7 @@ class ModalPipelineAdapterService:
             result = {
                 "status": "cancel_requested_unconfirmed" if request_sent else "cancel_failed",
                 "confirmed": False,
-                "forced": True,
+                "forced": False,
                 "request_sent": request_sent,
                 "attempts": 2,
                 "call_id": call_id,

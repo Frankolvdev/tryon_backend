@@ -359,15 +359,17 @@ class GenerationModuleRuntimeService:
                 execution_id=str(execution_id),
                 module_key=module_key,
                 tokens=tokens,
-                reason="cancelled after provider confirmation",
+                reason="cancelled after provider cancellation handling",
             )
             if refunded:
                 with self._lock:
                     item = self._items[execution_id]
+                    if item.tokens_refunded:
+                        return
                     item.tokens_refunded = True
                     item.logs.append(GenerationModuleExecutionLog(
                         timestamp=utc_now(),
-                        message=f"{tokens} tokens refunded after provider cancellation confirmation.",
+                        message=f"{tokens} tokens refunded after cancellation was finalized locally.",
                     ))
                     snapshot = item.model_copy(deep=True)
                 generation_module_execution_store_service.save(snapshot)
@@ -496,10 +498,11 @@ class GenerationModuleRuntimeService:
                     )
                     if refunded:
                         with self._lock:
-                            item.tokens_refunded = True
-                            item.logs.append(GenerationModuleExecutionLog(
-                                timestamp=utc_now(), message=f"{item.tokens_charged} tokens refunded automatically."
-                            ))
+                            if not item.tokens_refunded:
+                                item.tokens_refunded = True
+                                item.logs.append(GenerationModuleExecutionLog(
+                                    timestamp=utc_now(), message=f"{item.tokens_charged} tokens refunded automatically."
+                                ))
                 except Exception as refund_error:
                     db.rollback()
                     with self._lock:
