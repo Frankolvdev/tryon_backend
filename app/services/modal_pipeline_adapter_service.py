@@ -116,10 +116,11 @@ class ModalPipelineAdapterService:
             output = call.get(timeout=0)
         except modal.exception.OutputExpiredError as exc:
             raise AppException(f"Modal FunctionCall {call_id} output expired.") from exc
-        except modal.exception.TimeoutError as exc:
-            if exc.__class__ is modal.exception.TimeoutError:
-                return False, None
-            raise AppException(f"Modal FunctionCall {call_id} timed out: {exc}") from exc
+        except (TimeoutError, modal.exception.TimeoutError):
+            # Modal documents TimeoutError from get(timeout=0) as the normal
+            # "still running" signal. Depending on the SDK release this may
+            # be the built-in TimeoutError or Modal's compatibility alias.
+            return False, None
         except BaseException as exc:
             if self._is_cancelled_exception(exc):
                 raise InterruptedError("Modal FunctionCall cancellation confirmed.") from exc
@@ -172,7 +173,7 @@ class ModalPipelineAdapterService:
                 # Call graph is best-effort. Verify through get() as a fallback.
             try:
                 call.get(timeout=0)
-            except modal.exception.TimeoutError:
+            except (TimeoutError, modal.exception.TimeoutError):
                 time.sleep(0.5)
                 continue
             except BaseException as exc:
