@@ -472,7 +472,7 @@ def _proxy_app():
         call = ComfyUIServer().run_pipeline.spawn(payload)
         return {{"call_id": call.object_id, "status": "submitted"}}
 
-    @web_app.get(TRYON_PIPELINE_ROUTE + "/result/{call_id}")
+    @web_app.get(TRYON_PIPELINE_ROUTE + "/result/{{call_id}}")
     async def result_tryon_pipeline(call_id: str):
         call = modal.FunctionCall.from_id(call_id)
         try:
@@ -487,7 +487,7 @@ def _proxy_app():
                 return {{"status": "cancelled", "confirmed": True, "call_id": call_id}}
             raise HTTPException(status_code=500, detail=message) from exc
 
-    @web_app.post(TRYON_PIPELINE_ROUTE + "/cancel/{call_id}")
+    @web_app.post(TRYON_PIPELINE_ROUTE + "/cancel/{{call_id}}")
     async def cancel_tryon_pipeline(call_id: str, request: Request):
         try:
             options = await request.json()
