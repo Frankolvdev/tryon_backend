@@ -455,9 +455,7 @@ def _proxy_app():
             forwarded["Referer"] = f"{{upstream_http}}/"
         return forwarded
 
-    @web_app.post(TRYON_PIPELINE_ROUTE)
-    async def execute_tryon_pipeline(request: Request):
-        """Execute one complete workflow/Python pipeline in this GPU container."""
+    async def _validated_payload(request: Request):
         try:
             payload = await request.json()
         except Exception as exc:
@@ -466,17 +464,59 @@ def _proxy_app():
             raise HTTPException(status_code=400, detail="Pipeline payload must be a JSON object.")
         if payload.get("runtime_contract") != TRYON_RUNTIME_CONTRACT:
             raise HTTPException(status_code=400, detail="Unsupported Generation Runtime contract.")
+        return payload
 
-        runtime_worker = RUNTIME_ROOT / "runpod_worker"
-        if str(runtime_worker) not in sys.path:
-            sys.path.insert(0, str(runtime_worker))
+    @web_app.post(f"{{TRYON_PIPELINE_ROUTE}}/submit")
+    async def submit_tryon_pipeline(request: Request):
+        payload = await _validated_payload(request)
+        call = ComfyUIServer().run_pipeline.spawn(payload)
+        return {{"call_id": call.object_id, "status": "submitted"}}
+
+    @web_app.get(f"{{TRYON_PIPELINE_ROUTE}}/result/{{call_id}}")
+    async def result_tryon_pipeline(call_id: str):
+        call = modal.FunctionCall.from_id(call_id)
         try:
-            from generation_runtime import GenerationRuntime
-            runtime = GenerationRuntime(comfy_url=upstream_http)
-            result = await asyncio.to_thread(runtime.execute, payload)
+            return call.get(timeout=0)
+        except TimeoutError:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({{"status": "running", "call_id": call_id}}, status_code=202)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return result
+            name = exc.__class__.__name__.lower()
+            message = str(exc)
+            if "cancel" in name or "cancel" in message.lower() or "terminated" in message.lower():
+                return {{"status": "cancelled", "confirmed": True, "call_id": call_id}}
+            raise HTTPException(status_code=500, detail=message) from exc
+
+    @web_app.post(f"{{TRYON_PIPELINE_ROUTE}}/cancel/{{call_id}}")
+    async def cancel_tryon_pipeline(call_id: str, request: Request):
+        try:
+            options = await request.json()
+        except Exception:
+            options = {{}}
+        wait_timeout = max(5, min(int(options.get("wait_timeout_seconds") or 90), 300))
+        terminate = bool(options.get("terminate_containers", True))
+        call = modal.FunctionCall.from_id(call_id)
+        call.cancel(terminate_containers=terminate)
+        deadline = time.monotonic() + wait_timeout
+        while time.monotonic() < deadline:
+            try:
+                result = call.get(timeout=0)
+                return {{
+                    "status": "completed",
+                    "confirmed": False,
+                    "call_id": call_id,
+                    "result": result,
+                }}
+            except TimeoutError:
+                await asyncio.sleep(0.5)
+            except Exception:
+                return {{
+                    "status": "cancelled",
+                    "confirmed": True,
+                    "call_id": call_id,
+                    "terminate_containers": terminate,
+                }}
+        raise HTTPException(status_code=504, detail="Modal cancellation was not confirmed before timeout.")
 
     @web_app.get("/api/tryon/runtime")
     async def tryon_runtime_info():
@@ -485,6 +525,8 @@ def _proxy_app():
             "runtime_contract": TRYON_RUNTIME_CONTRACT,
             "pipeline_route": TRYON_PIPELINE_ROUTE,
             "pipeline_method": "POST",
+            "dispatch_mode": "modal_function_call",
+            "supports_cancel": True,
         }}
 
     @web_app.api_route("/{{path:path}}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
@@ -579,7 +621,7 @@ def _proxy_app():
     enable_memory_snapshot=True,
     experimental_options={{"enable_gpu_snapshot": True}},
 )
-@modal.concurrent(max_inputs=INPUT_CONCURRENCY)
+@modal.concurrent(max_inputs=GENERATION_CONCURRENCY)
 class ComfyUIServer:
     def _start_process(self) -> None:
         if not COMFYUI_MAIN.is_file():
@@ -654,6 +696,19 @@ class ComfyUIServer:
         )
         _wait_until_ready(process)
         print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
+
+    @modal.method()
+    def run_pipeline(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("Pipeline payload must be a JSON object.")
+        if payload.get("runtime_contract") != TRYON_RUNTIME_CONTRACT:
+            raise ValueError("Unsupported Generation Runtime contract.")
+        runtime_worker = RUNTIME_ROOT / "runpod_worker"
+        if str(runtime_worker) not in sys.path:
+            sys.path.insert(0, str(runtime_worker))
+        from generation_runtime import GenerationRuntime
+        runtime = GenerationRuntime(comfy_url=f"http://127.0.0.1:{{COMFYUI_PORT}}")
+        return runtime.execute(payload)
 
     @modal.asgi_app()
     def comfyui(self):

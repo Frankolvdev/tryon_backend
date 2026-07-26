@@ -242,6 +242,38 @@ class ComfyUILocalAdapterService:
             "interrupt_sent": interrupted,
         }
 
+    def cancel_prompt_and_wait(self, *, prompt_id: str, timeout_seconds: int = 30) -> dict[str, Any]:
+        initial_queue = self.get_queue()
+        pending = initial_queue.get("queue_pending") or []
+        running = initial_queue.get("queue_running") or []
+        queued_before = any(str(row[1] if isinstance(row, list) and len(row) > 1 else "") == prompt_id for row in pending)
+        running_before = any(str(row[1] if isinstance(row, list) and len(row) > 1 else "") == prompt_id for row in running)
+        deleted = self.delete_queued_prompt(prompt_id=prompt_id) if queued_before else False
+        interrupted = self.interrupt() if running_before or not queued_before else False
+        deadline = time.monotonic() + max(5, timeout_seconds)
+        while time.monotonic() < deadline:
+            queue = self.get_queue()
+            pending = queue.get("queue_pending") or []
+            running = queue.get("queue_running") or []
+            still_pending = any(str(row[1] if isinstance(row, list) and len(row) > 1 else "") == prompt_id for row in pending)
+            still_running = any(str(row[1] if isinstance(row, list) and len(row) > 1 else "") == prompt_id for row in running)
+            history = self.get_history(prompt_id=prompt_id)
+            if not still_pending and not still_running:
+                return {
+                    "prompt_id": prompt_id,
+                    "confirmed": True,
+                    "deleted_from_queue": deleted,
+                    "interrupt_sent": interrupted,
+                    "history": history,
+                }
+            time.sleep(0.5)
+        return {
+            "prompt_id": prompt_id,
+            "confirmed": False,
+            "deleted_from_queue": deleted,
+            "interrupt_sent": interrupted,
+        }
+
     def _is_history_complete(
         self,
         history_item: dict[str, Any],

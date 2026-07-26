@@ -49,7 +49,7 @@ class GenerationJobOrchestratorService:
             specs = [
                 ("local", self._runtime_settings.local_parallel_executions),
                 ("runpod", runpod_parallelism),
-                ("modal", max(1, int(settings.GENERATION_MODAL_DISPATCH_WORKERS))),
+                ("modal", max(1, int(self._runtime_settings.modal_max_containers) * int(self._runtime_settings.modal_concurrency))),
                 ("simulated", max(1, int(settings.GENERATION_SIMULATED_WORKERS))),
             ]
             for queue_name, count in specs:
@@ -150,7 +150,11 @@ class GenerationJobOrchestratorService:
                     if self._runtime_settings
                     else max(1, int(settings.GENERATION_RUNPOD_DISPATCH_WORKERS))
                 ),
-                "modal_dispatch": max(1, int(settings.GENERATION_MODAL_DISPATCH_WORKERS)),
+                "modal_dispatch": (
+                    max(1, int(self._runtime_settings.modal_max_containers) * int(self._runtime_settings.modal_concurrency))
+                    if self._runtime_settings
+                    else max(1, int(settings.GENERATION_MODAL_DISPATCH_WORKERS))
+                ),
                 "simulated": max(1, int(settings.GENERATION_SIMULATED_WORKERS)),
             },
             "limits": {

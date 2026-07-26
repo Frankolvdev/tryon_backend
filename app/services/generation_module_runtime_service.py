@@ -6,6 +6,7 @@ import io
 import json
 import threading
 import time
+import time
 import tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -199,49 +200,133 @@ class GenerationModuleRuntimeService:
             if not item:
                 raise NotFoundException("Generation module execution not found.")
             self.attach_persisted(item)
+
         with self._lock:
             item = self._items[execution_id]
             if item.status in {"completed", "failed", "cancelled"}:
                 return item.model_copy(deep=True)
-            item.cancel_requested = True
-            cancelled_at = utc_now()
             was_queued = item.status == "queued"
+            item.cancel_requested = True
+            item.provider_status = "CANCEL_REQUESTED"
+            item.heartbeat_at = utc_now()
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=item.heartbeat_at,
+                level="warning",
+                message=(
+                    "Queued execution cancellation requested."
+                    if was_queued else
+                    "Provider cancellation requested; waiting for confirmation."
+                ),
+            ))
+            request_snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(request_snapshot)
+
+        if was_queued:
+            generation_job_queue_service.remove(execution_id, engine=request_snapshot.engine)
+            return self._confirm_cancellation(execution_id, "Cancelled before provider dispatch.")
+
+        provider = copy.deepcopy(self._provider_refs.get(execution_id) or {})
+        if not provider.get("provider_job_id") and request_snapshot.provider_job_id:
+            provider["provider_job_id"] = request_snapshot.provider_job_id
+        provider.setdefault("engine", request_snapshot.engine.value)
+
+        if provider.get("engine") == GenerationExecutionEngine.MODAL.value:
+            call_id = str(provider.get("provider_job_id") or "").strip()
+            if not call_id:
+                deadline = time.monotonic() + 30.0
+                while time.monotonic() < deadline and not call_id:
+                    time.sleep(0.25)
+                    current = self.get(execution_id)
+                    call_id = str(current.provider_job_id or "").strip()
+            if not call_id:
+                raise AppException("Modal cancellation could not start because no FunctionCall ID was persisted.")
+            db = SessionLocal()
+            try:
+                config = infrastructure_provider_service.get_modal(db)
+                modal_pipeline_adapter_service.cancel_call(config, call_id=call_id)
+            finally:
+                db.close()
+            return self._confirm_cancellation(execution_id, f"Modal FunctionCall {call_id} cancellation confirmed.")
+
+        if provider.get("engine") == GenerationExecutionEngine.LOCAL_DOCKER.value:
+            prompt_id = str(provider.get("prompt_id") or "").strip()
+            if not prompt_id:
+                raise AppException("Local cancellation could not start because no ComfyUI prompt_id was persisted.")
+            confirmation = comfyui_local_adapter_service.cancel_prompt_and_wait(prompt_id=prompt_id)
+            if not confirmation.get("confirmed"):
+                raise AppException("ComfyUI did not confirm the interruption.")
+            return self._confirm_cancellation(execution_id, f"ComfyUI prompt {prompt_id} interruption confirmed.")
+
+        if provider.get("engine") == GenerationExecutionEngine.RUNPOD_SERVERLESS.value and provider.get("provider_job_id"):
+            db = SessionLocal()
+            try:
+                runpod_serverless_adapter_service.cancel_job(
+                    db,
+                    provider_job_id=provider["provider_job_id"],
+                    endpoint_id=provider.get("endpoint_id"),
+                )
+            finally:
+                db.close()
+            return self._confirm_cancellation(execution_id, "RunPod cancellation request accepted.")
+
+        return self._confirm_cancellation(execution_id, "Execution cancellation confirmed.")
+
+    def _confirm_cancellation(self, execution_id: UUID, message: str) -> GenerationModuleExecutionResponse:
+        cancelled_at = utc_now()
+        with self._lock:
+            item = self._items[execution_id]
+            if item.status == "completed":
+                return item.model_copy(deep=True)
             item.status = "cancelled"
             item.finished_at = cancelled_at
             item.heartbeat_at = cancelled_at
-            item.provider_status = (
-                "cancelled_before_dispatch" if was_queued else "cancelled_locally"
-            )
+            item.provider_status = "CANCELLED"
+            item.error = None
             running_step = next((step for step in item.steps if step.status == "running"), None)
             if running_step is not None:
                 running_step.status = "cancelled"
                 running_step.finished_at = cancelled_at
                 running_step.error = "Execution cancelled by user."
-            item.logs.append(
-                GenerationModuleExecutionLog(
-                    timestamp=cancelled_at,
-                    level="warning",
-                    message=(
-                        "Queued execution cancelled before dispatch."
-                        if was_queued
-                        else "Execution cancelled locally. Remote interruption requested when supported."
-                    ),
-                )
-            )
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=cancelled_at,
+                level="warning",
+                message=message,
+            ))
             snapshot = item.model_copy(deep=True)
-            provider = copy.deepcopy(self._provider_refs.get(execution_id) or {})
-        if was_queued:
-            generation_job_queue_service.remove(execution_id, engine=snapshot.engine)
         generation_module_execution_store_service.save(snapshot)
-        if provider.get("engine") == GenerationExecutionEngine.LOCAL_DOCKER.value and provider.get("prompt_id"):
-            comfyui_local_adapter_service.cancel_prompt(prompt_id=provider["prompt_id"])
-        elif provider.get("engine") == GenerationExecutionEngine.RUNPOD_SERVERLESS.value and provider.get("provider_job_id"):
-            db = SessionLocal()
-            try:
-                runpod_serverless_adapter_service.cancel_job(db, provider_job_id=provider["provider_job_id"], endpoint_id=provider.get("endpoint_id"))
-            finally:
-                db.close()
+        self._refund_confirmed_cancellation(execution_id)
         return self.get(execution_id)
+
+    def _refund_confirmed_cancellation(self, execution_id: UUID) -> None:
+        with self._lock:
+            item = self._items[execution_id]
+            if item.tokens_refunded or item.user_id is None or item.tokens_charged <= 0:
+                return
+            user_id = item.user_id
+            module_key = item.module_key
+            tokens = item.tokens_charged
+        db = SessionLocal()
+        try:
+            refunded = generation_module_billing_service.refund(
+                db,
+                user_id=user_id,
+                execution_id=str(execution_id),
+                module_key=module_key,
+                tokens=tokens,
+                reason="cancelled after provider confirmation",
+            )
+            if refunded:
+                with self._lock:
+                    item = self._items[execution_id]
+                    item.tokens_refunded = True
+                    item.logs.append(GenerationModuleExecutionLog(
+                        timestamp=utc_now(),
+                        message=f"{tokens} tokens refunded after provider cancellation confirmation.",
+                    ))
+                    snapshot = item.model_copy(deep=True)
+                generation_module_execution_store_service.save(snapshot)
+        finally:
+            db.close()
 
     def delete(self, execution_id: UUID) -> None:
         item = self.get(execution_id)
@@ -388,11 +473,30 @@ class GenerationModuleRuntimeService:
             "available": bool(config.enabled and config.runtime_url),
             "enabled": config.enabled,
             "runtime_url": config.runtime_url,
-            "mode": "remote_pipeline",
-            "supports_cancel": False,
+            "mode": "modal_function_call",
+            "supports_cancel": True,
             "supports_progress": True,
             "error": None if (config.enabled and config.runtime_url) else "Modal provider is disabled or its runtime URL is not configured.",
         }
+
+    def _modal_submitted(self, execution_id: UUID, call_id: str) -> None:
+        with self._lock:
+            item = self._items.get(execution_id)
+            if item is None:
+                return
+            self._provider_refs[execution_id] = {
+                "engine": GenerationExecutionEngine.MODAL.value,
+                "provider_job_id": call_id,
+            }
+            item.provider_job_id = call_id
+            item.provider_status = "IN_QUEUE"
+            item.heartbeat_at = utc_now()
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=item.heartbeat_at,
+                message=f"Modal FunctionCall submitted: {call_id}.",
+            ))
+            snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(snapshot)
 
     def _run_modal_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
         """Dispatch the entire module to one Modal GPU container.
@@ -445,6 +549,7 @@ class GenerationModuleRuntimeService:
                 execution_id, progress, message, meta or {}
             ),
             cancellation_callback=lambda: self.get(execution_id).cancel_requested,
+            submitted_callback=lambda call_id: self._modal_submitted(execution_id, call_id),
         )
         output = result.get("output")
         if not isinstance(output, dict):
