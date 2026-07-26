@@ -466,11 +466,15 @@ fi
             modal_app = generated["modal_app"]
             required_modal_fragments = (
                 'TRYON_PIPELINE_ROUTE = "/api/tryon/pipeline"',
+                'def _runtime_control_app():',
+                'def runtime_api():',
+                'control_plane": "cpu"',
                 '@web_app.post(TRYON_PIPELINE_ROUTE + "/submit")',
                 '@web_app.get(TRYON_PIPELINE_ROUTE + "/result/{call_id}")',
                 '@web_app.post(TRYON_PIPELINE_ROUTE + "/cancel/{call_id}")',
-                'modal.FunctionCall.from_id(call_id)',
-                'call.cancel(terminate_containers=terminate)',
+                'await ComfyUIServer().run_pipeline.spawn.aio(payload)',
+                'await call.get.aio(timeout=0)',
+                'await call.cancel.aio(terminate_containers=terminate)',
                 'TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"',
                 'from generation_runtime import GenerationRuntime',
             )

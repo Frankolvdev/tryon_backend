@@ -127,6 +127,7 @@ class ModalPipelineAdapterService:
 
         deadline = started + float(timeout_seconds)
         last_progress = 5.0
+        poll_interval = 1.5
         while time.monotonic() < deadline:
             if cancellation_callback and cancellation_callback():
                 # The API cancellation path performs FunctionCall.cancel(). Keep polling
@@ -146,7 +147,8 @@ class ModalPipelineAdapterService:
                     "runtime_url": str(config.runtime_url),
                     "provider_job_id": call_id,
                 }
-            time.sleep(1.0)
+            time.sleep(poll_interval)
+            poll_interval = min(4.0, poll_interval + 0.25)
             last_progress = min(90.0, last_progress + 0.25)
             if progress_callback:
                 progress_callback(last_progress, "Modal FunctionCall is running.", {
