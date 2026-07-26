@@ -146,7 +146,12 @@ class ModalPipelineAdapterService:
         modal = self._modal()
         call = self._call(config, call_id)
         try:
-            call.cancel(terminate_containers=False)
+            # Hard cancellation is intentional for GPU generation. Once the workflow
+            # has been submitted to ComfyUI, cancelling only the Modal input can leave
+            # the internal prompt consuming GPU in the reused container. Terminating
+            # the container guarantees that both the FunctionCall and ComfyUI process
+            # stop before the execution is confirmed as cancelled.
+            call.cancel(terminate_containers=True)
         except Exception as exc:
             if not self._is_cancelled_exception(exc):
                 raise AppException(f"Could not cancel Modal FunctionCall {call_id}: {exc}") from exc
