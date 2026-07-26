@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from collections import deque
-from typing import Any
 from uuid import UUID
 
 from redis.exceptions import RedisError
@@ -28,6 +26,13 @@ class GenerationJobQueueService:
     def __init__(self) -> None:
         self._fallback: dict[str, deque[str]] = {}
         self._lock = threading.RLock()
+
+    @staticmethod
+    def _text(value: object) -> str:
+        """Normalize Redis values regardless of decode_responses configuration."""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="strict")
+        return str(value)
 
     @staticmethod
     def queue_name(engine: GenerationExecutionEngine | str) -> str:
@@ -71,10 +76,11 @@ class GenerationJobQueueService:
             result = client.blpop(self._queue_key(queue_name), timeout=max(1, timeout_seconds))
             if not result:
                 return None
-            _, value = result
+            _, raw_value = result
+            value = self._text(raw_value)
             client.srem(self._dedupe_key(queue_name), value)
-            return str(value)
-        except RedisError as exc:
+            return value
+        except (RedisError, UnicodeError) as exc:
             logger.warning("Redis generation dequeue unavailable; using in-memory fallback: %s", exc)
             with self._lock:
                 queue = self._fallback.setdefault(queue_name, deque())
@@ -99,9 +105,10 @@ class GenerationJobQueueService:
         queue_name = self.queue_name(engine)
         value = str(execution_id)
         try:
-            items = redis_client.get_client().lrange(self._queue_key(queue_name), 0, -1)
+            raw_items = redis_client.get_client().lrange(self._queue_key(queue_name), 0, -1)
+            items = [self._text(item) for item in raw_items]
             return items.index(value) + 1 if value in items else None
-        except RedisError:
+        except (RedisError, UnicodeError):
             with self._lock:
                 items = list(self._fallback.setdefault(queue_name, deque()))
                 return items.index(value) + 1 if value in items else None
