@@ -71,7 +71,9 @@ class ModalPipelineAdapterService:
             return cls()
         except Exception as exc:
             raise AppException(
-                f"Could not resolve ComfyUIServer in Modal App {config.app_name}: {exc}"
+                f"Could not resolve ComfyUIServer in Modal App {config.app_name} "
+                f"(environment {config.environment or 'main'}). Redeploy the runtime with the "
+                f"configured App name so Modal and the Backend use the same deployment: {exc}"
             ) from exc
 
     def _call(self, config: ModalProviderConfig, call_id: str) -> Any:

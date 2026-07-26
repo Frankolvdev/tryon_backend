@@ -336,7 +336,7 @@ class RuntimeBuildExecutionService:
                 message="Publicando imagen y aplicación en Modal.", log=f"[deploy:4/6] Ejecutando modal deploy para {cfg.app_name}.",
             )
             proc = subprocess.Popen(
-                [executable, "deploy", str(app_file)], cwd=str(context),
+                [executable, "deploy", "--name", cfg.app_name, "--env", cfg.environment, str(app_file)], cwd=str(context),
                 env={**InfrastructureProviderService._modal_env(cfg),
                     "TRYON_MODAL_GPU": engine.modal_gpu,
                     "TRYON_MODAL_MIN_CONTAINERS": str(engine.modal_min_containers),
