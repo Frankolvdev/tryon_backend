@@ -4,7 +4,6 @@ import threading
 import time
 from typing import Any, Callable
 
-import httpx
 from fastapi.encoders import jsonable_encoder
 
 from app.common.exceptions import AppException
@@ -12,103 +11,127 @@ from app.schemas.infrastructure_provider import ModalProviderConfig
 
 
 class ModalTransientTransportError(AppException):
-    """Temporary network failure that must not fail a running GPU job."""
+    """Temporary Modal control-plane failure that must not fail a healthy GPU job."""
 
 
 class ModalPipelineAdapterService:
-    """FunctionCall-based transport for Modal generation jobs.
+    """Direct Modal SDK transport for deployed ComfyUIServer FunctionCalls.
 
-    A single pooled HTTP client is intentionally reused. Creating a new client
-    for every poll exhausted ephemeral sockets on Windows and produced
-    WinError 10055 while the remote FunctionCall was still healthy.
+    The Backend is the control plane. No CPU ``runtime_api`` web container is
+    deployed or contacted. The only Modal container used by generation is the
+    GPU-backed ``ComfyUIServer`` class.
     """
+
+    _TERMINAL_GRAPH_STATES = {"SUCCESS", "FAILURE", "INIT_FAILURE", "TERMINATED", "TIMEOUT"}
 
     def __init__(self) -> None:
         self._client_lock = threading.Lock()
-        self._client = httpx.Client(
-            timeout=httpx.Timeout(connect=30.0, read=60.0, write=60.0, pool=30.0),
-            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20, keepalive_expiry=30.0),
-            transport=httpx.HTTPTransport(retries=3),
-            follow_redirects=True,
-            trust_env=False,
-        )
+        self._clients: dict[tuple[str, str], Any] = {}
 
     @staticmethod
-    def _base(config: ModalProviderConfig) -> str:
-        base = str(config.runtime_url or "").strip().rstrip("/")
-        if not base:
-            raise AppException("Modal Runtime URL is not configured.")
-        return base
-
-    def _url(self, config: ModalProviderConfig, suffix: str) -> str:
-        return f"{self._base(config)}/api/tryon/pipeline{suffix}"
-
-    @staticmethod
-    def _detail(response: httpx.Response) -> str:
-        detail = response.text.strip()
+    def _modal() -> Any:
         try:
-            body = response.json()
-            if isinstance(body, dict):
-                detail = str(body.get("detail") or body.get("error") or detail)
-        except Exception:
-            pass
-        return detail[:1000]
+            import modal
+        except ImportError as exc:
+            raise AppException(
+                "Modal Python SDK is not installed in the Backend environment."
+            ) from exc
+        return modal
 
-    def _request(self, method: str, url: str, *, attempts: int = 4, **kwargs: Any) -> httpx.Response:
-        last_error: Exception | None = None
-        for attempt in range(attempts):
-            try:
-                # httpx.Client is thread-safe; the lock only protects recovery
-                # if Windows invalidates the pool after a low-level socket error.
-                return self._client.request(method, url, **kwargs)
-            except (httpx.TransportError, OSError) as exc:
-                last_error = exc
-                if attempt + 1 < attempts:
-                    time.sleep(min(2.0, 0.25 * (2 ** attempt)))
-                    continue
-        raise ModalTransientTransportError(str(last_error or "Unknown Modal transport error."))
+    def _client(self, config: ModalProviderConfig) -> Any:
+        token_id = str(config.token_id or "").strip()
+        token_secret = str(config.token_secret or "").strip()
+        if not token_id or not token_secret:
+            raise AppException("Modal credentials are not configured.")
+        key = (token_id, token_secret)
+        with self._client_lock:
+            client = self._clients.get(key)
+            if client is None or bool(getattr(client, "is_closed", lambda: False)()):
+                client = self._modal().Client.from_credentials(token_id, token_secret)
+                self._clients[key] = client
+            return client
 
-    def submit_pipeline(self, config: ModalProviderConfig, *, payload: dict[str, Any]) -> str:
+    @staticmethod
+    def _validate_config(config: ModalProviderConfig) -> None:
         if not config.enabled:
             raise AppException("Modal provider is disabled.")
+        if not str(config.app_name or "").strip():
+            raise AppException("Modal App name is not configured.")
+
+    def _worker(self, config: ModalProviderConfig) -> Any:
+        self._validate_config(config)
+        modal = self._modal()
         try:
-            response = self._request(
-                "POST",
-                self._url(config, "/submit"),
-                json=jsonable_encoder(payload),
-                headers={"Content-Type": "application/json"},
+            cls = modal.Cls.from_name(
+                str(config.app_name).strip(),
+                "ComfyUIServer",
+                environment_name=str(config.environment or "main").strip() or "main",
+                client=self._client(config),
             )
-        except ModalTransientTransportError as exc:
-            raise AppException(f"Could not submit the Modal FunctionCall: {exc}") from exc
-        if response.status_code >= 400:
+            return cls()
+        except Exception as exc:
             raise AppException(
-                f"Modal Runtime rejected the pipeline submission ({response.status_code}): {self._detail(response)}"
-            )
-        body = response.json()
-        call_id = str(body.get("call_id") or "").strip() if isinstance(body, dict) else ""
+                f"Could not resolve ComfyUIServer in Modal App {config.app_name}: {exc}"
+            ) from exc
+
+    def _call(self, config: ModalProviderConfig, call_id: str) -> Any:
+        call_id = str(call_id or "").strip()
         if not call_id:
-            raise AppException("Modal Runtime did not return a FunctionCall ID.")
+            raise AppException("Modal FunctionCall ID is missing.")
+        try:
+            return self._modal().FunctionCall.from_id(call_id, client=self._client(config))
+        except Exception as exc:
+            raise AppException(f"Could not restore Modal FunctionCall {call_id}: {exc}") from exc
+
+    @staticmethod
+    def _is_cancelled_exception(exc: BaseException) -> bool:
+        text = f"{exc.__class__.__name__}: {exc}".lower()
+        return "cancel" in text or "terminated" in text
+
+    @staticmethod
+    def _graph_status_name(node: Any) -> str:
+        status = getattr(node, "status", None)
+        name = getattr(status, "name", None)
+        if name:
+            return str(name).upper()
+        text = str(status or "").upper()
+        return text.rsplit(".", 1)[-1]
+
+    def submit_pipeline(self, config: ModalProviderConfig, *, payload: dict[str, Any]) -> str:
+        try:
+            call = self._worker(config).run_pipeline.spawn(jsonable_encoder(payload))
+        except Exception as exc:
+            raise AppException(f"Could not submit the Modal FunctionCall: {exc}") from exc
+        call_id = str(getattr(call, "object_id", "") or "").strip()
+        if not call_id:
+            raise AppException("Modal did not return a FunctionCall ID.")
         return call_id
 
     def poll_result(self, config: ModalProviderConfig, *, call_id: str) -> tuple[bool, dict[str, Any] | None]:
+        modal = self._modal()
+        call = self._call(config, call_id)
         try:
-            response = self._request("GET", self._url(config, f"/result/{call_id}"))
-        except ModalTransientTransportError as exc:
-            raise ModalTransientTransportError(
-                f"Could not poll Modal FunctionCall {call_id}: {exc}"
-            ) from exc
-        if response.status_code == 202:
-            return False, None
-        if response.status_code >= 400:
-            raise AppException(
-                f"Modal FunctionCall result failed ({response.status_code}): {self._detail(response)}"
-            )
-        body = response.json()
-        if not isinstance(body, dict):
-            raise AppException("Modal Runtime returned an invalid FunctionCall result.")
-        if body.get("status") == "cancelled":
-            raise InterruptedError("Modal FunctionCall cancellation confirmed.")
-        return True, body
+            output = call.get(timeout=0)
+        except modal.exception.OutputExpiredError as exc:
+            raise AppException(f"Modal FunctionCall {call_id} output expired.") from exc
+        except modal.exception.TimeoutError as exc:
+            if exc.__class__ is modal.exception.TimeoutError:
+                return False, None
+            raise AppException(f"Modal FunctionCall {call_id} timed out: {exc}") from exc
+        except BaseException as exc:
+            if self._is_cancelled_exception(exc):
+                raise InterruptedError("Modal FunctionCall cancellation confirmed.") from exc
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            name = exc.__class__.__name__.lower()
+            if any(term in name for term in ("connection", "service", "internal", "resourceexhausted")):
+                raise ModalTransientTransportError(
+                    f"Could not poll Modal FunctionCall {call_id}: {exc}"
+                ) from exc
+            raise AppException(f"Modal FunctionCall {call_id} failed: {exc}") from exc
+        if not isinstance(output, dict):
+            raise AppException("Modal FunctionCall returned an invalid pipeline result.")
+        return True, output
 
     def cancel_call(
         self,
@@ -117,24 +140,53 @@ class ModalPipelineAdapterService:
         call_id: str,
         timeout_seconds: int = 90,
     ) -> dict[str, Any]:
+        modal = self._modal()
+        call = self._call(config, call_id)
         try:
-            response = self._request(
-                "POST",
-                self._url(config, f"/cancel/{call_id}"),
-                attempts=5,
-                json={"terminate_containers": False, "wait_timeout_seconds": timeout_seconds},
-                timeout=httpx.Timeout(connect=30.0, read=float(timeout_seconds) + 30.0, write=30.0, pool=30.0),
-            )
-        except ModalTransientTransportError as exc:
-            raise AppException(f"Could not cancel Modal FunctionCall {call_id}: {exc}") from exc
-        if response.status_code >= 400:
+            call.cancel(terminate_containers=False)
+        except Exception as exc:
+            if not self._is_cancelled_exception(exc):
+                raise AppException(f"Could not cancel Modal FunctionCall {call_id}: {exc}") from exc
+
+        deadline = time.monotonic() + max(5, int(timeout_seconds))
+        while time.monotonic() < deadline:
+            try:
+                graph = call.get_call_graph()
+                states = [self._graph_status_name(node) for node in graph]
+                if states and all(state in self._TERMINAL_GRAPH_STATES for state in states):
+                    if "TERMINATED" in states:
+                        return {
+                            "status": "cancelled",
+                            "confirmed": True,
+                            "call_id": call_id,
+                            "states": states,
+                        }
+                    raise AppException(
+                        f"Modal FunctionCall {call_id} reached terminal state without TERMINATED: {states}"
+                    )
+            except Exception as exc:
+                if self._is_cancelled_exception(exc):
+                    return {"status": "cancelled", "confirmed": True, "call_id": call_id}
+                # Call graph is best-effort. Verify through get() as a fallback.
+            try:
+                call.get(timeout=0)
+            except modal.exception.TimeoutError:
+                time.sleep(0.5)
+                continue
+            except BaseException as exc:
+                if self._is_cancelled_exception(exc):
+                    return {"status": "cancelled", "confirmed": True, "call_id": call_id}
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                raise AppException(
+                    f"Modal FunctionCall {call_id} ended while cancellation was pending: {exc}"
+                ) from exc
             raise AppException(
-                f"Modal FunctionCall cancellation failed ({response.status_code}): {self._detail(response)}"
+                f"Modal FunctionCall {call_id} completed before cancellation could be confirmed."
             )
-        body = response.json()
-        if not isinstance(body, dict) or body.get("status") != "cancelled" or not body.get("confirmed"):
-            raise AppException("Modal did not confirm FunctionCall cancellation.")
-        return body
+        raise AppException(
+            f"Modal did not confirm FunctionCall {call_id} cancellation within {timeout_seconds} seconds."
+        )
 
     def execute_pipeline(
         self,
@@ -169,8 +221,6 @@ class ModalPipelineAdapterService:
                 ready, output = self.poll_result(config, call_id=call_id)
                 consecutive_transport_errors = 0
             except ModalTransientTransportError as exc:
-                # A local socket/buffer failure says nothing about the remote GPU
-                # job. Keep the execution running and retry with backoff.
                 consecutive_transport_errors += 1
                 if progress_callback and consecutive_transport_errors in {1, 5, 10}:
                     progress_callback(last_progress, "Modal status connection interrupted; retrying.", {
@@ -190,7 +240,7 @@ class ModalPipelineAdapterService:
                     "provider": "modal",
                     "output": output,
                     "execution_time_ms": elapsed_ms,
-                    "runtime_url": str(config.runtime_url),
+                    "runtime_url": None,
                     "provider_job_id": call_id,
                 }
             time.sleep(poll_interval)

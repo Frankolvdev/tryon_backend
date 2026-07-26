@@ -470,13 +470,13 @@ class GenerationModuleRuntimeService:
     def _modal_health(db: Session) -> dict[str, Any]:
         config = infrastructure_provider_service.get_modal(db)
         return {
-            "available": bool(config.enabled and config.runtime_url),
+            "available": bool(config.enabled and config.app_name and config.token_id and config.token_secret),
             "enabled": config.enabled,
-            "runtime_url": config.runtime_url,
+            "runtime_url": None,
             "mode": "modal_function_call",
             "supports_cancel": True,
             "supports_progress": True,
-            "error": None if (config.enabled and config.runtime_url) else "Modal provider is disabled or its runtime URL is not configured.",
+            "error": None if (config.enabled and config.app_name and config.token_id and config.token_secret) else "Modal provider is disabled or its App name/credentials are not configured.",
         }
 
     def _modal_submitted(self, execution_id: UUID, call_id: str) -> None:
@@ -508,8 +508,10 @@ class GenerationModuleRuntimeService:
         config = infrastructure_provider_service.get_modal(db)
         if not config.enabled:
             raise AppException("Modal is selected for this module, but the Modal provider is disabled.")
-        if not config.runtime_url:
-            raise AppException("Modal is selected for this module, but no Modal Runtime URL is configured.")
+        if not config.app_name or not config.token_id or not config.token_secret:
+            raise AppException(
+                "Modal is selected for this module, but its App name or credentials are not configured."
+            )
 
         with self._lock:
             current = self._items[execution_id].model_copy(deep=True)

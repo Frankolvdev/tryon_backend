@@ -299,7 +299,6 @@ APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
 VOLUME_PATH = {json.dumps(volume_path)}
 COMFYUI_PORT = 8188
-TRYON_PIPELINE_ROUTE = "/api/tryon/pipeline"
 TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"
 STARTUP_TIMEOUT = int(os.getenv("TRYON_MODAL_STARTUP_TIMEOUT", "600"))
 
@@ -324,7 +323,6 @@ COMFY_DATABASE_URL = os.getenv(
 app = modal.App(APP_NAME)
 models_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 image = modal.Image.from_dockerfile("Dockerfile.modal").pip_install("fastapi")
-control_image = modal.Image.debian_slim(python_version="3.11").pip_install("fastapi[standard]")
 
 
 def _port_is_ready() -> bool:
@@ -431,85 +429,6 @@ def _run_performance_probe(env: dict[str, str]) -> None:
         print(f"[modal] No se pudo ejecutar performance_probe.py: {{exc}}", flush=True)
 
 
-def _runtime_control_app():
-    from fastapi import FastAPI, HTTPException, Request
-    from fastapi.responses import JSONResponse
-
-    web_app = FastAPI()
-
-    async def _validated_payload(request: Request):
-        try:
-            payload = await request.json()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="Pipeline payload must be a JSON object.")
-        if payload.get("runtime_contract") != TRYON_RUNTIME_CONTRACT:
-            raise HTTPException(status_code=400, detail="Unsupported Generation Runtime contract.")
-        return payload
-
-    @web_app.post(TRYON_PIPELINE_ROUTE + "/submit")
-    async def submit_tryon_pipeline(request: Request):
-        payload = await _validated_payload(request)
-        call = await ComfyUIServer().run_pipeline.spawn.aio(payload)
-        return {{"call_id": call.object_id, "status": "submitted"}}
-
-    @web_app.get(TRYON_PIPELINE_ROUTE + "/result/{{call_id}}")
-    async def result_tryon_pipeline(call_id: str):
-        call = modal.FunctionCall.from_id(call_id)
-        try:
-            return await call.get.aio(timeout=0)
-        except TimeoutError:
-            return JSONResponse(
-                {{"status": "running", "call_id": call_id}},
-                status_code=202,
-            )
-        except modal.exception.OutputExpiredError:
-            raise HTTPException(status_code=404, detail="Modal FunctionCall output expired.")
-        except Exception as exc:
-            name = exc.__class__.__name__.lower()
-            message = str(exc)
-            if "cancel" in name or "cancel" in message.lower() or "terminated" in message.lower():
-                return {{"status": "cancelled", "confirmed": True, "call_id": call_id}}
-            raise HTTPException(status_code=500, detail=message) from exc
-
-    @web_app.post(TRYON_PIPELINE_ROUTE + "/cancel/{{call_id}}")
-    async def cancel_tryon_pipeline(call_id: str, request: Request):
-        try:
-            options = await request.json()
-        except Exception:
-            options = {{}}
-        terminate = False
-        call = modal.FunctionCall.from_id(call_id)
-        try:
-            # Modal documents that cancel() returns after the inputs have been
-            # stopped and marked TERMINATED. No follow-up get() polling is
-            # required and doing so could race with result retention.
-            await call.cancel.aio(terminate_containers=False)
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Modal cancellation request failed: {{exc}}") from exc
-        return {{
-            "status": "cancelled",
-            "confirmed": True,
-            "call_id": call_id,
-            "terminate_containers": terminate,
-        }}
-
-    @web_app.get("/api/tryon/runtime")
-    async def tryon_runtime_info():
-        return {{
-            "provider": "modal",
-            "runtime_contract": TRYON_RUNTIME_CONTRACT,
-            "pipeline_route": TRYON_PIPELINE_ROUTE,
-            "pipeline_method": "POST",
-            "dispatch_mode": "modal_function_call",
-            "control_plane": "cpu",
-            "supports_cancel": True,
-        }}
-
-    return web_app
-
-
 def _proxy_app():
     from aiohttp import ClientSession, WSMsgType
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -552,7 +471,7 @@ def _proxy_app():
             "provider": "modal",
             "runtime_contract": TRYON_RUNTIME_CONTRACT,
             "role": "comfyui_gpu_proxy",
-            "pipeline_api": "Use the runtime_api web endpoint; polling is intentionally isolated from GPU containers.",
+            "pipeline_api": "Backend invokes ComfyUIServer.run_pipeline directly through the Modal SDK.",
         }}
 
     @web_app.api_route("/{{path:path}}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
@@ -753,18 +672,6 @@ class ComfyUIServer:
         except subprocess.TimeoutExpired:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
 
-
-@app.function(
-    image=control_image,
-    min_containers=0,
-    max_containers=1,
-    scaledown_window=60,
-    timeout=360,
-)
-@modal.asgi_app()
-@modal.concurrent(max_inputs=100)
-def runtime_api():
-    return _runtime_control_app()
 '''
 
     @staticmethod
