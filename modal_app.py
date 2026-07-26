@@ -57,6 +57,184 @@ def _modal_trace(event: str, *, role: str, **fields) -> None:
     print("[tryon-modal-trace] " + json.dumps(payload, ensure_ascii=False, default=str), flush=True)
 
 
+MODEL_DIAGNOSTICS_ENABLED = os.getenv("TRYON_MODAL_MODEL_DIAGNOSTICS", "true").strip().lower() in {"1", "true", "yes", "on"}
+_MODEL_INPUT_HINTS = (
+    "ckpt_name", "checkpoint", "model_name", "model_source", "unet_name",
+    "vae_name", "clip_name", "control_net_name", "controlnet_name",
+    "lora_name", "lora", "ipadapter_file", "pulid_file",
+)
+
+
+def _diagnostic_gpu_state() -> dict:
+    state = {}
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if completed.returncode == 0:
+            rows = []
+            for line in completed.stdout.splitlines():
+                values = [value.strip() for value in line.split(",")]
+                if len(values) == 6:
+                    rows.append({
+                        "index": values[0],
+                        "name": values[1],
+                        "memory_total_mb": values[2],
+                        "memory_used_mb": values[3],
+                        "memory_free_mb": values[4],
+                        "utilization_percent": values[5],
+                    })
+            state["gpus"] = rows
+        elif completed.stderr.strip():
+            state["error"] = completed.stderr.strip()[-500:]
+    except Exception as exc:
+        state["error"] = f"{exc.__class__.__name__}: {exc}"
+    return state
+
+
+def _looks_like_workflow(value) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    checked = 0
+    matches = 0
+    for node in value.values():
+        if not isinstance(node, dict):
+            continue
+        checked += 1
+        if isinstance(node.get("class_type"), str) and isinstance(node.get("inputs"), dict):
+            matches += 1
+        if checked >= 12:
+            break
+    return matches > 0 and matches == checked
+
+
+def _decode_diagnostic_workflow(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+        return decoded if isinstance(decoded, dict) else None
+    return None
+
+
+def _find_payload_workflows(payload) -> list[dict]:
+    workflows = []
+    seen_ids = set()
+
+    def visit(value, path: str) -> None:
+        if isinstance(value, dict):
+            if _looks_like_workflow(value):
+                marker = id(value)
+                if marker not in seen_ids:
+                    seen_ids.add(marker)
+                    workflows.append({"path": path, "workflow": value})
+                return
+            for key, child in value.items():
+                if str(key).lower() == "workflow":
+                    decoded = _decode_diagnostic_workflow(child)
+                    if _looks_like_workflow(decoded):
+                        marker = id(decoded)
+                        if marker not in seen_ids:
+                            seen_ids.add(marker)
+                            workflows.append({"path": f"{path}.{key}", "workflow": decoded})
+                        continue
+                visit(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+
+    visit(payload, "payload")
+    return workflows
+
+
+def _workflow_model_inventory(workflow: dict) -> dict:
+    loaders = []
+    purge_nodes = []
+    for raw_node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        node_id = str(raw_node_id)
+        class_type = str(node.get("class_type") or "")
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        class_lower = class_type.lower()
+
+        model_inputs = {}
+        for key, value in inputs.items():
+            key_lower = str(key).lower()
+            if any(hint in key_lower for hint in _MODEL_INPUT_HINTS):
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    model_inputs[str(key)] = value
+
+        loader_like = bool(model_inputs) or any(
+            token in class_lower
+            for token in ("loader", "checkpoint", "controlnet", "ipadapter", "sam3")
+        )
+        if loader_like:
+            loaders.append({
+                "node_id": node_id,
+                "class_type": class_type,
+                "model_inputs": model_inputs,
+            })
+
+        if "purge" in class_lower or "unload" in class_lower or "empty cache" in class_lower:
+            purge_nodes.append({
+                "node_id": node_id,
+                "class_type": class_type,
+                "purge_cache": inputs.get("purge_cache"),
+                "purge_models": inputs.get("purge_models"),
+            })
+
+    return {
+        "node_count": len(workflow),
+        "loader_count": len(loaders),
+        "purge_count": len(purge_nodes),
+        "loaders": loaders,
+        "purge_nodes": purge_nodes,
+    }
+
+
+def _emit_model_diagnostics(payload, *, phase: str, execution_id: str) -> None:
+    if not MODEL_DIAGNOSTICS_ENABLED:
+        return
+    try:
+        workflows = _find_payload_workflows(payload)
+        inventories = []
+        for item in workflows:
+            inventories.append({
+                "path": item["path"],
+                **_workflow_model_inventory(item["workflow"]),
+            })
+        _modal_trace(
+            "model_diagnostics",
+            role="pipeline_server",
+            phase=phase,
+            execution_id=execution_id,
+            workflow_count=len(inventories),
+            workflows=inventories,
+            gpu=_diagnostic_gpu_state(),
+        )
+    except Exception as exc:
+        _modal_trace(
+            "model_diagnostics_error",
+            role="pipeline_server",
+            phase=phase,
+            execution_id=execution_id,
+            error_type=exc.__class__.__name__,
+            error=str(exc),
+        )
+
+
 def _port_is_ready() -> bool:
     try:
         with socket.create_connection(("127.0.0.1", COMFYUI_PORT), timeout=1):
@@ -424,6 +602,7 @@ class ComfyUIServer:
         if payload.get("runtime_contract") != TRYON_RUNTIME_CONTRACT:
             raise ValueError("Unsupported Generation Runtime contract.")
         execution_id = str(payload.get("execution_id") or "")
+        _emit_model_diagnostics(payload, phase="before_pipeline", execution_id=execution_id)
         _modal_trace("pipeline_start", role="pipeline_server", execution_id=execution_id)
         runtime_worker = RUNTIME_ROOT / "runpod_worker"
         if str(runtime_worker) not in sys.path:
@@ -449,6 +628,7 @@ class ComfyUIServer:
             duration_ms=int((time.monotonic() - started) * 1000),
             status=result.get("status") if isinstance(result, dict) else None,
         )
+        _emit_model_diagnostics(payload, phase="after_pipeline", execution_id=execution_id)
         return result
 
     @modal.asgi_app(requires_proxy_auth=True)
