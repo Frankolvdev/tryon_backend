@@ -223,7 +223,6 @@ class GenerationModuleRuntimeService:
 
         if was_queued:
             generation_job_queue_service.remove(execution_id, engine=request_snapshot.engine)
-            return self._confirm_cancellation(execution_id, "Cancelled before provider dispatch.")
 
         provider = copy.deepcopy(self._provider_refs.get(execution_id) or {})
         if not provider.get("provider_job_id") and request_snapshot.provider_job_id:
@@ -232,21 +231,57 @@ class GenerationModuleRuntimeService:
 
         if provider.get("engine") == GenerationExecutionEngine.MODAL.value:
             call_id = str(provider.get("provider_job_id") or "").strip()
-            if not call_id:
+
+            # A Modal execution can still be marked locally as ``queued`` while
+            # ``spawn()`` is already in progress. Previously this branch returned
+            # immediately and only removed the local queue entry, leaving the
+            # newly-created Modal FunctionCall running without ever receiving a
+            # cancellation signal. Wait for the submitted callback to persist the
+            # call ID whenever dispatch has started. If cancellation won the race
+            # before ``spawn()``, execute_pipeline() observes cancel_requested and
+            # no FunctionCall is created.
+            dispatch_started = bool(
+                request_snapshot.dispatch_attempts > 0
+                or str(request_snapshot.provider_status or "").upper()
+                in {"DISPATCHING", "IN_QUEUE", "RUNNING"}
+            )
+            if not call_id and (dispatch_started or not was_queued):
                 deadline = time.monotonic() + 30.0
                 while time.monotonic() < deadline and not call_id:
                     time.sleep(0.25)
                     current = self.get(execution_id)
                     call_id = str(current.provider_job_id or "").strip()
+
             if not call_id:
-                raise AppException("Modal cancellation could not start because no FunctionCall ID was persisted.")
+                if was_queued:
+                    return self._confirm_cancellation(
+                        execution_id,
+                        "Cancelled before Modal provider dispatch.",
+                    )
+                raise AppException(
+                    "Modal cancellation could not start because no FunctionCall ID was persisted."
+                )
+
             db = SessionLocal()
             try:
                 config = infrastructure_provider_service.get_modal(db)
-                modal_pipeline_adapter_service.cancel_call(config, call_id=call_id)
+                cancellation = modal_pipeline_adapter_service.cancel_call(
+                    config, call_id=call_id
+                )
             finally:
                 db.close()
-            return self._confirm_cancellation(execution_id, f"Modal FunctionCall {call_id} cancellation confirmed.")
+
+            if cancellation.get("confirmed"):
+                message = f"Modal FunctionCall {call_id} cancellation confirmed."
+            else:
+                message = (
+                    f"Modal FunctionCall {call_id} cancellation closed locally after "
+                    "two hard-cancellation attempts without provider confirmation."
+                )
+            return self._confirm_cancellation(execution_id, message)
+
+        if was_queued:
+            return self._confirm_cancellation(execution_id, "Cancelled before provider dispatch.")
 
         if provider.get("engine") == GenerationExecutionEngine.LOCAL_DOCKER.value:
             prompt_id = str(provider.get("prompt_id") or "").strip()
