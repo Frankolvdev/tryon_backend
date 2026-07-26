@@ -122,7 +122,7 @@ class ModalPipelineAdapterService:
                 "POST",
                 self._url(config, f"/cancel/{call_id}"),
                 attempts=5,
-                json={"terminate_containers": True, "wait_timeout_seconds": timeout_seconds},
+                json={"terminate_containers": False, "wait_timeout_seconds": timeout_seconds},
                 timeout=httpx.Timeout(connect=30.0, read=float(timeout_seconds) + 30.0, write=30.0, pool=30.0),
             )
         except ModalTransientTransportError as exc:

@@ -474,7 +474,7 @@ fi
                 '@web_app.post(TRYON_PIPELINE_ROUTE + "/cancel/{call_id}")',
                 'await ComfyUIServer().run_pipeline.spawn.aio(payload)',
                 'await call.get.aio(timeout=0)',
-                'await call.cancel.aio(terminate_containers=terminate)',
+                'await call.cancel.aio(terminate_containers=False)',
                 'TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"',
                 'from generation_runtime import GenerationRuntime',
             )

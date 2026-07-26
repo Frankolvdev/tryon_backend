@@ -479,13 +479,13 @@ def _runtime_control_app():
             options = await request.json()
         except Exception:
             options = {{}}
-        terminate = bool(options.get("terminate_containers", True))
+        terminate = False
         call = modal.FunctionCall.from_id(call_id)
         try:
             # Modal documents that cancel() returns after the inputs have been
             # stopped and marked TERMINATED. No follow-up get() polling is
             # required and doing so could race with result retention.
-            await call.cancel.aio(terminate_containers=terminate)
+            await call.cancel.aio(terminate_containers=False)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Modal cancellation request failed: {{exc}}") from exc
         return {{
