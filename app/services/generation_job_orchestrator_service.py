@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class GenerationJobOrchestratorService:
-    """Owns provider workers while RunPod owns its remote GPU orchestration."""
+    """Owns provider workers while remote providers own their GPU orchestration."""
 
     def __init__(self) -> None:
         self._runtime = None
@@ -33,23 +33,33 @@ class GenerationJobOrchestratorService:
         with self._lock:
             if self._started:
                 return
+
             self._started = True
             self._stop.clear()
+
             db = SessionLocal()
             try:
                 self._runtime_settings = ai_engine_settings_service.get(db)
             finally:
                 db.close()
+
             runpod_parallelism = min(
                 self._runtime_settings.runpod_dispatch_workers,
                 self._runtime_settings.runpod_max_in_flight,
             )
+            modal_parallelism = max(
+                1,
+                int(self._runtime_settings.modal_max_containers)
+                * int(self._runtime_settings.modal_concurrency),
+            )
+
             specs = [
                 ("local", self._runtime_settings.local_parallel_executions),
                 ("runpod", runpod_parallelism),
-                ("modal", max(1, int(settings.GENERATION_MODAL_DISPATCH_WORKERS))),
+                ("modal", modal_parallelism),
                 ("simulated", max(1, int(settings.GENERATION_SIMULATED_WORKERS))),
             ]
+
             for queue_name, count in specs:
                 for index in range(count):
                     thread = threading.Thread(
@@ -60,6 +70,7 @@ class GenerationJobOrchestratorService:
                     )
                     thread.start()
                     self._threads.append(thread)
+
         self.recover_pending()
 
     def stop(self) -> None:
@@ -92,37 +103,72 @@ class GenerationJobOrchestratorService:
         while not self._stop.is_set():
             raw_id = generation_job_queue_service.dequeue(
                 queue_name,
-                timeout_seconds=int(self._runtime_settings.queue_block_seconds if self._runtime_settings else settings.GENERATION_QUEUE_BLOCK_SECONDS),
+                timeout_seconds=int(
+                    self._runtime_settings.queue_block_seconds
+                    if self._runtime_settings
+                    else settings.GENERATION_QUEUE_BLOCK_SECONDS
+                ),
             )
             if not raw_id:
                 continue
+
             try:
                 execution_id = UUID(raw_id)
                 current = generation_module_execution_store_service.get(execution_id)
                 if current is None or current.status != "queued" or current.cancel_requested:
                     continue
+
                 db = SessionLocal()
                 try:
-                    module = generation_module_service.get_response(db, module_id=current.module_id)
+                    module = generation_module_service.get_response(
+                        db,
+                        module_id=current.module_id,
+                    )
                     self._runtime.attach_persisted(current)
-                    self._runtime._run(execution_id, module.model_dump(mode="python"))
+                    self._runtime._run(
+                        execution_id,
+                        module.model_dump(mode="python"),
+                    )
                 finally:
                     db.close()
             except Exception:
                 logger.exception("Generation worker failed while handling %s", raw_id)
 
     def status(self) -> dict:
+        modal_parallelism = (
+            max(
+                1,
+                int(self._runtime_settings.modal_max_containers)
+                * int(self._runtime_settings.modal_concurrency),
+            )
+            if self._runtime_settings
+            else max(1, int(settings.GENERATION_MODAL_DISPATCH_WORKERS))
+        )
+
         return {
             "redis_available": generation_job_queue_service.ping(),
             "queue_depths": generation_job_queue_service.depths(),
             "workers": {
-                "local": (self._runtime_settings.local_parallel_executions if self._runtime_settings else max(1, int(settings.GENERATION_LOCAL_WORKERS))),
-                "runpod_dispatch": (self._runtime_settings.effective_runpod_parallelism if self._runtime_settings else max(1, int(settings.GENERATION_RUNPOD_DISPATCH_WORKERS))),
-                "modal_dispatch": max(1, int(settings.GENERATION_MODAL_DISPATCH_WORKERS)),
+                "local": (
+                    self._runtime_settings.local_parallel_executions
+                    if self._runtime_settings
+                    else max(1, int(settings.GENERATION_LOCAL_WORKERS))
+                ),
+                "runpod_dispatch": (
+                    self._runtime_settings.effective_runpod_parallelism
+                    if self._runtime_settings
+                    else max(1, int(settings.GENERATION_RUNPOD_DISPATCH_WORKERS))
+                ),
+                "modal_dispatch": modal_parallelism,
                 "simulated": max(1, int(settings.GENERATION_SIMULATED_WORKERS)),
             },
             "limits": {
-                "runpod_max_in_flight": (self._runtime_settings.runpod_max_in_flight if self._runtime_settings else max(1, int(settings.GENERATION_RUNPOD_MAX_IN_FLIGHT))),
+                "runpod_max_in_flight": (
+                    self._runtime_settings.runpod_max_in_flight
+                    if self._runtime_settings
+                    else max(1, int(settings.GENERATION_RUNPOD_MAX_IN_FLIGHT))
+                ),
+                "modal_max_in_flight": modal_parallelism,
             },
         }
 
