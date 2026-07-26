@@ -905,7 +905,7 @@ def _comfy_json_request(path: str, *, payload=None, timeout: int = 30):
     import urllib.error
     import urllib.request
 
-    url = f"http://127.0.0.1:{COMFYUI_PORT}{{path}}"
+    url = f"http://127.0.0.1:{{COMFYUI_PORT}}{{path}}"
     data = None
     headers = {{"Accept": "application/json"}}
     if payload is not None:
