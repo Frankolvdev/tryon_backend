@@ -300,6 +300,7 @@ APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
 VOLUME_PATH = {json.dumps(volume_path)}
 COMFYUI_PORT = 8188
+TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"
 STARTUP_TIMEOUT = int(os.getenv("TRYON_MODAL_STARTUP_TIMEOUT", "600"))
 
 GPU = os.getenv("TRYON_MODAL_GPU", "L40S")
