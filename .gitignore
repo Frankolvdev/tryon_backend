@@ -50,3 +50,5 @@ alembic/__pycache__/
 
 # Node (por si algún día agregamos herramientas)
 node_modules/
+
+storage/local/
