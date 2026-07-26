@@ -789,6 +789,191 @@ def _proxy_app():
     return web_app
 
 
+SNAPSHOT_MODEL_WARMUP_ENABLED = os.getenv(
+    "TRYON_MODAL_SNAPSHOT_MODEL_WARMUP", "true"
+).strip().lower() in {{"1", "true", "yes", "on"}}
+SNAPSHOT_MODEL_WARMUP_TIMEOUT = int(
+    os.getenv("TRYON_MODAL_SNAPSHOT_MODEL_WARMUP_TIMEOUT", "420")
+)
+SNAPSHOT_MODEL_WARMUP_TARGETS = (
+    {{
+        "node_id": "21578",
+        "class_type": "VAELoader",
+        "overrides": {{"vae_name": "flux2-vae.safetensors"}},
+    }},
+    {{
+        "node_id": "21586",
+        "class_type": "CLIPLoader",
+        "overrides": {{
+            "clip_name": "qwen_3_8b.safetensors",
+            "type": "flux2",
+            "device": "default",
+        }},
+    }},
+    {{
+        "node_id": "21584:21530",
+        "class_type": "UNETLoader",
+        "overrides": {{
+            "unet_name": "Flux2-Klein-9B-True-v2-bf16.safetensors",
+            "weight_dtype": "default",
+        }},
+    }},
+    {{
+        "node_id": "21584:21531",
+        "class_type": "TBGSAM3ModelLoaderAdvanced",
+        "overrides": {{
+            "model_source": "sam3.pt",
+            "device": "cuda",
+        }},
+    }},
+)
+
+
+def _write_snapshot_warmup_node() -> None:
+    """Instala un nodo sumidero aislado usado solo durante la captura del snapshot."""
+    try:
+        custom_node_path = COMFYUI_ROOT / "custom_nodes" / "tryon_snapshot_warmup.py"
+        custom_node_path.write_text(
+            """import threading\n\n_WARM_OBJECTS = []\n_WARM_LOCK = threading.Lock()\n\nclass _AnyType(str):\n    def __ne__(self, other):\n        return False\n\n_ANY = _AnyType("*")\n\nclass TryonSnapshotWarmupSink:\n    @classmethod\n    def INPUT_TYPES(cls):\n        return {{"required": {{"value": (_ANY,)}}}}\n\n    RETURN_TYPES = ()\n    FUNCTION = "hold"\n    OUTPUT_NODE = True\n    CATEGORY = "tryon/internal"\n\n    def hold(self, value):\n        # Mantener una referencia fuerte hace que el objeto y sus pesos formen\n        # parte del snapshot. La promoción a GPU es best-effort y no bloquea\n        # el arranque si una clase concreta no expone un patcher compatible.\n        try:\n            import comfy.model_management as model_management\n            candidate = getattr(value, "patcher", None) or value\n            model_management.load_models_gpu([candidate])\n        except Exception as exc:\n            print(f"[tryon-warmup] GPU promotion skipped: {{exc.__class__.__name__}}: {{exc}}", flush=True)\n        with _WARM_LOCK:\n            _WARM_OBJECTS.append(value)\n        return ()\n\nNODE_CLASS_MAPPINGS = {{\n    "TryonSnapshotWarmupSink": TryonSnapshotWarmupSink,\n}}\nNODE_DISPLAY_NAME_MAPPINGS = {{\n    \"TryonSnapshotWarmupSink\": \"TryOn Snapshot Warmup Sink\",\n}}\n""",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        _modal_trace(
+            "snapshot_model_warmup_node_error",
+            role="pipeline_server",
+            error_type=exc.__class__.__name__,
+            error=str(exc),
+        )
+
+
+def _comfy_json_request(path: str, *, payload=None, timeout: int = 30):
+    import urllib.error
+    import urllib.request
+
+    url = f"http://127.0.0.1:{{COMFYUI_PORT}}{{path}}"
+    data = None
+    headers = {{"Accept": "application/json"}}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read()
+    return json.loads(body.decode("utf-8")) if body else {{}}
+
+
+def _default_loader_inputs(node_info: dict, overrides: dict) -> dict:
+    required = ((node_info or {{}}).get("input") or {{}}).get("required") or {{}}
+    result = {{}}
+    for name, spec in required.items():
+        if name in overrides:
+            result[name] = overrides[name]
+            continue
+        if not isinstance(spec, list) or not spec:
+            continue
+        type_spec = spec[0]
+        options = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {{}}
+        if "default" in options:
+            result[name] = options["default"]
+        elif isinstance(type_spec, list) and type_spec:
+            result[name] = type_spec[0]
+    # Solo agregar overrides que realmente existan en la definición del nodo.
+    for name, value in overrides.items():
+        if name in required:
+            result[name] = value
+    return result
+
+
+def _run_snapshot_model_warmup() -> None:
+    """Precarga fija y encapsulada; cualquier fallo conserva el snapshot normal."""
+    if not SNAPSHOT_MODEL_WARMUP_ENABLED:
+        _modal_trace("snapshot_model_warmup", role="pipeline_server", enabled=False)
+        return
+
+    started = time.monotonic()
+    try:
+        object_info = _comfy_json_request("/object_info", timeout=60)
+        prompt = {{}}
+        loaded_targets = []
+        for index, target in enumerate(SNAPSHOT_MODEL_WARMUP_TARGETS):
+            class_type = target["class_type"]
+            info = object_info.get(class_type)
+            if not isinstance(info, dict):
+                raise RuntimeError(f"ComfyUI no registró el nodo {{class_type}}.")
+            node_id = target["node_id"]
+            prompt[node_id] = {{
+                "class_type": class_type,
+                "inputs": _default_loader_inputs(info, target["overrides"]),
+            }}
+            prompt[f"tryon-warmup-sink-{{index}}"] = {{
+                "class_type": "TryonSnapshotWarmupSink",
+                "inputs": {{"value": [node_id, 0]}},
+            }}
+            loaded_targets.append({{
+                "node_id": node_id,
+                "class_type": class_type,
+                "inputs": prompt[node_id]["inputs"],
+            }})
+
+        client_id = f"tryon-snapshot-{{uuid.uuid4().hex}}"
+        queued = _comfy_json_request(
+            "/prompt",
+            payload={{"prompt": prompt, "client_id": client_id}},
+            timeout=60,
+        )
+        prompt_id = str(queued.get("prompt_id") or "")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI rechazó el warmup: {{queued}}")
+
+        deadline = time.monotonic() + max(30, SNAPSHOT_MODEL_WARMUP_TIMEOUT)
+        while time.monotonic() < deadline:
+            history = _comfy_json_request(f"/history/{{prompt_id}}", timeout=30)
+            record = history.get(prompt_id) if isinstance(history, dict) else None
+            if isinstance(record, dict):
+                status = record.get("status") if isinstance(record.get("status"), dict) else {{}}
+                status_text = str(status.get("status_str") or "").lower()
+                completed = bool(status.get("completed")) or status_text in {{"success", "completed"}}
+                if completed:
+                    _modal_trace(
+                        "snapshot_model_warmup",
+                        role="pipeline_server",
+                        enabled=True,
+                        completed=True,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        prompt_id=prompt_id,
+                        targets=loaded_targets,
+                        gpu=_diagnostic_gpu_state(),
+                    )
+                    return
+                messages = status.get("messages") if isinstance(status.get("messages"), list) else []
+                if status_text in {{"error", "failed"}} or any(
+                    isinstance(item, list) and item and item[0] == "execution_error"
+                    for item in messages
+                ):
+                    raise RuntimeError(f"Warmup de ComfyUI falló: {{status}}")
+            time.sleep(1)
+        raise TimeoutError(
+            f"Warmup no terminó en {{SNAPSHOT_MODEL_WARMUP_TIMEOUT}} segundos."
+        )
+    except BaseException as exc:
+        _modal_trace(
+            "snapshot_model_warmup",
+            role="pipeline_server",
+            enabled=True,
+            completed=False,
+            fallback="normal_snapshot",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            error_type=exc.__class__.__name__,
+            error=str(exc),
+            gpu=_diagnostic_gpu_state(),
+        )
+        print(
+            "[modal] Warmup de modelos omitido por seguridad; "
+            "se continuará con el snapshot normal.",
+            flush=True,
+        )
+
+
 @app.cls(
     image=image,
     gpu=GPU,
@@ -814,6 +999,7 @@ class ComfyUIServer:
         env["COMFY_DATABASE_URL"] = COMFY_DATABASE_URL
 
         _prepare_runtime_directories()
+        _write_snapshot_warmup_node()
         _run_performance_probe(env)
 
         extra_args = shlex.split(env.get("COMFYUI_EXTRA_ARGS", ""))
@@ -846,6 +1032,7 @@ class ComfyUIServer:
         os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
         print("[modal] Iniciando ComfyUI antes del snapshot de memoria.", flush=True)
         self._start_process()
+        _run_snapshot_model_warmup()
         print(
             "[modal] ComfyUI inicializado y listo; creando snapshot de memoria.",
             flush=True,
