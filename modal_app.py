@@ -22,6 +22,7 @@ MIN_CONTAINERS = int(os.getenv("TRYON_MODAL_MIN_CONTAINERS", "0"))
 MAX_CONTAINERS = int(os.getenv("TRYON_MODAL_MAX_CONTAINERS", "3"))
 GENERATION_CONCURRENCY = int(os.getenv("TRYON_MODAL_CONCURRENCY", "1"))
 INPUT_CONCURRENCY = int(os.getenv("TRYON_MODAL_INPUT_CONCURRENCY", "1000"))
+WEB_MAX_CONTAINERS = int(os.getenv("TRYON_MODAL_WEB_MAX_CONTAINERS", "1"))
 SCALEDOWN_WINDOW = int(os.getenv("TRYON_MODAL_SCALEDOWN_WINDOW", "300"))
 EXECUTION_TIMEOUT = int(os.getenv("TRYON_MODAL_EXECUTION_TIMEOUT", "1800"))
 
@@ -295,7 +296,7 @@ def _proxy_app():
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
 )
-@modal.concurrent(max_inputs=INPUT_CONCURRENCY)
+@modal.concurrent(max_inputs=GENERATION_CONCURRENCY)
 class ComfyUIServer:
     def _start_process(self) -> None:
         if not COMFYUI_MAIN.is_file():
@@ -371,7 +372,120 @@ class ComfyUIServer:
         _wait_until_ready(process)
         print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
 
-    @modal.asgi_app()
+    @modal.method()
+    def run_pipeline(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("Pipeline payload must be a JSON object.")
+        if payload.get("runtime_contract") != TRYON_RUNTIME_CONTRACT:
+            raise ValueError("Unsupported Generation Runtime contract.")
+        runtime_worker = RUNTIME_ROOT / "runpod_worker"
+        if str(runtime_worker) not in sys.path:
+            sys.path.insert(0, str(runtime_worker))
+        from generation_runtime import GenerationRuntime
+        runtime = GenerationRuntime(comfy_url=f"http://127.0.0.1:{COMFYUI_PORT}")
+        return runtime.execute(payload)
+
+    @modal.exit()
+    def shutdown(self) -> None:
+        process = getattr(self, "comfyui_process", None)
+        if process is None or process.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            process.wait(timeout=15)
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+
+@app.cls(
+    image=image,
+    gpu=GPU,
+    min_containers=MIN_CONTAINERS,
+    max_containers=WEB_MAX_CONTAINERS,
+    volumes={VOLUME_PATH: models_volume},
+    timeout=EXECUTION_TIMEOUT,
+    scaledown_window=SCALEDOWN_WINDOW,
+    enable_memory_snapshot=True,
+    experimental_options={"enable_gpu_snapshot": True},
+)
+@modal.concurrent(max_inputs=INPUT_CONCURRENCY)
+class ComfyUIWebProxy:
+    def _start_process(self) -> None:
+        if not COMFYUI_MAIN.is_file():
+            raise RuntimeError(f"No se encontró ComfyUI en {COMFYUI_MAIN}.")
+
+        env = os.environ.copy()
+        env["RUNTIME_PROVIDER"] = "modal"
+        env["COMFYUI_PORT"] = str(COMFYUI_PORT)
+        env["MODELS_ROOT"] = str(MODELS_ROOT)
+        env["COMFY_USER_ROOT"] = str(COMFY_USER_ROOT)
+        env["COMFY_DATABASE_URL"] = COMFY_DATABASE_URL
+
+        _prepare_runtime_directories()
+        _run_performance_probe(env)
+
+        extra_args = shlex.split(env.get("COMFYUI_EXTRA_ARGS", ""))
+        command = [
+            sys.executable,
+            str(COMFYUI_MAIN),
+            "--listen",
+            "127.0.0.1",
+            "--port",
+            str(COMFYUI_PORT),
+            "--user-directory",
+            str(COMFY_USER_ROOT),
+            "--database-url",
+            COMFY_DATABASE_URL,
+            *extra_args,
+        ]
+        print(f"[modal] Iniciando ComfyUI directamente: {shlex.join(command)}", flush=True)
+        self.comfyui_process = subprocess.Popen(
+            command,
+            cwd=str(COMFYUI_ROOT),
+            env=env,
+            start_new_session=True,
+        )
+        _wait_until_ready(self.comfyui_process)
+
+    @modal.enter(snap=True)
+    def initialize_for_snapshot(self) -> None:
+        os.environ["RUNTIME_PROVIDER"] = "modal"
+        os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
+        print("[modal] Iniciando ComfyUI antes del snapshot de memoria.", flush=True)
+        self._start_process()
+        print(
+            "[modal] ComfyUI inicializado y listo; creando snapshot de memoria.",
+            flush=True,
+        )
+
+    @modal.enter(snap=False)
+    def restore_after_snapshot(self) -> None:
+        process = getattr(self, "comfyui_process", None)
+        if process is None:
+            raise RuntimeError(
+                "El snapshot no restauró la referencia al proceso de ComfyUI."
+            )
+
+        return_code = process.poll()
+        if return_code is not None:
+            raise RuntimeError(
+                f"ComfyUI no sobrevivió al restore del snapshot "
+                f"(código {return_code})."
+            )
+
+        if _port_is_ready():
+            print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
+            return
+
+        print(
+            "[modal] Snapshot restaurado; esperando que ComfyUI reactive el puerto.",
+            flush=True,
+        )
+        _wait_until_ready(process)
+        print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
+
+    @modal.asgi_app(requires_proxy_auth=True)
     def comfyui(self):
         return _proxy_app()
 

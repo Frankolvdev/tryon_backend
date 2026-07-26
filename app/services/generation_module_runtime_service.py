@@ -271,12 +271,23 @@ class GenerationModuleRuntimeService:
             finally:
                 db.close()
 
+            cancellation_errors = cancellation.get("errors") or []
             if cancellation.get("confirmed"):
-                message = f"Modal FunctionCall {call_id} cancellation confirmed."
+                message = (
+                    f"Modal FunctionCall {call_id} cancellation confirmed after "
+                    f"{cancellation.get('attempts', 1)} attempt(s)."
+                )
+            elif cancellation.get("request_sent"):
+                message = (
+                    f"Modal FunctionCall {call_id} cancellation was sent but Modal did "
+                    "not confirm it after the existing 50s + 20s waits; the execution "
+                    f"was closed locally. Modal errors: {cancellation_errors or 'none reported'}."
+                )
             else:
                 message = (
-                    f"Modal FunctionCall {call_id} cancellation closed locally after "
-                    "two hard-cancellation attempts without provider confirmation."
+                    f"Modal FunctionCall {call_id} cancellation could not be sent after "
+                    "two attempts and the existing 50s + 20s waits; the execution was "
+                    f"closed locally. Modal errors: {cancellation_errors or 'none reported'}."
                 )
             return self._confirm_cancellation(execution_id, message)
 
