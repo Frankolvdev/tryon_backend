@@ -429,6 +429,34 @@ class RuntimeBuildExecutionService:
         )
 
     @staticmethod
+    def _beam_deployment(db, build, deployment):
+        from app.services.infrastructure_provider_service import InfrastructureProviderService
+        cfg=InfrastructureProviderService.get_beam(db)
+        if not cfg.enabled or not cfg.api_key:
+            raise ValueError("Activa Beam y configura su API key antes del deploy.")
+        executable=shutil.which("beam")
+        if not executable:
+            raise ValueError("Beam CLI no está instalado. Ejecuta: pip install beam-client")
+        RuntimeBuildExecutionService._update_deployment(db,build,deployment,phase="publishing-image",progress=25,message="Publicando imagen.",log=f"[beam:2/6] Publicando {build.image_tag}.")
+        RuntimeBuildExecutionService._docker_push(build.image_tag, build, deployment, db)
+        app_file=Path(__file__).resolve().parents[2]/"beam_worker"/"app.py"
+        import tempfile
+        home=tempfile.mkdtemp(prefix="tryon-beam-")
+        env=os.environ.copy(); env.update({"HOME":home,"USERPROFILE":home,"TRYON_BEAM_IMAGE_URI":build.image_tag,"TRYON_BEAM_DEPLOYMENT_NAME":cfg.deployment_name,"TRYON_BEAM_VOLUME_NAME":cfg.volume_name,"TRYON_BEAM_VOLUME_PATH":cfg.volume_mount_path,"TRYON_BEAM_GPU":cfg.gpu,"TRYON_BEAM_CPU":str(cfg.cpu),"TRYON_BEAM_MEMORY_MB":str(cfg.memory_mb),"TRYON_BEAM_WORKERS":str(cfg.workers),"TRYON_BEAM_KEEP_WARM_SECONDS":str(cfg.keep_warm_seconds),"TRYON_BEAM_MAX_PENDING_TASKS":str(cfg.max_pending_tasks),"TRYON_BEAM_TIMEOUT":str(cfg.timeout_seconds),"TRYON_BEAM_RETRIES":str(cfg.retries),"TRYON_BEAM_CHECKPOINT":str(cfg.checkpoint_enabled).lower()})
+        configured=subprocess.run([executable,"configure","default","--token",cfg.api_key],env=env,capture_output=True,text=True,timeout=30)
+        if configured.returncode!=0:
+            raise ValueError("Beam CLI rechazó la API key: "+(configured.stdout or configured.stderr or "")[-2000:])
+        RuntimeBuildExecutionService._update_deployment(db,build,deployment,phase="deploying",progress=65,message="Desplegando Beam Task Queue.",log="[beam:4/6] Ejecutando beam deploy.")
+        completed=subprocess.run([executable,"deploy",f"{app_file}:handler","--name",cfg.deployment_name],env=env,capture_output=True,text=True,timeout=max(600,cfg.timeout_seconds))
+        output=(completed.stdout or completed.stderr or "").strip()
+        if completed.returncode!=0: raise ValueError("Beam deploy falló: "+output[-4000:])
+        import re
+        urls=re.findall(r"https://[^\s'\"]+",output); endpoint=next((u.rstrip('.,') for u in urls if 'beam.cloud' in u),cfg.endpoint)
+        if endpoint and endpoint!=cfg.endpoint:
+            cfg.endpoint=endpoint; InfrastructureProviderService.save_beam(db,cfg)
+        RuntimeBuildExecutionService._update_deployment(db,build,deployment,status="completed",phase="completed",progress=100,message="Beam desplegado.",log="[beam:6/6] Deployment Beam completado.",endpoint=endpoint,finished_at=utc_now().isoformat())
+
+    @staticmethod
     def run_deployment(build_id, deployment_id):
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         db = SessionLocal()
@@ -446,6 +474,9 @@ class RuntimeBuildExecutionService:
             )
             if deployment["provider"] == "runpod":
                 RuntimeBuildExecutionService._runpod_deployment(db, build, deployment)
+                return
+            if deployment["provider"] == "beam":
+                RuntimeBuildExecutionService._beam_deployment(db, build, deployment)
                 return
             if deployment["provider"] != "modal":
                 raise ValueError("El proveedor seleccionado todavía no tiene adaptador de despliegue.")

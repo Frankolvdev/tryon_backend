@@ -59,7 +59,20 @@ class BeamProviderConfig(BaseModel):
     api_key: str = Field(default="", max_length=1000)
     workspace: str = Field(default="", max_length=200)
     endpoint: str = Field(default="", max_length=1000)
-    volume_name: str = Field(default="tryon-models", max_length=120)
+    deployment_name: str = Field(default="tryon-generation-runtime", min_length=1, max_length=120)
+    volume_name: str = Field(default="tryon-models", min_length=1, max_length=120)
+    volume_mount_path: str = Field(default="/models", min_length=1, max_length=300)
+    gpu: str = Field(default="H100", min_length=1, max_length=120)
+    cpu: float = Field(default=8.0, ge=0.1, le=128)
+    memory_mb: int = Field(default=65536, ge=128, le=1048576)
+    workers: int = Field(default=1, ge=1, le=32)
+    min_containers: int = Field(default=0, ge=0, le=128)
+    max_containers: int = Field(default=5, ge=1, le=256)
+    tasks_per_container: int = Field(default=1, ge=1, le=64)
+    keep_warm_seconds: int = Field(default=10, ge=0, le=86400)
+    max_pending_tasks: int = Field(default=100, ge=1, le=100000)
+    retries: int = Field(default=2, ge=0, le=20)
+    checkpoint_enabled: bool = False
     timeout_seconds: int = Field(default=900, ge=60, le=86400)
 
 class BeamProviderResponse(BeamProviderConfig):

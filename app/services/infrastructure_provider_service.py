@@ -163,14 +163,35 @@ class InfrastructureProviderService:
 
     @classmethod
     def test_beam(cls, db: Session) -> dict:
+        import requests
         cfg=cls.get_beam(db)
         if not cfg.api_key: return {"success":False,"message":"Configura la API key de Beam.","details":{}}
-        return {"success":True,"message":"Credenciales Beam guardadas; la prueba operativa se habilitará en MegaZIP C.","details":{"workspace":cfg.workspace}}
+        try:
+            r=requests.get("https://api.beam.cloud/v2/task/00000000-0000-0000-0000-000000000000/",headers={"Authorization":f"Bearer {cfg.api_key}"},timeout=20)
+            if r.status_code in {401,403}: return {"success":False,"message":"Beam rechazó la API key.","details":{"status_code":r.status_code}}
+            return {"success":True,"message":"Credenciales Beam validadas.","details":{"workspace":cfg.workspace,"status_code":r.status_code}}
+        except Exception as exc:
+            return {"success":False,"message":"No fue posible conectar con Beam.","details":{"error":str(exc)}}
 
     @classmethod
     def ensure_beam_volume(cls, db: Session) -> dict:
         cfg=cls.get_beam(db)
-        return {"success":bool(cfg.volume_name),"message":"Nombre de volumen Beam preparado." if cfg.volume_name else "Configura un volumen Beam.","details":{"volume_name":cfg.volume_name}}
+        if not cfg.api_key: return {"success":False,"message":"Configura la API key de Beam.","details":{}}
+        executable=shutil.which("beam")
+        if not executable: return {"success":False,"message":"Beam CLI no está instalado en el backend.","details":{"required_command":"pip install beam-client"}}
+        import tempfile
+        home=tempfile.mkdtemp(prefix="tryon-beam-")
+        env=os.environ.copy(); env["HOME"]=home; env["USERPROFILE"]=home
+        configured=subprocess.run([executable,"configure","default","--token",cfg.api_key],env=env,capture_output=True,text=True,timeout=30)
+        if configured.returncode!=0:
+            return {"success":False,"message":"Beam CLI rechazó la API key.","details":{"output":(configured.stdout or configured.stderr or "")[-3000:]}}
+        listed=subprocess.run([executable,"volume","list"],env=env,capture_output=True,text=True,timeout=60)
+        output=(listed.stdout or listed.stderr or "")
+        if cfg.volume_name in output:
+            return {"success":True,"message":"Volumen Beam disponible.","details":{"volume_name":cfg.volume_name,"output":output[-3000:]}}
+        created=subprocess.run([executable,"volume","create",cfg.volume_name],env=env,capture_output=True,text=True,timeout=120)
+        out=(created.stdout or created.stderr or "").strip()
+        return {"success":created.returncode==0,"message":"Volumen Beam creado." if created.returncode==0 else "No fue posible crear el volumen Beam.","details":{"volume_name":cfg.volume_name,"output":out[-3000:]}}
 
     @staticmethod
     def _modal_env(config: ModalProviderConfig) -> dict[str, str]:

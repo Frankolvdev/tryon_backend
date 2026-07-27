@@ -35,6 +35,7 @@ from app.services.generation_module_billing_service import generation_module_bil
 from app.services.generation_module_result_service import generation_module_result_service
 from app.services.storage_service import storage_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
+from app.services.beam_serverless_adapter_service import beam_serverless_adapter_service
 from app.services.infrastructure_provider_service import infrastructure_provider_service
 from app.services.modal_pipeline_adapter_service import modal_pipeline_adapter_service
 from app.services.generation_job_queue_service import generation_job_queue_service
@@ -304,6 +305,14 @@ class GenerationModuleRuntimeService:
                 raise AppException("ComfyUI did not confirm the interruption.")
             return self._confirm_cancellation(execution_id, f"ComfyUI prompt {prompt_id} interruption confirmed.")
 
+        if provider.get("engine") == GenerationExecutionEngine.BEAM.value and provider.get("provider_job_id"):
+            db = SessionLocal()
+            try:
+                beam_serverless_adapter_service.cancel_job(db, provider_job_id=provider["provider_job_id"], endpoint=provider.get("endpoint_id"))
+            finally:
+                db.close()
+            return self._confirm_cancellation(execution_id, "Beam cancellation request accepted.")
+
         if provider.get("engine") == GenerationExecutionEngine.RUNPOD_SERVERLESS.value and provider.get("provider_job_id"):
             db = SessionLocal()
             try:
@@ -396,6 +405,7 @@ class GenerationModuleRuntimeService:
             "local_docker": comfyui_local_adapter_service.health(),
             "runpod_serverless": runpod_health,
             "modal": self._modal_health(db),
+            "beam": beam_serverless_adapter_service.health(db),
             "simulated": {"available": True, "mode": "deterministic", "supports_cancel": True, "supports_progress": True},
             "orchestrator": generation_job_orchestrator_service.status(),
         }
@@ -407,7 +417,7 @@ class GenerationModuleRuntimeService:
             item = self._items[execution_id]
             item.status = "running"; item.started_at = started
             item.queue_position = None
-            item.provider_status = ("running_local" if item.engine == GenerationExecutionEngine.LOCAL_DOCKER else ("dispatching_to_runpod" if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS else ("dispatching_to_modal" if item.engine == GenerationExecutionEngine.MODAL else "running_simulation")))
+            item.provider_status = ("running_local" if item.engine == GenerationExecutionEngine.LOCAL_DOCKER else ("dispatching_to_runpod" if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS else ("dispatching_to_modal" if item.engine == GenerationExecutionEngine.MODAL else ("dispatching_to_beam" if item.engine == GenerationExecutionEngine.BEAM else "running_simulation"))))
             item.heartbeat_at = started
             item.logs.append(GenerationModuleExecutionLog(timestamp=started, message="Execution started by the unified provider worker."))
             running_snapshot = item.model_copy(deep=True)
@@ -418,6 +428,9 @@ class GenerationModuleRuntimeService:
                 return
             if running_snapshot.engine == GenerationExecutionEngine.MODAL:
                 self._run_modal_module(db, execution_id, module)
+                return
+            if running_snapshot.engine == GenerationExecutionEngine.BEAM:
+                self._run_beam_module(db, execution_id, module)
                 return
             steps = [s for s in sorted(module["steps"], key=lambda row: row["position"]) if s["is_enabled"]]
             for index, step in enumerate(steps):
@@ -744,6 +757,32 @@ class GenerationModuleRuntimeService:
             item.status = "completed"
             item.progress = 100
             item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), message="Remote Generation Runtime completed the entire module in one RunPod job."))
+
+    def _run_beam_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
+        with self._lock:
+            current = self._items[execution_id].model_copy(deep=True)
+        timeout=max(60,sum(int((step.get("configuration") or {}).get("timeout_seconds") or 300) for step in module.get("steps",[]) if step.get("is_enabled")))
+        provider=RuntimeProviderRegistry.get(GenerationExecutionEngine.BEAM)
+        payload={"runtime_contract":"tryon.generation-runtime/v1","provider":{"key":provider.key,"remote":provider.remote},"execution_id":str(execution_id),"module":copy.deepcopy(module),"context":self._serialize_remote_value(db,current.context)}
+        submitted=beam_serverless_adapter_service.submit_job(db,input_data=payload,endpoint=(module.get("endpoint") or None))
+        with self._lock:
+            item=self._items[execution_id]
+            self._provider_refs[execution_id]={"engine":GenerationExecutionEngine.BEAM.value,"provider_job_id":submitted["provider_job_id"],"endpoint_id":submitted["endpoint"]}
+            item.provider_job_id=submitted["provider_job_id"]; item.provider_endpoint_id=submitted["endpoint"]; item.provider_status=submitted.get("status") or "PENDING"; item.dispatch_attempts+=1
+            generation_module_execution_store_service.save(item.model_copy(deep=True))
+        result=beam_serverless_adapter_service.execute_submitted_job(db,provider_job_id=submitted["provider_job_id"],endpoint=submitted["endpoint"],timeout_seconds=timeout,progress_callback=lambda p,m,meta=None:self._remote_module_progress(execution_id,p,m,meta or {}),cancellation_callback=lambda:self.get(execution_id).cancel_requested)
+        output=result.get("output")
+        if not isinstance(output,dict) or output.get("runtime_contract")!="tryon.generation-runtime/v1" or output.get("status")!="completed":
+            raise RuntimeError(str((output or {}).get("error") if isinstance(output,dict) else "Beam Generation Runtime returned an invalid payload."))
+        with self._lock:
+            item=self._items[execution_id]
+            for index,remote_step in enumerate(output.get("steps") or []):
+                if index>=len(item.steps) or not isinstance(remote_step,dict): continue
+                state=item.steps[index]; state.status=str(remote_step.get("status") or state.status); state.duration_ms=int(remote_step.get("duration_ms") or 0); state.outputs=remote_step.get("outputs") or {}; state.error=remote_step.get("error")
+            item.outputs=self._persist_final_outputs(db,execution_id=execution_id,user_id=item.user_id,outputs=output.get("outputs") or {})
+            if isinstance(output.get("context"),dict): item.context=output["context"]
+            item.runtime_metrics=copy.deepcopy(output.get("metrics") or {}); item.provider_metrics={"provider":"beam","provider_job_id":result.get("provider_job_id"),"endpoint":result.get("endpoint"),"execution_time_ms":result.get("execution_time_ms")}; item.status="completed"; item.progress=100; item.provider_status="COMPLETE"
+            item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(),message="Beam completed the entire generation pipeline in one task."))
 
     def _remote_module_progress(self, execution_id: UUID, progress: float, message: str, meta: dict[str, Any]) -> None:
         with self._lock:
