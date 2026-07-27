@@ -461,6 +461,7 @@ fi
             "scripts/healthcheck.py": health,
             "scripts/performance_probe.py": performance_probe,
             ".dockerignore": "**/.git\n**/__pycache__\n**/*.pyc\n.venv\nnode_modules\n",
+            "tryon_runtime_guard/__init__.py": generated["tryon_runtime_guard"],
         }
         if generated.get("modal_app"):
             modal_app = generated["modal_app"]
@@ -562,6 +563,7 @@ fi
         elif external_models:
             lines.append(f"COPY extra_model_paths.yaml {comfy_target}/extra_model_paths.yaml")
         lines += [
+            f"COPY tryon_runtime_guard/ {comfy_target}/custom_nodes/zzz_tryon_runtime_guard/",
             f"COPY runpod_worker/ {workdir}/runtime/runpod_worker/",
             f"COPY scripts/ {workdir}/runtime/scripts/",
             f"RUN chmod +x {workdir}/runtime/scripts/startup.sh",
