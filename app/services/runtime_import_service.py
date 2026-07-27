@@ -490,6 +490,11 @@ class RuntimeImportService:
         for ref in reference_records: unique_refs[(ref['value'].replace('\\','/').lower(),ref['class_type'],ref['field'])]=ref
         reference_records=list(unique_refs.values()); referenced=sorted({r['value'] for r in reference_records})
         model_index,total_models=RuntimeImportService._model_index(comfy); required_models=[]; missing_models=[]; ambiguous_models=[]; models_root=comfy/'models'
+        # A workflow normal may expose the same model in inputs, widgets_values,
+        # subgraphs, or several nodes. Resolve every reference, but deduplicate the
+        # final result by the real path inside ComfyUI/models. This makes normal
+        # and API workflows produce the same physical model list.
+        resolved_models: dict[str, dict[str, Any]] = {}
         for ref in reference_records:
             reference=ref['value']; normalized=reference.replace('\\','/').lstrip('./').lower()
             matches=model_index.get(normalized) or model_index.get(Path(normalized).name.lower()) or []
@@ -499,7 +504,17 @@ class RuntimeImportService:
             if len(unique)>1: ambiguous_models.append(reference)
             file=unique[0]; rel=file.relative_to(models_root).as_posix(); top=rel.split('/',1)[0].lower()
             inferred_type=ref['model_type'] if ref['model_type']!='other' else MODEL_TYPE_BY_FOLDER.get(top,'other')
-            required_models.append({'name':file.name,'model_type':inferred_type,'source_url':None,'target_path':rel,'sha256':None,'strategy':'volume','enabled':True,'size_bytes':file.stat().st_size,'workflow_reference':reference,'resolver':{'class_type':ref['class_type'],'field':ref['field'],'folders':ref['folders']},'found':True})
+            physical_key=rel.casefold()
+            workflow_ref={'value':reference,'class_type':ref['class_type'],'field':ref['field'],'folders':ref['folders']}
+            existing=resolved_models.get(physical_key)
+            if existing is not None:
+                existing_refs=existing.setdefault('workflow_references',[])
+                ref_key=(reference.replace('\\','/').casefold(),str(ref['class_type']).casefold(),str(ref['field']).casefold())
+                known={(str(item.get('value') or '').replace('\\','/').casefold(),str(item.get('class_type') or '').casefold(),str(item.get('field') or '').casefold()) for item in existing_refs}
+                if ref_key not in known: existing_refs.append(workflow_ref)
+                continue
+            resolved_models[physical_key]={'name':file.name,'model_type':inferred_type,'source_url':None,'target_path':rel,'sha256':None,'strategy':'volume','enabled':True,'size_bytes':file.stat().st_size,'workflow_reference':reference,'workflow_references':[workflow_ref],'resolver':{'class_type':ref['class_type'],'field':ref['field'],'folders':ref['folders']},'found':True}
+        required_models=list(resolved_models.values())
         warnings=node_warnings[:]
         if not python.get('python'): warnings.append('No se detectó Python. Se revisaron venv/.venv/env/python_embeded y rutas anidadas de Pinokio.')
         if unresolved_classes: warnings.append(f'{len(unresolved_classes)} clases siguen sin resolver tras consultar ComfyUI, NODE_CLASS_MAPPINGS y reglas conocidas.')

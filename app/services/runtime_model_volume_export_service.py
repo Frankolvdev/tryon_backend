@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import threading
 import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 from app.services.runtime_context_generator_service import RuntimeContextGeneratorService
@@ -69,7 +73,7 @@ class RuntimeModelVolumeExportService:
         from boto3 import client as boto3_client
         from boto3.s3.transfer import TransferConfig
         from botocore.config import Config
-        from botocore.exceptions import ClientError
+        from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
         from app.services.infrastructure_provider_service import InfrastructureProviderService
 
         cfg = InfrastructureProviderService.get_runpod(session)
@@ -80,36 +84,143 @@ class RuntimeModelVolumeExportService:
         missing = [name for name, value in (("Network Volume ID", volume_id), ("Data Center ID", data_center), ("S3 Access Key", access_key), ("S3 Secret Key", secret_key)) if not value]
         if missing:
             raise ValueError("Configura RunPod antes de exportar: " + ", ".join(missing) + ".")
+
         endpoint = f"https://s3api-{data_center.lower()}.runpod.io/"
+        notify("runpod-connecting", 94, f"Conectando con RunPod S3 en {data_center}…")
+        logger.info("RunPod S3 export: connecting endpoint=%s volume=%s", endpoint, volume_id)
         s3 = boto3_client(
             "s3",
             endpoint_url=endpoint,
             region_name=data_center,
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
-            config=Config(retries={"max_attempts": 10, "mode": "standard"}, s3={"addressing_style": "path"}),
+            config=Config(
+                retries={"max_attempts": 8, "mode": "adaptive"},
+                s3={"addressing_style": "path"},
+                connect_timeout=20,
+                read_timeout=120,
+                max_pool_connections=16,
+                tcp_keepalive=True,
+            ),
         )
-        files = [item for item in models_root.rglob("*") if item.is_file()]
-        transfer = TransferConfig(multipart_threshold=256 * 1024 * 1024, multipart_chunksize=64 * 1024 * 1024, max_concurrency=4, use_threads=True)
-        uploaded = skipped = 0
+
+        try:
+            # A bounded request verifies endpoint, credentials, and volume before
+            # a potentially multi-GB upload starts.
+            s3.list_objects_v2(Bucket=volume_id, MaxKeys=1)
+        except EndpointConnectionError as exc:
+            raise RuntimeError(f"No fue posible conectar con RunPod S3 ({endpoint}). Verifica el Data Center ID y tu conexión.") from exc
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code") or "desconocido")
+            message = str(exc.response.get("Error", {}).get("Message") or exc)
+            raise RuntimeError(f"RunPod S3 rechazó la validación del volumen {volume_id} ({code}): {message}") from exc
+        except BotoCoreError as exc:
+            raise RuntimeError(f"Falló la validación inicial de RunPod S3: {exc}") from exc
+
+        files = sorted((item for item in models_root.rglob("*") if item.is_file()), key=lambda item: item.relative_to(models_root).as_posix().casefold())
+        total_files = len(files)
+        total_bytes = sum(item.stat().st_size for item in files)
+        transfer = TransferConfig(
+            multipart_threshold=64 * 1024 * 1024,
+            multipart_chunksize=64 * 1024 * 1024,
+            max_concurrency=8,
+            max_io_queue=64,
+            io_chunksize=8 * 1024 * 1024,
+            use_threads=True,
+        )
+        uploaded = skipped = uploaded_bytes = 0
+        operation_started = time.monotonic()
+
+        def human_bytes(value: float) -> str:
+            units = ("B", "KB", "MB", "GB", "TB")
+            size = float(max(0, value))
+            for unit in units:
+                if size < 1024 or unit == units[-1]:
+                    return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+                size /= 1024
+            return f"{size:.1f} TB"
+
         for index, source in enumerate(files, start=1):
             relative = source.relative_to(models_root).as_posix()
             key = "/".join(part for part in (remote_path.strip("/"), relative) if part)
+            file_size = source.stat().st_size
             if not overwrite:
                 try:
                     remote = s3.head_object(Bucket=volume_id, Key=key)
-                    if int(remote.get("ContentLength") or -1) == source.stat().st_size:
+                    if int(remote.get("ContentLength") or -1) == file_size:
                         skipped += 1
+                        uploaded_bytes += file_size
+                        logger.info("RunPod S3 export: skipped identical file=%s size=%s", relative, file_size)
+                        notify("runpod-copy", 94 + min(4, int(4 * uploaded_bytes / max(1, total_bytes))), f"Omitido {index} de {total_files}: {relative} (ya existe).")
                         continue
                 except ClientError as exc:
                     status = int(exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") or 0)
                     code = str(exc.response.get("Error", {}).get("Code") or "")
                     if status not in {403, 404} and code not in {"404", "NoSuchKey", "NotFound"}:
-                        raise
-            notify("runpod-copy", 94 + min(4, int(4 * index / max(1, len(files)))), f"Subiendo {index} de {len(files)} archivos a RunPod…")
-            s3.upload_file(str(source), volume_id, key, Config=transfer)
+                        raise RuntimeError(f"RunPod S3 falló al comprobar {relative} ({code or status}): {exc}") from exc
+
+            logger.info("RunPod S3 export: uploading file=%s key=%s size=%s index=%s/%s", relative, key, file_size, index, total_files)
+            file_started = time.monotonic()
+            state = {"bytes": 0, "last_notify": 0.0}
+            lock = threading.Lock()
+
+            def progress_callback(chunk_bytes: int) -> None:
+                nonlocal uploaded_bytes
+                now = time.monotonic()
+                with lock:
+                    state["bytes"] += int(chunk_bytes)
+                    current_file_bytes = min(file_size, state["bytes"])
+                    overall_bytes = min(total_bytes, uploaded_bytes + current_file_bytes)
+                    if now - state["last_notify"] < 1.0 and current_file_bytes < file_size:
+                        return
+                    state["last_notify"] = now
+                    elapsed = max(0.001, now - file_started)
+                    speed = current_file_bytes / elapsed
+                    remaining = max(0, file_size - current_file_bytes)
+                    eta = remaining / speed if speed > 0 else 0
+                    file_percent = int(100 * current_file_bytes / max(1, file_size))
+                    overall_percent = 94 + min(4, int(4 * overall_bytes / max(1, total_bytes)))
+                    message = (
+                        f"RunPod {index}/{total_files}: {relative} — "
+                        f"{human_bytes(current_file_bytes)} de {human_bytes(file_size)} ({file_percent}%), "
+                        f"{human_bytes(speed)}/s, ETA {int(eta)} s"
+                    )
+                notify("runpod-copy", overall_percent, message)
+
+            notify("runpod-copy", 94 + min(4, int(4 * uploaded_bytes / max(1, total_bytes))), f"Iniciando {index} de {total_files}: {relative} ({human_bytes(file_size)})…")
+            try:
+                s3.upload_file(str(source), volume_id, key, Config=transfer, Callback=progress_callback)
+            except EndpointConnectionError as exc:
+                raise RuntimeError(f"Se perdió la conexión con RunPod S3 mientras se subía {relative}.") from exc
+            except ClientError as exc:
+                code = str(exc.response.get("Error", {}).get("Code") or "desconocido")
+                message = str(exc.response.get("Error", {}).get("Message") or exc)
+                raise RuntimeError(f"RunPod S3 rechazó la subida de {relative} ({code}): {message}") from exc
+            except BotoCoreError as exc:
+                raise RuntimeError(f"Falló la transferencia multipart de {relative}: {exc}") from exc
+            except Exception as exc:
+                raise RuntimeError(f"Error inesperado al subir {relative} a RunPod S3: {exc}") from exc
+
             uploaded += 1
-        return {"volume_id": volume_id, "data_center_id": data_center, "endpoint": endpoint, "path": remote_path, "files_uploaded": uploaded, "files_skipped": skipped}
+            uploaded_bytes += file_size
+            elapsed = max(0.001, time.monotonic() - file_started)
+            logger.info("RunPod S3 export: completed file=%s elapsed=%.2fs speed=%.2fMB/s", relative, elapsed, file_size / elapsed / 1024 / 1024)
+            notify("runpod-copy", 94 + min(4, int(4 * uploaded_bytes / max(1, total_bytes))), f"Completado {index} de {total_files}: {relative}.")
+
+        elapsed_total = max(0.001, time.monotonic() - operation_started)
+        logger.info("RunPod S3 export completed volume=%s uploaded=%s skipped=%s bytes=%s elapsed=%.2fs", volume_id, uploaded, skipped, uploaded_bytes, elapsed_total)
+        return {
+            "volume_id": volume_id,
+            "data_center_id": data_center,
+            "endpoint": endpoint,
+            "path": remote_path,
+            "files_total": total_files,
+            "files_uploaded": uploaded,
+            "files_skipped": skipped,
+            "bytes_total": total_bytes,
+            "bytes_processed": uploaded_bytes,
+            "elapsed_seconds": round(elapsed_total, 3),
+        }
 
     @staticmethod
     def _copy_to_beam(session: Any, models_root: Path, remote_path: str, overwrite: bool, notify: ProgressCallback) -> dict[str, Any]:
