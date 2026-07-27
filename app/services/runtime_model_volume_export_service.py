@@ -37,19 +37,43 @@ class RuntimeModelVolumeExportService:
     def _resolve(config: RuntimeBuilderConfig, comfyui_path: str) -> tuple[Path, list[dict[str, Any]]]:
         comfy = RuntimeContextGeneratorService._find_comfyui(comfyui_path)
         records: list[dict[str, Any]] = []
+        # The configuration can contain repeated logical references coming from
+        # normal/API workflows. Export only one record per real physical file.
+        # This is the final safety boundary shared by every destination.
+        seen_sources: dict[str, dict[str, Any]] = {}
+        seen_missing: set[str] = set()
         for item in [m for m in (config.models or []) if m.get("enabled", True)]:
             source = RuntimeContextGeneratorService._find_model(comfy, item)
             record = dict(item)
             if source is None:
+                missing_key = str(item.get("target_path") or item.get("name") or "").replace("\\", "/").strip().casefold()
+                if missing_key and missing_key in seen_missing:
+                    continue
+                if missing_key:
+                    seen_missing.add(missing_key)
                 record.update({"found": False, "source_path": None, "relative_path": None, "size_bytes": 0})
-            else:
-                relative = source.relative_to(comfy / "models")
-                record.update({
-                    "found": True,
-                    "source_path": str(source),
-                    "relative_path": f"models/{relative.as_posix()}",
-                    "size_bytes": source.stat().st_size,
-                })
+                records.append(record)
+                continue
+
+            source = source.resolve()
+            relative = source.relative_to((comfy / "models").resolve())
+            physical_key = relative.as_posix().casefold()
+            existing = seen_sources.get(physical_key)
+            if existing is not None:
+                references = existing.setdefault("workflow_references", [])
+                for reference in item.get("workflow_references") or []:
+                    if reference not in references:
+                        references.append(reference)
+                continue
+
+            record.update({
+                "found": True,
+                "source_path": str(source),
+                "relative_path": f"models/{relative.as_posix()}",
+                "target_path": relative.as_posix(),
+                "size_bytes": source.stat().st_size,
+            })
+            seen_sources[physical_key] = record
             records.append(record)
         return comfy, records
 
@@ -161,44 +185,116 @@ class RuntimeModelVolumeExportService:
 
             logger.info("RunPod S3 export: uploading file=%s key=%s size=%s index=%s/%s", relative, key, file_size, index, total_files)
             file_started = time.monotonic()
-            state = {"bytes": 0, "last_notify": 0.0}
-            lock = threading.Lock()
+            completed_file_bytes = 0
+            part_size = 32 * 1024 * 1024
+            multipart_id: str | None = None
 
-            def progress_callback(chunk_bytes: int) -> None:
-                nonlocal uploaded_bytes
-                now = time.monotonic()
-                with lock:
-                    state["bytes"] += int(chunk_bytes)
-                    current_file_bytes = min(file_size, state["bytes"])
-                    overall_bytes = min(total_bytes, uploaded_bytes + current_file_bytes)
-                    if now - state["last_notify"] < 1.0 and current_file_bytes < file_size:
-                        return
-                    state["last_notify"] = now
-                    elapsed = max(0.001, now - file_started)
-                    speed = current_file_bytes / elapsed
-                    remaining = max(0, file_size - current_file_bytes)
-                    eta = remaining / speed if speed > 0 else 0
-                    file_percent = int(100 * current_file_bytes / max(1, file_size))
-                    overall_percent = 94 + min(4, int(4 * overall_bytes / max(1, total_bytes)))
-                    message = (
+            def report_file_progress(current_file_bytes: int, phase: str = "subiendo") -> None:
+                elapsed = max(0.001, time.monotonic() - file_started)
+                current_file_bytes = min(file_size, max(0, current_file_bytes))
+                overall_bytes = min(total_bytes, uploaded_bytes + current_file_bytes)
+                speed = current_file_bytes / elapsed
+                remaining = max(0, file_size - current_file_bytes)
+                eta = remaining / speed if speed > 0 else 0
+                file_percent = int(100 * current_file_bytes / max(1, file_size))
+                overall_percent = 94 + min(4, int(4 * overall_bytes / max(1, total_bytes)))
+                notify(
+                    "runpod-copy",
+                    overall_percent,
+                    (
                         f"RunPod {index}/{total_files}: {relative} — "
                         f"{human_bytes(current_file_bytes)} de {human_bytes(file_size)} ({file_percent}%), "
-                        f"{human_bytes(speed)}/s, ETA {int(eta)} s"
-                    )
-                notify("runpod-copy", overall_percent, message)
+                        f"{human_bytes(speed)}/s, ETA {int(eta)} s ({phase})"
+                    ),
+                )
 
-            notify("runpod-copy", 94 + min(4, int(4 * uploaded_bytes / max(1, total_bytes))), f"Iniciando {index} de {total_files}: {relative} ({human_bytes(file_size)})…")
+            notify(
+                "runpod-copy",
+                94 + min(4, int(4 * uploaded_bytes / max(1, total_bytes))),
+                f"Iniciando {index} de {total_files}: {relative} ({human_bytes(file_size)})…",
+            )
             try:
-                s3.upload_file(str(source), volume_id, key, Config=transfer, Callback=progress_callback)
+                # boto3.upload_file reports bytes when they are read/queued, not
+                # when RunPod has actually persisted each multipart part. With a
+                # large queue it could remain apparently frozen at ~85%. Upload
+                # explicit parts and advance only after RunPod confirms each one.
+                if file_size >= part_size:
+                    created = s3.create_multipart_upload(Bucket=volume_id, Key=key)
+                    multipart_id = str(created["UploadId"])
+                    parts: list[dict[str, Any]] = []
+                    part_number = 1
+                    with source.open("rb") as handle:
+                        while True:
+                            chunk = handle.read(part_size)
+                            if not chunk:
+                                break
+                            part_started = time.monotonic()
+                            logger.info(
+                                "RunPod S3 export: uploading part file=%s part=%s bytes=%s upload_id=%s",
+                                relative,
+                                part_number,
+                                len(chunk),
+                                multipart_id,
+                            )
+                            response = s3.upload_part(
+                                Bucket=volume_id,
+                                Key=key,
+                                UploadId=multipart_id,
+                                PartNumber=part_number,
+                                Body=chunk,
+                            )
+                            parts.append({"ETag": response["ETag"], "PartNumber": part_number})
+                            completed_file_bytes += len(chunk)
+                            logger.info(
+                                "RunPod S3 export: completed part file=%s part=%s elapsed=%.2fs",
+                                relative,
+                                part_number,
+                                time.monotonic() - part_started,
+                            )
+                            report_file_progress(completed_file_bytes, f"parte {part_number} confirmada")
+                            part_number += 1
+                    report_file_progress(completed_file_bytes, "finalizando multipart")
+                    s3.complete_multipart_upload(
+                        Bucket=volume_id,
+                        Key=key,
+                        UploadId=multipart_id,
+                        MultipartUpload={"Parts": parts},
+                    )
+                    multipart_id = None
+                else:
+                    with source.open("rb") as handle:
+                        s3.put_object(Bucket=volume_id, Key=key, Body=handle, ContentLength=file_size)
+                    completed_file_bytes = file_size
+                    report_file_progress(completed_file_bytes, "confirmado")
             except EndpointConnectionError as exc:
+                if multipart_id:
+                    try:
+                        s3.abort_multipart_upload(Bucket=volume_id, Key=key, UploadId=multipart_id)
+                    except Exception:
+                        logger.exception("RunPod S3 export: could not abort multipart upload %s", multipart_id)
                 raise RuntimeError(f"Se perdió la conexión con RunPod S3 mientras se subía {relative}.") from exc
             except ClientError as exc:
+                if multipart_id:
+                    try:
+                        s3.abort_multipart_upload(Bucket=volume_id, Key=key, UploadId=multipart_id)
+                    except Exception:
+                        logger.exception("RunPod S3 export: could not abort multipart upload %s", multipart_id)
                 code = str(exc.response.get("Error", {}).get("Code") or "desconocido")
                 message = str(exc.response.get("Error", {}).get("Message") or exc)
                 raise RuntimeError(f"RunPod S3 rechazó la subida de {relative} ({code}): {message}") from exc
             except BotoCoreError as exc:
+                if multipart_id:
+                    try:
+                        s3.abort_multipart_upload(Bucket=volume_id, Key=key, UploadId=multipart_id)
+                    except Exception:
+                        logger.exception("RunPod S3 export: could not abort multipart upload %s", multipart_id)
                 raise RuntimeError(f"Falló la transferencia multipart de {relative}: {exc}") from exc
             except Exception as exc:
+                if multipart_id:
+                    try:
+                        s3.abort_multipart_upload(Bucket=volume_id, Key=key, UploadId=multipart_id)
+                    except Exception:
+                        logger.exception("RunPod S3 export: could not abort multipart upload %s", multipart_id)
                 raise RuntimeError(f"Error inesperado al subir {relative} a RunPod S3: {exc}") from exc
 
             uploaded += 1
@@ -273,7 +369,15 @@ class RuntimeModelVolumeExportService:
         )
         output = base / f"{RuntimeContextGeneratorService._safe(config.project_key or config.name)}-models-volume"
         models_root = output / "models"
+        destination_type = getattr(payload, "destination_type", "local")
         output.mkdir(parents=True, exist_ok=True)
+        # RunPod uploads the complete staging tree. Reusing the previous tree
+        # leaked models from older workflows into the next upload (the apparent
+        # extra audio encoder and repeated Qwen/VAE entries). Build a clean,
+        # deterministic tree containing only the current validated models.
+        if destination_type == "runpod" and models_root.exists():
+            notify("preparing", 3, "Limpiando la preparación anterior de RunPod…")
+            shutil.rmtree(models_root)
         models_root.mkdir(parents=True, exist_ok=True)
 
         copied = 0
@@ -388,7 +492,6 @@ class RuntimeModelVolumeExportService:
                 f"Procesando modelo {index + 1} de {len(records)}…",
             )
 
-        destination_type = getattr(payload, "destination_type", "local")
         docker_volume = getattr(payload, "docker_volume", None)
         docker_path = (getattr(payload, "docker_path", "") or "").strip("/\\")
 
