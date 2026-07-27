@@ -1093,45 +1093,89 @@ class ComfyUIServer:
 
     @modal.enter(snap=True)
     def initialize_for_snapshot(self) -> None:
-        _modal_trace("container_snapshot_initialize", role="pipeline_server", snapshot_mode="cpu_models")
+        # CPU-only snapshot: never start ComfyUI, import CUDA-facing modules,
+        # or touch model loaders here. Modal does not attach the GPU during
+        # this phase. Every optimization below is optional and must never
+        # make snapshot creation fail.
+        _modal_trace(
+            "container_snapshot_initialize",
+            role="pipeline_server",
+            snapshot_mode="cpu_runtime_safe",
+            comfyui_started=False,
+            models_loaded=False,
+        )
         os.environ["RUNTIME_PROVIDER"] = "modal"
         os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
-        print("[modal] Iniciando ComfyUI antes del snapshot de memoria.", flush=True)
-        self._start_process()
-        _run_snapshot_model_warmup()
+        os.environ["MODELS_ROOT"] = str(MODELS_ROOT)
+        os.environ["COMFY_USER_ROOT"] = str(COMFY_USER_ROOT)
+        os.environ["COMFY_DATABASE_URL"] = COMFY_DATABASE_URL
+
+        prepared = []
+        skipped = []
+        try:
+            _prepare_runtime_directories()
+            prepared.append("runtime_directories")
+        except Exception as exc:
+            skipped.append(f"runtime_directories:{{type(exc).__name__}}")
+            _modal_trace(
+                "snapshot_optional_prepare_error",
+                role="pipeline_server",
+                step="runtime_directories",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+        try:
+            runtime_worker = RUNTIME_ROOT / "runpod_worker"
+            if str(runtime_worker) not in sys.path:
+                sys.path.insert(0, str(runtime_worker))
+            from generation_runtime import GenerationRuntime  # noqa: F401
+            prepared.append("generation_runtime_imports")
+        except Exception as exc:
+            skipped.append(f"generation_runtime_imports:{{type(exc).__name__}}")
+            _modal_trace(
+                "snapshot_optional_prepare_error",
+                role="pipeline_server",
+                step="generation_runtime_imports",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+        self.comfyui_process = None
+        _modal_trace(
+            "container_snapshot_ready",
+            role="pipeline_server",
+            snapshot_mode="cpu_runtime_safe",
+            prepared=prepared,
+            skipped=skipped,
+            comfyui_started=False,
+            models_loaded=False,
+        )
         print(
-            "[modal] ComfyUI inicializado y listo; creando snapshot de memoria.",
+            "[modal] Snapshot CPU seguro preparado sin iniciar ComfyUI ni CUDA.",
             flush=True,
         )
 
     @modal.enter(snap=False)
     def restore_after_snapshot(self) -> None:
-        _modal_trace("container_restore_start", role="pipeline_server")
-        process = getattr(self, "comfyui_process", None)
-        if process is None:
-            raise RuntimeError(
-                "El snapshot no restauró la referencia al proceso de ComfyUI."
-            )
-
-        return_code = process.poll()
-        if return_code is not None:
-            raise RuntimeError(
-                f"ComfyUI no sobrevivió al restore del snapshot "
-                f"(código {{return_code}})."
-            )
-
-        if _port_is_ready():
-            print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
-            _modal_trace("container_ready", role="pipeline_server", restored_from_snapshot=True)
-            return
-
-        print(
-            "[modal] Snapshot restaurado; esperando que ComfyUI reactive el puerto.",
-            flush=True,
+        # Restore always follows the original normal GPU startup path. It does
+        # not depend on a subprocess surviving the CPU snapshot.
+        _modal_trace(
+            "container_restore_start",
+            role="pipeline_server",
+            startup_mode="normal_gpu_after_cpu_snapshot",
         )
-        _wait_until_ready(process)
-        print("[modal] ComfyUI restaurado desde snapshot y listo.", flush=True)
-        _modal_trace("container_ready", role="pipeline_server", restored_from_snapshot=True)
+        self.comfyui_process = None
+        self._start_process()
+        print("[modal] ComfyUI iniciado normalmente después del snapshot CPU.", flush=True)
+        _modal_trace(
+            "container_ready",
+            role="pipeline_server",
+            restored_from_snapshot=True,
+            comfyui_snapshotted=False,
+            models_snapshotted=False,
+            startup_mode="normal_gpu_after_cpu_snapshot",
+        )
 
     @modal.method()
     def run_pipeline(self, payload):
