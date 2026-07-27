@@ -106,6 +106,7 @@ class GenerationModuleService:
             description=module.description,
             version=module.version,
             category=module.category,
+            endpoint=module.endpoint,
             default_execution_engine=module.default_execution_engine,
             metadata=self._parse(module.metadata_json, {}),
             is_active=module.is_active,
