@@ -52,3 +52,5 @@ alembic/__pycache__/
 node_modules/
 
 storage/local/
+# SDKs aislados por proveedor
+.provider_envs/

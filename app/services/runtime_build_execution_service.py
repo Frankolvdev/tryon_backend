@@ -434,9 +434,13 @@ class RuntimeBuildExecutionService:
         cfg=InfrastructureProviderService.get_beam(db)
         if not cfg.enabled or not cfg.api_key:
             raise ValueError("Activa Beam y configura su API key antes del deploy.")
-        executable=shutil.which("beam")
-        if not executable:
-            raise ValueError("Beam CLI no está instalado. Ejecuta: pip install beam-client")
+        from app.services.beam_cli_environment_service import beam_cli_environment_service
+        try:
+            executable = beam_cli_environment_service.ensure(timeout_seconds=max(900, cfg.timeout_seconds))
+        except Exception as exc:
+            raise ValueError(
+                "No fue posible preparar el entorno aislado de Beam CLI: " + str(exc)
+            ) from exc
         RuntimeBuildExecutionService._update_deployment(db,build,deployment,phase="publishing-image",progress=25,message="Publicando imagen.",log=f"[beam:2/6] Publicando {build.image_tag}.")
         RuntimeBuildExecutionService._docker_push(build.image_tag, build, deployment, db)
         app_file=Path(__file__).resolve().parents[2]/"beam_worker"/"app.py"

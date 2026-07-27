@@ -177,8 +177,15 @@ class InfrastructureProviderService:
     def ensure_beam_volume(cls, db: Session) -> dict:
         cfg=cls.get_beam(db)
         if not cfg.api_key: return {"success":False,"message":"Configura la API key de Beam.","details":{}}
-        executable=shutil.which("beam")
-        if not executable: return {"success":False,"message":"Beam CLI no está instalado en el backend.","details":{"required_command":"pip install beam-client"}}
+        from app.services.beam_cli_environment_service import beam_cli_environment_service
+        try:
+            executable = beam_cli_environment_service.ensure(timeout_seconds=900)
+        except Exception as exc:
+            return {
+                "success": False,
+                "message": "No fue posible preparar el entorno aislado de Beam CLI.",
+                "details": {"error": str(exc), "requirements": "requirements-beam.txt"},
+            }
         import tempfile
         home=tempfile.mkdtemp(prefix="tryon-beam-")
         env=os.environ.copy(); env["HOME"]=home; env["USERPROFILE"]=home
