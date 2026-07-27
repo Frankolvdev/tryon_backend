@@ -533,7 +533,7 @@ def _proxy_app():
     scaledown_window=SCALEDOWN_WINDOW,
     memory=CPU_MEMORY_MB,
     enable_memory_snapshot=True,
-    experimental_options={"enable_gpu_snapshot": False},
+    experimental_options={"enable_gpu_snapshot": True},
 )
 @modal.concurrent(max_inputs=GENERATION_CONCURRENCY)
 class ComfyUIServer:
@@ -576,12 +576,14 @@ class ComfyUIServer:
 
     @modal.enter(snap=True)
     def initialize_for_snapshot(self) -> None:
-        # Basic Modal memory snapshot: prepare only safe runtime state. Do not
-        # preload models or initialize CUDA in this phase.
+        # Phase 1 GPU snapshot: capture the fully initialized ComfyUI server,
+        # custom-node imports and CUDA runtime, but never execute a workflow or
+        # preload model weights. Pipeline execution and cancellation remain
+        # outside this lifecycle hook.
         _modal_trace(
             "container_snapshot_initialize",
             role="pipeline_server",
-            snapshot_mode="basic_memory_snapshot",
+            snapshot_mode="gpu_runtime_without_models",
             comfyui_started=False,
             models_loaded=False,
         )
@@ -591,71 +593,79 @@ class ComfyUIServer:
         os.environ["COMFY_USER_ROOT"] = str(COMFY_USER_ROOT)
         os.environ["COMFY_DATABASE_URL"] = COMFY_DATABASE_URL
 
-        prepared = []
-        skipped = []
-        try:
-            _prepare_runtime_directories()
-            prepared.append("runtime_directories")
-        except Exception as exc:
-            skipped.append(f"runtime_directories:{type(exc).__name__}")
-            _modal_trace(
-                "snapshot_optional_prepare_error",
-                role="pipeline_server",
-                step="runtime_directories",
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-
-        try:
-            runtime_worker = RUNTIME_ROOT / "runpod_worker"
-            if str(runtime_worker) not in sys.path:
-                sys.path.insert(0, str(runtime_worker))
-            from generation_runtime import GenerationRuntime  # noqa: F401
-            prepared.append("generation_runtime_imports")
-        except Exception as exc:
-            skipped.append(f"generation_runtime_imports:{type(exc).__name__}")
-            _modal_trace(
-                "snapshot_optional_prepare_error",
-                role="pipeline_server",
-                step="generation_runtime_imports",
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-
+        # _start_process already performs all existing runtime preparation,
+        # starts the exact same ComfyUI command and waits for port readiness.
+        # No prompt is submitted here, so Flux, CLIP, VAE and SAM3 weights are
+        # not intentionally loaded into the snapshot.
         self.comfyui_process = None
+        self._start_process()
+
         _modal_trace(
             "container_snapshot_ready",
             role="pipeline_server",
-            snapshot_mode="basic_memory_snapshot",
-            prepared=prepared,
-            skipped=skipped,
-            comfyui_started=False,
+            snapshot_mode="gpu_runtime_without_models",
+            comfyui_started=True,
             models_loaded=False,
+            port_ready=_port_is_ready(),
+            process_pid=getattr(self.comfyui_process, "pid", None),
+            gpu=_diagnostic_gpu_state(),
         )
         print(
-            "[modal] Snapshot básico preparado sin precarga de modelos ni CUDA.",
+            "[modal] GPU Snapshot fase 1 listo: ComfyUI y CUDA inicializados, "
+            "sin precarga de modelos.",
             flush=True,
         )
 
     @modal.enter(snap=False)
     def restore_after_snapshot(self) -> None:
-        # Restore follows the original normal GPU startup path and does not
-        # depend on a subprocess surviving the snapshot.
+        # Prefer the snapshotted ComfyUI process. If the experimental snapshot
+        # cannot restore the child process/socket, fall back to the pre-existing
+        # normal startup path so generation remains available.
         _modal_trace(
             "container_restore_start",
             role="pipeline_server",
-            startup_mode="normal_gpu_after_basic_snapshot",
+            startup_mode="gpu_runtime_snapshot_without_models",
         )
-        self.comfyui_process = None
-        self._start_process()
-        print("[modal] ComfyUI iniciado normalmente después del snapshot básico.", flush=True)
+
+        process = getattr(self, "comfyui_process", None)
+        process_alive = process is not None and process.poll() is None
+        port_ready = _port_is_ready()
+        restored_process = bool(process_alive and port_ready)
+
+        if not restored_process:
+            _modal_trace(
+                "container_restore_fallback",
+                role="pipeline_server",
+                reason="snapshotted_comfyui_process_not_ready",
+                process_alive=process_alive,
+                port_ready=port_ready,
+            )
+            if process_alive:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    process.wait(timeout=10)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    pass
+            self.comfyui_process = None
+            self._start_process()
+
         _modal_trace(
             "container_ready",
             role="pipeline_server",
             restored_from_snapshot=True,
-            comfyui_snapshotted=False,
+            comfyui_snapshotted=restored_process,
             models_snapshotted=False,
-            startup_mode="normal_gpu_after_basic_snapshot",
+            startup_mode=(
+                "gpu_runtime_snapshot_without_models"
+                if restored_process
+                else "normal_gpu_fallback_after_snapshot"
+            ),
+            gpu=_diagnostic_gpu_state(),
+        )
+        print(
+            "[modal] ComfyUI listo después del GPU Snapshot fase 1 "
+            f"(restaurado={restored_process}, modelos_precargados=False).",
+            flush=True,
         )
 
     @modal.method()
