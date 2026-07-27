@@ -42,7 +42,7 @@ MAX_CONTAINERS = int(os.getenv("TRYON_MODAL_MAX_CONTAINERS", "3"))
 GENERATION_CONCURRENCY = int(os.getenv("TRYON_MODAL_CONCURRENCY", "1"))
 INPUT_CONCURRENCY = int(os.getenv("TRYON_MODAL_INPUT_CONCURRENCY", "1000"))
 SCALEDOWN_WINDOW = int(os.getenv("TRYON_MODAL_SCALEDOWN_WINDOW", "300"))
-CPU_MEMORY_MB = int(os.getenv("TRYON_MODAL_CPU_MEMORY_MB", "65536"))
+CPU_MEMORY_REQUEST_MB = int(os.getenv("TRYON_MODAL_CPU_MEMORY_REQUEST_MB", "32768"))
 EXECUTION_TIMEOUT = int(os.getenv("TRYON_MODAL_EXECUTION_TIMEOUT", "1800"))
 
 COMFYUI_ROOT = Path("/app/ComfyUI")
@@ -531,9 +531,8 @@ def _proxy_app():
     volumes={VOLUME_PATH: models_volume},
     timeout=EXECUTION_TIMEOUT,
     scaledown_window=SCALEDOWN_WINDOW,
-    memory=CPU_MEMORY_MB,
+    memory=CPU_MEMORY_REQUEST_MB,
     enable_memory_snapshot=True,
-    experimental_options={"enable_gpu_snapshot": False},
 )
 @modal.concurrent(max_inputs=GENERATION_CONCURRENCY)
 class ComfyUIServer:

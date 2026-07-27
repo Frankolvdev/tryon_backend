@@ -2,8 +2,11 @@ import json
 import os
 import shutil
 import subprocess
+import logging
 
 from app.services.runpod_control_plane_service import runpod_control_plane_service
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy.orm import Session
 
@@ -114,52 +117,123 @@ class InfrastructureProviderService:
         cfg = cls.get_runpod(db)
         if not cfg.api_key:
             return {"success": False, "message": "Configura la API key de RunPod.", "details": {}}
+
+        timeout_seconds = min(cfg.timeout_seconds, 60)
+        configured_id = str(cfg.network_volume_id or "").strip()
+        stale_id_error: str | None = None
+
         try:
-            if cfg.network_volume_id:
-                volume = runpod_control_plane_service.get_network_volume(
-                    cfg.network_volume_id,
-                    api_key=cfg.api_key,
-                    timeout_seconds=min(cfg.timeout_seconds, 60),
-                )
-                return {
-                    "success": True,
-                    "message": "Network Volume de RunPod disponible.",
-                    "details": volume,
-                }
+            # Un ID guardado puede quedar obsoleto, pertenecer a otra cuenta o haberse
+            # copiado incorrectamente. Primero se intenta resolverlo, pero su fallo no
+            # bloquea la búsqueda por nombre ni la creación del volumen.
+            if configured_id:
+                try:
+                    volume = runpod_control_plane_service.get_network_volume(
+                        configured_id,
+                        api_key=cfg.api_key,
+                        timeout_seconds=timeout_seconds,
+                    )
+                    return {
+                        "success": True,
+                        "message": "Network Volume de RunPod disponible.",
+                        "details": volume,
+                    }
+                except Exception as exc:
+                    stale_id_error = str(exc)
+                    logger.warning(
+                        "RunPod Network Volume ID no resoluble; se buscará por nombre: id=%s error=%s",
+                        configured_id,
+                        stale_id_error,
+                    )
+
             volumes = runpod_control_plane_service.list_network_volumes(
                 api_key=cfg.api_key,
-                timeout_seconds=min(cfg.timeout_seconds, 60),
+                timeout_seconds=timeout_seconds,
             )
+            wanted_name = str(cfg.network_volume_name or "").strip()
+            wanted_dc = str(cfg.data_center_id or "").strip().upper()
             existing = next(
                 (
-                    item for item in volumes
-                    if str(item.get("name") or "") == cfg.network_volume_name
-                    and (not cfg.data_center_id or str(item.get("dataCenterId") or "") == cfg.data_center_id)
+                    item
+                    for item in volumes
+                    if str(item.get("name") or "").strip().casefold() == wanted_name.casefold()
+                    and (
+                        not wanted_dc
+                        or str(item.get("dataCenterId") or "").strip().upper() == wanted_dc
+                    )
                 ),
                 None,
             )
             if existing:
-                cfg.network_volume_id = str(existing.get("id") or "")
+                cfg.network_volume_id = str(existing.get("id") or "").strip()
                 cls.save_runpod(db, cfg)
-                return {"success": True, "message": "Network Volume de RunPod encontrado y vinculado.", "details": existing}
-            if not cfg.data_center_id:
+                details = dict(existing)
+                if stale_id_error:
+                    details["replaced_stale_volume_id"] = configured_id
+                    details["stale_volume_id_error"] = stale_id_error
+                return {
+                    "success": True,
+                    "message": "Network Volume de RunPod encontrado y vinculado.",
+                    "details": details,
+                }
+
+            if not wanted_name:
+                return {
+                    "success": False,
+                    "message": "Configura el nombre del Network Volume.",
+                    "details": {"stale_volume_id_error": stale_id_error},
+                }
+            if not wanted_dc:
                 return {
                     "success": False,
                     "message": "Configura el Data Center ID para crear el Network Volume.",
-                    "details": {"volume_name": cfg.network_volume_name},
+                    "details": {
+                        "volume_name": wanted_name,
+                        "stale_volume_id_error": stale_id_error,
+                    },
                 }
+
             created = runpod_control_plane_service.create_network_volume(
                 api_key=cfg.api_key,
-                name=cfg.network_volume_name,
+                name=wanted_name,
                 size_gb=cfg.network_volume_size_gb,
-                data_center_id=cfg.data_center_id,
-                timeout_seconds=min(cfg.timeout_seconds, 60),
+                data_center_id=wanted_dc,
+                timeout_seconds=timeout_seconds,
             )
-            cfg.network_volume_id = str(created.get("id") or "")
+            created_id = str(created.get("id") or "").strip()
+            if not created_id:
+                raise RuntimeError(
+                    f"RunPod creó el volumen pero no devolvió su ID: {created!r}"
+                )
+            cfg.network_volume_id = created_id
+            cfg.data_center_id = wanted_dc
             cls.save_runpod(db, cfg)
-            return {"success": True, "message": "Network Volume de RunPod creado y vinculado.", "details": created}
+            details = dict(created)
+            if stale_id_error:
+                details["replaced_stale_volume_id"] = configured_id
+                details["stale_volume_id_error"] = stale_id_error
+            return {
+                "success": True,
+                "message": "Network Volume de RunPod creado y vinculado.",
+                "details": details,
+            }
         except Exception as exc:
-            return {"success": False, "message": "No fue posible comprobar o crear el Network Volume de RunPod.", "details": {"error": str(exc)}}
+            logger.exception("No fue posible comprobar o crear el Network Volume de RunPod")
+            return {
+                "success": False,
+                "message": (
+                    "No fue posible comprobar o crear el Network Volume de RunPod. "
+                    "Verifica que el Network Volume ID configurado exista y pertenezca a esta cuenta; "
+                    "si ya no existe o no es correcto, elimina el ID y vuelve a intentarlo para crear o vincular un volumen nuevo."
+                ),
+                "details": {
+                    "error": str(exc),
+                    "configured_volume_id": configured_id or None,
+                    "volume_name": str(cfg.network_volume_name or "").strip() or None,
+                    "data_center_id": str(cfg.data_center_id or "").strip() or None,
+                    "stale_volume_id_error": stale_id_error,
+                },
+            }
 
     @classmethod
     def test_beam(cls, db: Session) -> dict:
