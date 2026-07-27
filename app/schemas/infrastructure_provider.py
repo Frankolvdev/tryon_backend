@@ -27,6 +27,8 @@ class ProviderActionResponse(BaseModel):
 class RunPodProviderConfig(BaseModel):
     enabled: bool = False
     api_key: str = Field(default="", max_length=1000)
+    s3_access_key: str = Field(default="", max_length=1000, description="Access Key de la S3 API de RunPod; es distinta de la API key normal.")
+    s3_secret_key: str = Field(default="", max_length=1000, description="Secret de la S3 API de RunPod; se muestra una sola vez al crearlo.")
     endpoint_id: str = Field(default="", max_length=500, description="Opcional. Déjalo vacío para buscar o crear automáticamente el Endpoint durante el despliegue.")
     endpoint_name: str = Field(default="tryon-generation-runtime", min_length=1, max_length=191)
     template_id: str = Field(default="", max_length=500, description="Opcional. Déjalo vacío para buscar o crear automáticamente el Template durante el despliegue.")
@@ -51,7 +53,9 @@ class RunPodProviderConfig(BaseModel):
 
 class RunPodProviderResponse(RunPodProviderConfig):
     api_key: str = ""
+    s3_secret_key: str = ""
     api_key_configured: bool = False
+    s3_secret_key_configured: bool = False
 
 
 class BeamProviderConfig(BaseModel):

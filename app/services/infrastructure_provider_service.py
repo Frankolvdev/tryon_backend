@@ -69,10 +69,13 @@ class InfrastructureProviderService:
         except Exception: return schema()
 
     @classmethod
-    def _save_config(cls, db: Session, key: str, label: str, payload, secret_field: str):
+    def _save_config(cls, db: Session, key: str, label: str, payload, secret_field: str | tuple[str, ...]):
         current = cls._get_config(db, key, type(payload))
         data = payload.model_dump()
-        if not data.get(secret_field): data[secret_field] = getattr(current, secret_field)
+        secret_fields = (secret_field,) if isinstance(secret_field, str) else secret_field
+        for field in secret_fields:
+            if not data.get(field):
+                data[field] = getattr(current, field)
         row = cls._get_named_row(db, key) or SystemSetting(category="integrations", key=key, label=label, description=label, value_type="json", is_public=False, is_editable=True, is_sensitive=True)
         row.value_json = json.dumps(data, ensure_ascii=False); db.add(row); db.commit(); db.refresh(row)
         return type(payload).model_validate(data)
@@ -80,7 +83,7 @@ class InfrastructureProviderService:
     @classmethod
     def get_runpod(cls, db: Session): return cls._get_config(db, cls.RUNPOD_KEY, RunPodProviderConfig)
     @classmethod
-    def save_runpod(cls, db: Session, payload): return cls._save_config(db, cls.RUNPOD_KEY, "RunPod Serverless infrastructure provider", payload, "api_key")
+    def save_runpod(cls, db: Session, payload): return cls._save_config(db, cls.RUNPOD_KEY, "RunPod Serverless infrastructure provider", payload, ("api_key", "s3_secret_key"))
     @classmethod
     def get_beam(cls, db: Session): return cls._get_config(db, cls.BEAM_KEY, BeamProviderConfig)
     @classmethod

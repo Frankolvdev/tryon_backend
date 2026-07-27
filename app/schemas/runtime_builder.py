@@ -250,7 +250,7 @@ class RuntimeModelVolumeAnalyzeRequest(BaseModel):
 class RuntimeModelVolumeExportRequest(BaseModel):
     comfyui_path: str = Field(min_length=1, max_length=2000)
     output_directory: str | None = Field(default=None, max_length=2000)
-    destination_type: Literal["local", "docker_volume", "modal"] = "local"
+    destination_type: Literal["local", "docker_volume", "modal", "runpod", "beam"] = "local"
     docker_volume: str | None = Field(default=None, max_length=255)
     docker_path: str = Field(default="", max_length=2000)
     calculate_sha256: bool = True
@@ -317,7 +317,7 @@ class RuntimeProjectResponse(RuntimeWorkspaceUpdate):
 class RuntimeModelExportSettings(BaseModel):
     comfyui_path: str = ""
     output_directory: str = ""
-    destination_type: Literal["local", "docker_volume", "modal"] = "local"
+    destination_type: Literal["local", "docker_volume", "modal", "runpod", "beam"] = "local"
     docker_volume: str = ""
     docker_path: str = ""
     calculate_sha256: bool = True

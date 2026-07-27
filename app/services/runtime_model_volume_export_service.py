@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +62,83 @@ class RuntimeModelVolumeExportService:
             "bytes_total": sum(int(item["size_bytes"]) for item in found),
             "items": records,
         }
+
+
+    @staticmethod
+    def _copy_to_runpod(session: Any, models_root: Path, remote_path: str, overwrite: bool, notify: ProgressCallback) -> dict[str, Any]:
+        from boto3 import client as boto3_client
+        from boto3.s3.transfer import TransferConfig
+        from botocore.config import Config
+        from botocore.exceptions import ClientError
+        from app.services.infrastructure_provider_service import InfrastructureProviderService
+
+        cfg = InfrastructureProviderService.get_runpod(session)
+        volume_id = str(cfg.network_volume_id or "").strip()
+        data_center = str(cfg.data_center_id or "").strip().upper()
+        access_key = str(cfg.s3_access_key or "").strip()
+        secret_key = str(cfg.s3_secret_key or "").strip()
+        missing = [name for name, value in (("Network Volume ID", volume_id), ("Data Center ID", data_center), ("S3 Access Key", access_key), ("S3 Secret Key", secret_key)) if not value]
+        if missing:
+            raise ValueError("Configura RunPod antes de exportar: " + ", ".join(missing) + ".")
+        endpoint = f"https://s3api-{data_center.lower()}.runpod.io/"
+        s3 = boto3_client(
+            "s3",
+            endpoint_url=endpoint,
+            region_name=data_center,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(retries={"max_attempts": 10, "mode": "standard"}, s3={"addressing_style": "path"}),
+        )
+        files = [item for item in models_root.rglob("*") if item.is_file()]
+        transfer = TransferConfig(multipart_threshold=256 * 1024 * 1024, multipart_chunksize=64 * 1024 * 1024, max_concurrency=4, use_threads=True)
+        uploaded = skipped = 0
+        for index, source in enumerate(files, start=1):
+            relative = source.relative_to(models_root).as_posix()
+            key = "/".join(part for part in (remote_path.strip("/"), relative) if part)
+            if not overwrite:
+                try:
+                    remote = s3.head_object(Bucket=volume_id, Key=key)
+                    if int(remote.get("ContentLength") or -1) == source.stat().st_size:
+                        skipped += 1
+                        continue
+                except ClientError as exc:
+                    status = int(exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") or 0)
+                    code = str(exc.response.get("Error", {}).get("Code") or "")
+                    if status not in {403, 404} and code not in {"404", "NoSuchKey", "NotFound"}:
+                        raise
+            notify("runpod-copy", 94 + min(4, int(4 * index / max(1, len(files)))), f"Subiendo {index} de {len(files)} archivos a RunPod…")
+            s3.upload_file(str(source), volume_id, key, Config=transfer)
+            uploaded += 1
+        return {"volume_id": volume_id, "data_center_id": data_center, "endpoint": endpoint, "path": remote_path, "files_uploaded": uploaded, "files_skipped": skipped}
+
+    @staticmethod
+    def _copy_to_beam(session: Any, models_root: Path, remote_path: str, overwrite: bool, notify: ProgressCallback) -> dict[str, Any]:
+        from app.services.infrastructure_provider_service import InfrastructureProviderService
+        from app.services.beam_cli_environment_service import beam_cli_environment_service
+
+        cfg = InfrastructureProviderService.get_beam(session)
+        if not cfg.api_key:
+            raise ValueError("Configura la API key de Beam antes de exportar.")
+        volume_name = str(cfg.volume_name or "").strip()
+        if not volume_name:
+            raise ValueError("Configura el nombre del volumen Beam antes de exportar.")
+        executable = beam_cli_environment_service.ensure(timeout_seconds=900)
+        import tempfile
+        env = os.environ.copy()
+        home = tempfile.mkdtemp(prefix="tryon-beam-export-")
+        env.update({"HOME": home, "USERPROFILE": home})
+        configured = subprocess.run([executable, "configure", "default", "--token", cfg.api_key], env=env, capture_output=True, text=True, timeout=30)
+        if configured.returncode != 0:
+            output = "\n".join(part for part in (configured.stdout, configured.stderr) if part).strip()
+            raise RuntimeError(f"Beam CLI rechazó la API key: {output[-3000:]}")
+        target = f"beam://{volume_name}" + (f"/{remote_path.strip('/')}" if remote_path.strip('/') else "")
+        notify("beam-copy", 94, f"Subiendo modelos al volumen Beam {volume_name}…")
+        command = [executable, "cp", str(models_root), target]
+        completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=max(900, int(cfg.timeout_seconds)))
+        output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+        if completed.returncode != 0:
+            raise RuntimeError(f"Beam CLI no pudo copiar los modelos: {output[-4000:]}")
+        return {"volume_name": volume_name, "path": remote_path, "target": target, "overwrite_requested": overwrite, "output": output[-4000:]}
 
     @staticmethod
     def export(
@@ -248,6 +326,20 @@ class RuntimeModelVolumeExportService:
             finally:
                 session.close()
 
+        if destination_type in {"runpod", "beam"}:
+            from app.db.database import SessionLocal
+            session = SessionLocal()
+            try:
+                if destination_type == "runpod":
+                    details = RuntimeModelVolumeExportService._copy_to_runpod(session, models_root, docker_path, payload.overwrite, notify)
+                    manifest["runpod_destination"] = details
+                else:
+                    details = RuntimeModelVolumeExportService._copy_to_beam(session, models_root, docker_path, payload.overwrite, notify)
+                    manifest["beam_destination"] = details
+                manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+            finally:
+                session.close()
+
         notify("completed", 99, "Modelos organizados para Volume.")
         return {
             "success": True,
@@ -265,7 +357,11 @@ class RuntimeModelVolumeExportService:
             "models_overwritten": overwritten,
             "errors": 0,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
-            "destination": ({"type": "docker_volume", "volume": docker_volume, "path": docker_path} if destination_type == "docker_volume" else ({"type": "modal", "path": docker_path} if destination_type == "modal" else {"type": "local", "path": str(output)})),
+            "destination": (
+                {"type": "docker_volume", "volume": docker_volume, "path": docker_path}
+                if destination_type == "docker_volume"
+                else ({"type": destination_type, "path": docker_path} if destination_type in {"modal", "runpod", "beam"} else {"type": "local", "path": str(output)})
+            ),
             "bytes_copied": bytes_copied,
             "warnings": warnings,
             "manifest": manifest,
