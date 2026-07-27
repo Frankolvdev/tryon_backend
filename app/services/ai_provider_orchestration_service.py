@@ -121,6 +121,33 @@ class AiProviderOrchestrationService:
             "details": {"app_name": config.app_name, "volume_name": config.volume_name, "gpu": engine.modal_gpu},
         }
 
+    def _beam_health(self, db: Session) -> dict:
+        config = InfrastructureProviderService.get_beam(db)
+        configured = bool(
+            config.api_key
+            and config.deployment_name
+            and config.volume_name
+            and config.gpu
+        )
+        available = bool(config.enabled and configured)
+        return {
+            "provider": "beam",
+            "enabled": bool(config.enabled),
+            "configured": configured,
+            "available": available,
+            "message": (
+                "Beam disponible para los módulos."
+                if available
+                else "Completa y activa la configuración de Beam."
+            ),
+            "details": {
+                "deployment_name": config.deployment_name,
+                "volume_name": config.volume_name,
+                "gpu": config.gpu,
+                "endpoint": config.endpoint,
+            },
+        }
+
     def overview(self, db: Session) -> dict:
         mode = runtime_settings_service.get_string(
             db,
@@ -135,6 +162,7 @@ class AiProviderOrchestrationService:
             self._comfyui_health(db),
             self._runpod_health(db),
             self._modal_health(db),
+            self._beam_health(db),
         ]
 
         fallback_order = [

@@ -202,6 +202,8 @@ def update_config(
 ):
     config = get_or_create(db)
     values = payload.model_dump()
+    # El proveedor pertenece al runtime desde su creación y no puede cambiarse al editarlo.
+    values["provider"] = config.provider
     profile = RuntimeBuilderService.RECOMMENDED_PROFILE
     values.update(
         {
@@ -367,9 +369,12 @@ def create_deployment(
     if not item:
         raise HTTPException(404, "Build no encontrado.")
 
-    provider = str(payload.get("provider") or "").strip()
+    runtime_config = db.get(RuntimeBuilderConfig, item.runtime_config_id)
+    if runtime_config is None:
+        raise HTTPException(422, "La compilación no tiene un runtime asociado.")
+    provider = str(runtime_config.provider or "").strip()
     if not provider:
-        raise HTTPException(422, "Selecciona un proveedor de despliegue.")
+        raise HTTPException(422, "El runtime no tiene proveedor asociado.")
 
     try:
         deployment = RuntimeBuildExecutionService.create_deployment(
