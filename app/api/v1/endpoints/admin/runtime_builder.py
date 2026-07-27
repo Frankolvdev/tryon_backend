@@ -180,15 +180,41 @@ def select_profile(profile_id: int, db: Session = Depends(get_db)):
     db.commit(); db.refresh(selected)
     return selected
 
+def _delete_profile(profile_id: int, db: Session) -> None:
+    selected = db.query(RuntimeBuilderConfig).filter(RuntimeBuilderConfig.id == profile_id).first()
+    if selected is None:
+        raise HTTPException(status_code=404, detail="Runtime profile not found")
+    if db.query(RuntimeBuilderConfig).count() <= 1:
+        raise HTTPException(status_code=409, detail="At least one runtime profile is required")
+
+    was_active = bool(selected.is_active)
+    db.delete(selected)
+    db.commit()
+
+    if was_active:
+        fallback = (
+            db.query(RuntimeBuilderConfig)
+            .order_by(RuntimeBuilderConfig.id.asc())
+            .first()
+        )
+        if fallback is not None:
+            fallback.is_active = True
+            db.add(fallback)
+            db.commit()
+
+
 @router.delete("/profiles/{profile_id}", status_code=204)
 def delete_profile(profile_id: int, db: Session = Depends(get_db)):
-    selected = db.get(RuntimeBuilderConfig, profile_id)
-    if selected is None: raise HTTPException(status_code=404, detail="Runtime profile not found")
-    if db.query(RuntimeBuilderConfig).count() <= 1: raise HTTPException(status_code=409, detail="At least one runtime profile is required")
-    was_active=selected.is_active; db.delete(selected); db.commit()
-    if was_active:
-        fallback=db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.id.asc()).first(); fallback.is_active=True; db.commit()
+    _delete_profile(profile_id, db)
     return None
+
+
+@router.post("/profiles/{profile_id}/delete", status_code=204)
+def delete_profile_compat(profile_id: int, db: Session = Depends(get_db)):
+    """Compatibility endpoint for proxies/environments that mishandle DELETE routes."""
+    _delete_profile(profile_id, db)
+    return None
+
 
 @router.get("/config", response_model=RuntimeBuilderConfigResponse)
 def read_config(db: Session = Depends(get_db)):
