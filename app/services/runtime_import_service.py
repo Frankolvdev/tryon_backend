@@ -42,6 +42,23 @@ MODEL_INPUT_RULES = {
     'unCLIPCheckpointLoader': (('ckpt_name','checkpoint',('checkpoints',)),),
 }
 MODEL_FIELD_HINTS = ('model','ckpt','checkpoint','unet','diffusion','vae','clip','lora','control','adapter','ipadapter','sam','yolo','ultralytics','upscale','gguf','encoder','detector','bbox','segm')
+
+# Workflow values that configure algorithms, interpolation, schedulers or UI
+# behavior. They are not model files and must never be reported as missing.
+NON_MODEL_WORKFLOW_VALUES = {
+    'area', 'bicubic', 'bilinear', 'lanczos', 'nearest', 'nearest-exact',
+    'euler', 'euler_ancestral', 'euler_cfg_pp', 'heun', 'ddim',
+    'uni_pc', 'uni_pc_bh2', 'dpm_fast', 'dpm_adaptive', 'dpmpp_2m',
+    'dpmpp_2m_sde', 'dpmpp_sde', 'normal', 'simple', 'karras',
+    'exponential', 'sgm_uniform', 'beta', 'linear',
+}
+
+# Fields whose text values describe processing behavior rather than model files.
+NON_MODEL_FIELD_HINTS = {
+    'algorithm', 'crop', 'interpolation', 'method', 'mode', 'preset',
+    'resample', 'resampling', 'sampler', 'sampler_name', 'scheduler',
+    'upscale_method',
+}
 CORE_FALLBACK_CLASSES = {
     'CheckpointLoaderSimple','CheckpointLoader','unCLIPCheckpointLoader','UNETLoader','CLIPLoader','DualCLIPLoader','TripleCLIPLoader','VAELoader',
     'LoraLoader','LoraLoaderModelOnly','ControlNetLoader','DiffControlNetLoader','CLIPVisionLoader','StyleModelLoader','GLIGENLoader','UpscaleModelLoader',
@@ -276,7 +293,14 @@ class RuntimeImportService:
             value=inputs.get(field)
             if isinstance(value,str): refs.append({'value':value,'field':field,'model_type':model_type,'folders':','.join(folders),'class_type':cls})
         for field,value in inputs.items():
-            if isinstance(value,str) and (RuntimeImportService._looks_like_model(value) or any(h in field.lower() for h in MODEL_FIELD_HINTS)):
+            field_lower = str(field).strip().lower()
+            if not isinstance(value, str) or RuntimeImportService._is_non_model_workflow_value(value, field_lower):
+                continue
+            # Generic field-name detection is retained for custom loaders, but
+            # only after excluding known processing fields and values. Explicit
+            # model extensions/paths remain the strongest signal.
+            field_looks_model = any(h in field_lower for h in MODEL_FIELD_HINTS)
+            if RuntimeImportService._looks_like_model(value) or field_looks_model:
                 if not any(r['value']==value for r in refs): refs.append({'value':value,'field':field,'model_type':'other','folders':'','class_type':cls})
         for value in RuntimeImportService._string_values(node.get('widgets_values')):
             if RuntimeImportService._looks_like_model(value) and not any(r['value']==value for r in refs):
@@ -294,6 +318,17 @@ class RuntimeImportService:
             if len(value) == 2 and all(isinstance(v, int) for v in value): return []
             for child in value: values.extend(RuntimeImportService._string_values(child))
         return values
+
+    @staticmethod
+    def _is_non_model_workflow_value(value: str, field: str = '') -> bool:
+        normalized = value.strip().lower().replace(' ', '_')
+        field_normalized = field.strip().lower()
+        if normalized in NON_MODEL_WORKFLOW_VALUES:
+            return True
+        return field_normalized in NON_MODEL_FIELD_HINTS or any(
+            token in field_normalized
+            for token in ('sampler', 'scheduler', 'interpolation', 'resample', 'upscale_method')
+        )
 
     @staticmethod
     def _looks_like_model(value: str) -> bool:

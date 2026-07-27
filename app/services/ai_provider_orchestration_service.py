@@ -79,32 +79,38 @@ class AiProviderOrchestrationService:
         }
 
     def _runpod_health(self, db: Session) -> dict:
-        enabled = runtime_settings_service.runpod_enabled(db)
-        config = runpod_config_service.get_active_config(db)
-        configured = bool(config and config.endpoint_id)
-        health: dict = {}
-
-        if configured:
-            health = runpod_serverless_adapter_service.health(
-                db,
-                endpoint_id=config.endpoint_id,
-            )
+        # Runtime Builder can create or discover the Endpoint and Template during
+        # deployment. Their IDs are therefore outputs of provisioning, not
+        # prerequisites for showing RunPod as configured in Motor IA.
+        infra = InfrastructureProviderService.get_runpod(db)
+        configured = bool(
+            infra.api_key
+            and infra.endpoint_name
+            and infra.template_name
+            and infra.gpu_type_ids
+        )
+        available = bool(infra.enabled and configured)
 
         return {
             "provider": "runpod_serverless",
-            "enabled": enabled,
+            "enabled": bool(infra.enabled),
             "configured": configured,
-            "available": enabled and configured and bool(health.get("available")),
+            "available": available,
             "message": (
-                "RunPod disponible."
-                if enabled and configured and health.get("available")
-                else health.get("error")
-                or "RunPod no está habilitado o configurado."
+                "RunPod disponible para desplegar o utilizar el runtime."
+                if available
+                else "Completa y activa la configuración mínima de RunPod."
             ),
             "details": {
-                "config_id": config.id if config else None,
-                "endpoint_id": config.endpoint_id if config else None,
-                **health,
+                "endpoint_id": infra.endpoint_id or None,
+                "endpoint_name": infra.endpoint_name,
+                "endpoint_will_be_created": not bool(infra.endpoint_id),
+                "template_id": infra.template_id or None,
+                "template_name": infra.template_name,
+                "template_will_be_created": not bool(infra.template_id),
+                "registry_auth_required": bool(infra.registry_auth_id),
+                "network_volume_id": infra.network_volume_id or None,
+                "gpu_type_ids": infra.gpu_type_ids,
             },
         }
 

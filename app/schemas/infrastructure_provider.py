@@ -27,11 +27,11 @@ class ProviderActionResponse(BaseModel):
 class RunPodProviderConfig(BaseModel):
     enabled: bool = False
     api_key: str = Field(default="", max_length=1000)
-    endpoint_id: str = Field(default="", max_length=500)
+    endpoint_id: str = Field(default="", max_length=500, description="Opcional. Déjalo vacío para buscar o crear automáticamente el Endpoint durante el despliegue.")
     endpoint_name: str = Field(default="tryon-generation-runtime", min_length=1, max_length=191)
-    template_id: str = Field(default="", max_length=500)
+    template_id: str = Field(default="", max_length=500, description="Opcional. Déjalo vacío para buscar o crear automáticamente el Template durante el despliegue.")
     template_name: str = Field(default="tryon-generation-runtime", min_length=1, max_length=191)
-    registry_auth_id: str = Field(default="", max_length=500)
+    registry_auth_id: str = Field(default="", max_length=500, description="Solo es necesario cuando la imagen utiliza un registro Docker privado.")
     network_volume_id: str = Field(default="", max_length=500)
     network_volume_name: str = Field(default="tryon-models", min_length=1, max_length=120)
     network_volume_size_gb: int = Field(default=100, ge=1, le=4000)
