@@ -44,6 +44,7 @@ class RuntimeVolume(BaseModel):
 
 class RuntimeBuilderConfigUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    provider: Literal["modal", "runpod", "beam", "local"] = "modal"
     runtime_version: str = Field(min_length=1, max_length=64)
     python_version: str = Field(min_length=1, max_length=32)
     cuda_version: str = Field(min_length=1, max_length=32)
@@ -344,3 +345,22 @@ class RuntimeLaunchSettings(BaseModel):
 class RuntimeLaunchPreview(BaseModel):
     command: str
     lines: list[str]
+
+
+class RuntimeBuilderProfileCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=255)
+    provider: Literal["modal", "runpod", "beam", "local"] = "modal"
+
+class RuntimeBuilderProfileSummary(BaseModel):
+    id: int
+    name: str
+    provider: str
+    runtime_name: str
+    runtime_version: str
+    registry_image: str
+    is_active: bool
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+class RuntimeBuilderProfileList(BaseModel):
+    items: list[RuntimeBuilderProfileSummary]

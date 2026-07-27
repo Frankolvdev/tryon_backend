@@ -31,6 +31,10 @@ class RuntimeProviderRegistry:
             key="modal", engine=GenerationExecutionEngine.MODAL, remote=True,
             supports_single_job_module_runtime=True,
         ),
+        GenerationExecutionEngine.BEAM: RuntimeProviderDescriptor(
+            key="beam", engine=GenerationExecutionEngine.BEAM, remote=True,
+            supports_single_job_module_runtime=True,
+        ),
     }
 
     @classmethod

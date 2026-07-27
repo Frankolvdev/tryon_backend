@@ -6,6 +6,7 @@ class GenerationExecutionEngine(str, Enum):
     LOCAL_DOCKER = "local_docker"
     RUNPOD_SERVERLESS = "runpod_serverless"
     MODAL = "modal"
+    BEAM = "beam"
 
 
 class GenerationModuleStepType(str, Enum):

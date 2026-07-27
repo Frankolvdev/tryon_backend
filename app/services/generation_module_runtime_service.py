@@ -80,6 +80,7 @@ class GenerationModuleRuntimeService:
             pricing_rule_id=(pricing.id if pricing else None), tokens_charged=tokens,
             currency=(pricing.currency if pricing else None),
             commercial_price=(pricing.final_price_usd if pricing else None),
+            provider_endpoint_id=module.endpoint,
         )
         with self._lock:
             self._items[execution.id] = execution
@@ -678,7 +679,9 @@ class GenerationModuleRuntimeService:
             "module": copy.deepcopy(module),
             "context": remote_context,
         }
-        submitted = runpod_serverless_adapter_service.submit_job(db, input_data=payload)
+        submitted = runpod_serverless_adapter_service.submit_job(
+            db, input_data=payload, endpoint_id=(module.get("endpoint") or None)
+        )
         with self._lock:
             item = self._items[execution_id]
             self._provider_refs[execution_id] = {
@@ -891,7 +894,9 @@ class GenerationModuleRuntimeService:
             "inputs": context,
             "files": engine_files,
         }
-        submitted = runpod_serverless_adapter_service.submit_job(db, input_data=payload)
+        submitted = runpod_serverless_adapter_service.submit_job(
+            db, input_data=payload, endpoint_id=(module.get("endpoint") or None)
+        )
         with self._lock:
             self._provider_refs[execution_id] = {"engine": engine.value, "provider_job_id": submitted["provider_job_id"], "endpoint_id": submitted["endpoint_id"]}
             item = self._items[execution_id]

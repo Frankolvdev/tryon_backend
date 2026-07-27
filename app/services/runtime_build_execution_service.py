@@ -27,7 +27,7 @@ class RuntimeBuildExecutionService:
 
     @staticmethod
     def diagnostic(db):
-        cfg=db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.id).first() or RuntimeBuilderConfig()
+        cfg=db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.is_active.desc(), RuntimeBuilderConfig.id).first() or RuntimeBuilderConfig()
         try:
             result=subprocess.run(["docker","version","--format","{{.Server.Version}}"],capture_output=True,text=True,timeout=10)
             available=result.returncode==0

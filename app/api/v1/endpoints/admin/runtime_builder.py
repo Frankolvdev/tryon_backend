@@ -16,6 +16,9 @@ from app.schemas.runtime_builder import (
     RuntimeBuildBulkResponse,
     RuntimeBuilderConfigResponse,
     RuntimeBuilderConfigUpdate,
+    RuntimeBuilderProfileCreate,
+    RuntimeBuilderProfileList,
+    RuntimeBuilderProfileSummary,
     RuntimeContextGenerateRequest,
     RuntimeContextJobCreateResponse,
     RuntimeContextJobResponse,
@@ -48,7 +51,7 @@ router = APIRouter(prefix="/runtime-builder", dependencies=[Depends(admin_guard)
 
 
 def get_or_create(db: Session) -> RuntimeBuilderConfig:
-    config = db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.id.asc()).first()
+    config = db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.is_active.desc(), RuntimeBuilderConfig.id.asc()).first()
     if config is None:
         config = RuntimeBuilderConfig()
         db.add(config)
@@ -143,6 +146,49 @@ def sync_project_to_config(
     ):
         setattr(config, field, getattr(project, field))
 
+
+
+@router.get("/profiles", response_model=RuntimeBuilderProfileList)
+def list_profiles(db: Session = Depends(get_db)):
+    get_or_create(db)
+    return RuntimeBuilderProfileList(items=db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.created_at.asc()).all())
+
+@router.post("/profiles", response_model=RuntimeBuilderConfigResponse, status_code=201)
+def create_profile(payload: RuntimeBuilderProfileCreate, db: Session = Depends(get_db)):
+    base = get_or_create(db)
+    slug = RuntimeBuilderService.sanitize_runtime_name(payload.name)
+    for row in db.query(RuntimeBuilderConfig).all(): row.is_active = False
+    config = RuntimeBuilderConfig(
+        name=payload.name, provider=payload.provider, is_active=True, runtime_name=slug,
+        runtime_version="1.0.0", python_version=base.python_version, cuda_version=base.cuda_version,
+        pytorch_index_url=base.pytorch_index_url, comfyui_repository=base.comfyui_repository,
+        comfyui_commit=base.comfyui_commit, target_platform=base.target_platform,
+        registry_image=f"ghcr.io/your-org/{slug}", include_comfyui_manager=True,
+        custom_nodes=RuntimeBuilderService.merge_required_custom_nodes([]), python_dependencies=[], models=[],
+        environment_variables=[], volumes=[], project_key=f"{slug}-{int(__import__('time').time())}", module_type=slug,
+        container_workdir="/app", workspace_status="draft"
+    )
+    db.add(config); db.commit(); db.refresh(config)
+    get_or_create_project(db, config)
+    return config
+
+@router.post("/profiles/{profile_id}/select", response_model=RuntimeBuilderConfigResponse)
+def select_profile(profile_id: int, db: Session = Depends(get_db)):
+    selected = db.get(RuntimeBuilderConfig, profile_id)
+    if selected is None: raise HTTPException(status_code=404, detail="Runtime profile not found")
+    for row in db.query(RuntimeBuilderConfig).all(): row.is_active = row.id == profile_id
+    db.commit(); db.refresh(selected)
+    return selected
+
+@router.delete("/profiles/{profile_id}", status_code=204)
+def delete_profile(profile_id: int, db: Session = Depends(get_db)):
+    selected = db.get(RuntimeBuilderConfig, profile_id)
+    if selected is None: raise HTTPException(status_code=404, detail="Runtime profile not found")
+    if db.query(RuntimeBuilderConfig).count() <= 1: raise HTTPException(status_code=409, detail="At least one runtime profile is required")
+    was_active=selected.is_active; db.delete(selected); db.commit()
+    if was_active:
+        fallback=db.query(RuntimeBuilderConfig).order_by(RuntimeBuilderConfig.id.asc()).first(); fallback.is_active=True; db.commit()
+    return None
 
 @router.get("/config", response_model=RuntimeBuilderConfigResponse)
 def read_config(db: Session = Depends(get_db)):

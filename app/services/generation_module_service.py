@@ -248,6 +248,7 @@ class GenerationModuleService:
             description=data.description,
             version=data.version,
             category=data.category,
+            endpoint=(data.endpoint.strip() if data.endpoint else None),
             default_execution_engine=data.default_execution_engine.value,
             metadata_json=self._serialize(data.metadata),
             is_active=(data.is_active and data.pricing_rule_id is not None),
@@ -272,7 +273,7 @@ class GenerationModuleService:
         module = self.get(db, module_id=module_id)
         payload = data.model_dump(exclude_unset=True)
 
-        for field in ("name", "description", "category", "is_active"):
+        for field in ("name", "description", "category", "endpoint", "is_active"):
             if field in payload:
                 setattr(module, field, payload[field])
         if (

@@ -19,6 +19,7 @@ class GenerationModule(Base):
     category: Mapped[str] = mapped_column(
         String(100), default="tryon", nullable=False, index=True
     )
+    endpoint: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
     default_execution_engine: Mapped[str] = mapped_column(
         String(50),
         default=GenerationExecutionEngine.SIMULATED.value,

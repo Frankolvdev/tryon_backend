@@ -77,6 +77,7 @@ class GenerationModuleCreate(BaseModel):
     description: str | None = None
     version: int = Field(default=1, ge=1)
     category: str = Field(default="tryon", min_length=2, max_length=100)
+    endpoint: str | None = Field(default=None, max_length=500)
     default_execution_engine: GenerationExecutionEngine = (
         GenerationExecutionEngine.SIMULATED
     )
@@ -117,6 +118,7 @@ class GenerationModuleUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=255)
     description: str | None = None
     category: str | None = Field(default=None, min_length=2, max_length=100)
+    endpoint: str | None = Field(default=None, max_length=500)
     default_execution_engine: GenerationExecutionEngine | None = None
     metadata: dict[str, Any] | None = None
     is_active: bool | None = None
@@ -170,6 +172,7 @@ class GenerationModuleResponse(BaseModel):
     description: str | None
     version: int
     category: str
+    endpoint: str | None
     default_execution_engine: GenerationExecutionEngine
     metadata: dict[str, Any]
     is_active: bool
