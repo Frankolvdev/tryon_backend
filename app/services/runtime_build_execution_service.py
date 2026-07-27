@@ -302,6 +302,9 @@ class RuntimeBuildExecutionService:
                 raise ValueError("El proveedor seleccionado todavía no tiene adaptador de despliegue.")
             cfg = InfrastructureProviderService.get_modal(db)
             engine = ai_engine_settings_service.get(db)
+            # The provider form is the deployment source of truth for the GPU.
+            # Fall back to Motor IA only for installations created before this field existed.
+            selected_gpu = str(getattr(cfg, "gpu", "") or engine.modal_gpu or "L40S").strip()
             missing = []
             if not cfg.enabled: missing.append("activar Modal")
             if not cfg.token_id: missing.append("Token ID")
@@ -309,7 +312,7 @@ class RuntimeBuildExecutionService:
             if not cfg.environment: missing.append("Environment")
             if not cfg.app_name: missing.append("App Name")
             if not cfg.volume_name: missing.append("Volume Name")
-            if not engine.modal_gpu: missing.append("GPU")
+            if not selected_gpu: missing.append("GPU")
             if engine.modal_max_containers < engine.modal_min_containers: missing.append("rango de contenedores")
             if engine.modal_concurrency < 1: missing.append("workflows simultáneos por GPU")
             if engine.modal_input_concurrency < 1: missing.append("conexiones HTTP/WebSocket por contenedor")
@@ -333,12 +336,12 @@ class RuntimeBuildExecutionService:
             )
             RuntimeBuildExecutionService._update_deployment(
                 db, build, deployment, phase="publishing-image", progress=48,
-                message="Publicando imagen y aplicación en Modal.", log=f"[deploy:4/6] Ejecutando modal deploy para {cfg.app_name}.",
+                message="Publicando imagen y aplicación en Modal.", log=f"[deploy:4/6] Ejecutando modal deploy para {cfg.app_name} con GPU {selected_gpu}.",
             )
             proc = subprocess.Popen(
                 [executable, "deploy", "--name", cfg.app_name, "--env", cfg.environment, str(app_file)], cwd=str(context),
                 env={**InfrastructureProviderService._modal_env(cfg),
-                    "TRYON_MODAL_GPU": engine.modal_gpu,
+                    "TRYON_MODAL_GPU": selected_gpu,
                     "TRYON_MODAL_MIN_CONTAINERS": str(engine.modal_min_containers),
                     "TRYON_MODAL_MAX_CONTAINERS": str(engine.modal_max_containers),
                     "TRYON_MODAL_CONCURRENCY": str(engine.modal_concurrency),
@@ -388,6 +391,8 @@ class RuntimeBuildExecutionService:
             if not build or build.status not in {'succeeded','published','active'}:
                 raise ValueError('El build debe finalizar correctamente antes de subirlo a Modal.')
             cfg=InfrastructureProviderService.get_modal(db)
+            engine=ai_engine_settings_service.get(db)
+            selected_gpu=str(getattr(cfg, "gpu", "") or engine.modal_gpu or "L40S").strip()
             if not cfg.enabled or not cfg.token_id or not cfg.token_secret:
                 raise ValueError('Activa y configura Modal en Proveedores de infraestructura.')
             executable=shutil.which('modal')
@@ -398,11 +403,21 @@ class RuntimeBuildExecutionService:
             if not app_file.is_file():
                 raise ValueError('La compilación seleccionada no contiene modal_app.py. Vuelve a generar el runtime con soporte Modal.')
             build.status='publishing'
-            RuntimeBuildExecutionService._append(db,build,f'[modal] Publicando compilación {build.image_tag} desde {context}...','publishing',95)
+            RuntimeBuildExecutionService._append(db,build,f'[modal] Publicando compilación {build.image_tag} desde {context} con GPU {selected_gpu}...','publishing',95)
+            modal_env={
+                **InfrastructureProviderService._modal_env(cfg),
+                "TRYON_MODAL_GPU": selected_gpu,
+                "TRYON_MODAL_MIN_CONTAINERS": str(engine.modal_min_containers),
+                "TRYON_MODAL_MAX_CONTAINERS": str(engine.modal_max_containers),
+                "TRYON_MODAL_CONCURRENCY": str(engine.modal_concurrency),
+                "TRYON_MODAL_INPUT_CONCURRENCY": str(engine.modal_input_concurrency),
+                "TRYON_MODAL_SCALEDOWN_WINDOW": str(engine.modal_scaledown_window_seconds),
+                "TRYON_MODAL_EXECUTION_TIMEOUT": str(engine.modal_execution_timeout_seconds),
+            }
             proc=subprocess.Popen(
-                [executable,'deploy',str(app_file)],
+                [executable,'deploy','--name',cfg.app_name,'--env',cfg.environment,str(app_file)],
                 cwd=str(context),
-                env=InfrastructureProviderService._modal_env(cfg),
+                env=modal_env,
                 stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,
             )
             for line in proc.stdout or []:
