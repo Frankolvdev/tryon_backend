@@ -204,12 +204,21 @@ class RuntimeBuildExecutionService:
     def deployment_providers(db):
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         modal = InfrastructureProviderService.get_modal(db)
-        return [{
-            "key": "modal",
-            "label": "Modal",
-            "enabled": bool(modal.enabled),
-            "configured": bool(modal.token_id and modal.token_secret),
-        }]
+        runpod = InfrastructureProviderService.get_runpod(db)
+        return [
+            {
+                "key": "modal",
+                "label": "Modal",
+                "enabled": bool(modal.enabled),
+                "configured": bool(modal.token_id and modal.token_secret),
+            },
+            {
+                "key": "runpod",
+                "label": "RunPod Serverless",
+                "enabled": bool(runpod.enabled),
+                "configured": bool(runpod.api_key),
+            },
+        ]
 
     @staticmethod
     def _deployment_store(build):
@@ -283,6 +292,143 @@ class RuntimeBuildExecutionService:
         RuntimeBuildExecutionService._save_deployment(db, build, deployment)
 
     @staticmethod
+    def _runpod_deployment(db, build, deployment):
+        from app.services.infrastructure_provider_service import InfrastructureProviderService
+        from app.services.runpod_control_plane_service import runpod_control_plane_service
+
+        cfg = InfrastructureProviderService.get_runpod(db)
+        if not cfg.enabled or not cfg.api_key:
+            raise ValueError("Activa RunPod y configura su API key en Proveedores de infraestructura.")
+        if not build.image_tag:
+            raise ValueError("La compilación no tiene una imagen Docker asignada.")
+
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            phase="publishing-image", progress=25,
+            message="Publicando imagen Docker.",
+            log=f"[runpod:2/6] Publicando {build.image_tag} en el registro.",
+            app_name=cfg.endpoint_name,
+            volume_name=cfg.network_volume_name,
+        )
+        if not build.published:
+            pushed = subprocess.run(["docker", "push", build.image_tag], capture_output=True, text=True)
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                log=(pushed.stdout or "") + (pushed.stderr or ""),
+            )
+            if pushed.returncode != 0:
+                raise RuntimeError("docker push terminó con error. Inicia sesión en el registro configurado.")
+            build.published = True
+            db.add(build)
+            db.commit()
+
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            phase="preparing-template", progress=45,
+            message="Creando plantilla Serverless.",
+            log="[runpod:3/6] Comprobando plantilla RunPod.",
+        )
+        template_id = cfg.template_id.strip()
+        if template_id:
+            runpod_control_plane_service.request(
+                "GET", f"templates/{template_id}", api_key=cfg.api_key,
+                timeout_seconds=min(cfg.timeout_seconds, 90),
+            )
+        else:
+            # Cada build crea una plantilla inmutable. El endpoint se actualiza a la
+            # plantilla nueva mediante rolling release, evitando reutilizar una imagen vieja.
+            versioned_template_name = f"{cfg.template_name}-{build.id}"
+            template = runpod_control_plane_service.find_template_by_name(
+                versioned_template_name,
+                api_key=cfg.api_key,
+                timeout_seconds=min(cfg.timeout_seconds, 90),
+            )
+            if not template:
+                template = runpod_control_plane_service.create_template(
+                    api_key=cfg.api_key,
+                    name=versioned_template_name,
+                    image_name=build.image_tag,
+                    container_disk_gb=cfg.container_disk_gb,
+                    registry_auth_id=cfg.registry_auth_id or None,
+                    env={"RUNTIME_PROVIDER": "runpod", "PYTHONUNBUFFERED": "1"},
+                    timeout_seconds=min(cfg.timeout_seconds, 90),
+                )
+            template_id = str(template.get("id") or "")
+            if not template_id:
+                raise RuntimeError("RunPod no devolvió el ID de la plantilla.")
+
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            phase="deploying-endpoint", progress=68,
+            message="Creando o actualizando endpoint Serverless.",
+            log=f"[runpod:4/6] Plantilla lista: {template_id}.",
+        )
+        endpoint_payload = {
+            "templateId": template_id,
+            "computeType": "GPU",
+            "executionTimeoutMs": cfg.execution_timeout_seconds * 1000,
+            "flashboot": cfg.flashboot,
+            "gpuCount": 1,
+            "gpuTypeIds": cfg.gpu_type_ids,
+            "idleTimeout": cfg.idle_timeout_seconds,
+            "name": cfg.endpoint_name,
+            "scalerType": cfg.scaler_type,
+            "scalerValue": cfg.scaler_value,
+            "workersMax": cfg.workers_max,
+            "workersMin": cfg.workers_min,
+        }
+        if cfg.allowed_cuda_versions:
+            endpoint_payload["allowedCudaVersions"] = cfg.allowed_cuda_versions
+        if cfg.data_center_id:
+            endpoint_payload["dataCenterIds"] = [cfg.data_center_id]
+        if cfg.network_volume_id:
+            endpoint_payload["networkVolumeId"] = cfg.network_volume_id
+            endpoint_payload["networkVolumeIds"] = [cfg.network_volume_id]
+
+        if cfg.endpoint_id:
+            endpoint = runpod_control_plane_service.update_endpoint(
+                cfg.endpoint_id,
+                api_key=cfg.api_key,
+                payload=endpoint_payload,
+                timeout_seconds=min(cfg.timeout_seconds, 120),
+            )
+        else:
+            endpoint = runpod_control_plane_service.create_endpoint(
+                api_key=cfg.api_key,
+                payload=endpoint_payload,
+                timeout_seconds=min(cfg.timeout_seconds, 120),
+            )
+            cfg.endpoint_id = str(endpoint.get("id") or "")
+            InfrastructureProviderService.save_runpod(db, cfg)
+
+        endpoint_id = str(endpoint.get("id") or cfg.endpoint_id or "")
+        if not endpoint_id:
+            raise RuntimeError("RunPod no devolvió el ID del endpoint.")
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            phase="verifying-deployment", progress=92,
+            message="Verificando endpoint RunPod.",
+            log=f"[runpod:5/6] Endpoint disponible: {endpoint_id}.",
+            endpoint_id=endpoint_id,
+            template_id=template_id,
+        )
+        verified = runpod_control_plane_service.get_endpoint(
+            endpoint_id,
+            api_key=cfg.api_key,
+            timeout_seconds=min(cfg.timeout_seconds, 90),
+        )
+        deployment["finished_at"] = utc_now().isoformat()
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            status="deployed", phase="completed", progress=100,
+            message="Despliegue RunPod completado.",
+            log="[runpod:6/6] Plantilla y endpoint creados o actualizados correctamente.",
+            endpoint_id=endpoint_id,
+            endpoint_name=verified.get("name"),
+            template_id=template_id,
+        )
+
+    @staticmethod
     def run_deployment(build_id, deployment_id):
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         db = SessionLocal()
@@ -298,6 +444,9 @@ class RuntimeBuildExecutionService:
                 db, build, deployment, status="running", phase="validating-provider", progress=8,
                 message="Validando proveedor.", log="[deploy:1/6] Validando proveedor seleccionado.",
             )
+            if deployment["provider"] == "runpod":
+                RuntimeBuildExecutionService._runpod_deployment(db, build, deployment)
+                return
             if deployment["provider"] != "modal":
                 raise ValueError("El proveedor seleccionado todavía no tiene adaptador de despliegue.")
             cfg = InfrastructureProviderService.get_modal(db)

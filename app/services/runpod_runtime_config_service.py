@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.common.enums import IntegrationProvider
 from app.core.config import settings
 from app.services.integration_service import integration_service
+from app.services.infrastructure_provider_service import infrastructure_provider_service
 
 
 class RunPodRuntimeConfigService:
@@ -74,6 +75,9 @@ class RunPodRuntimeConfigService:
         self,
         db: Session,
     ) -> str | None:
+        provider = infrastructure_provider_service.get_runpod(db)
+        if provider.api_key:
+            return provider.api_key
         config = self._database_config(db)
 
         if config is not None:
@@ -105,6 +109,9 @@ class RunPodRuntimeConfigService:
         self,
         db: Session,
     ) -> str | None:
+        provider = infrastructure_provider_service.get_runpod(db)
+        if provider.endpoint_id:
+            return provider.endpoint_id
         config = self._database_config(db)
 
         if config is not None:

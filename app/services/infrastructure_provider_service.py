@@ -3,6 +3,8 @@ import os
 import shutil
 import subprocess
 
+from app.services.runpod_control_plane_service import runpod_control_plane_service
+
 from sqlalchemy.orm import Session
 
 from app.models.system_setting import SystemSetting
@@ -83,20 +85,81 @@ class InfrastructureProviderService:
 
     @classmethod
     def test_runpod(cls, db: Session) -> dict:
-        import urllib.request
-        cfg=cls.get_runpod(db)
-        if not cfg.api_key: return {"success":False,"message":"Configura la API key de RunPod.","details":{}}
+        cfg = cls.get_runpod(db)
+        if not cfg.api_key:
+            return {"success": False, "message": "Configura la API key de RunPod.", "details": {}}
         try:
-            req=urllib.request.Request("https://api.runpod.io/graphql", data=b'{"query":"query { myself { id } }"}', headers={"Authorization":f"Bearer {cfg.api_key}","Content-Type":"application/json"})
-            with urllib.request.urlopen(req, timeout=20) as r: body=r.read().decode()
-            return {"success":True,"message":"Conexión con RunPod validada.","details":{"response":body[-1000:]}}
-        except Exception as exc: return {"success":False,"message":"RunPod rechazó la configuración.","details":{"error":str(exc)}}
+            details = runpod_control_plane_service.account_probe(
+                api_key=cfg.api_key,
+                timeout_seconds=min(cfg.timeout_seconds, 60),
+            )
+            if cfg.endpoint_id:
+                endpoint = runpod_control_plane_service.get_endpoint(
+                    cfg.endpoint_id,
+                    api_key=cfg.api_key,
+                    timeout_seconds=min(cfg.timeout_seconds, 60),
+                )
+                details["endpoint"] = {
+                    "id": endpoint.get("id"),
+                    "name": endpoint.get("name"),
+                    "workersMin": endpoint.get("workersMin"),
+                    "workersMax": endpoint.get("workersMax"),
+                }
+            return {"success": True, "message": "Conexión con RunPod validada.", "details": details}
+        except Exception as exc:
+            return {"success": False, "message": "RunPod rechazó la configuración.", "details": {"error": str(exc)}}
 
     @classmethod
     def ensure_runpod_volume(cls, db: Session) -> dict:
-        cfg=cls.get_runpod(db)
-        if cfg.network_volume_id: return {"success":True,"message":"Volumen RunPod configurado.","details":{"volume_id":cfg.network_volume_id}}
-        return {"success":False,"message":"RunPod requiere seleccionar o crear el volumen mediante su API; completa Network Volume ID.","details":{"volume_name":cfg.network_volume_name}}
+        cfg = cls.get_runpod(db)
+        if not cfg.api_key:
+            return {"success": False, "message": "Configura la API key de RunPod.", "details": {}}
+        try:
+            if cfg.network_volume_id:
+                volume = runpod_control_plane_service.get_network_volume(
+                    cfg.network_volume_id,
+                    api_key=cfg.api_key,
+                    timeout_seconds=min(cfg.timeout_seconds, 60),
+                )
+                return {
+                    "success": True,
+                    "message": "Network Volume de RunPod disponible.",
+                    "details": volume,
+                }
+            volumes = runpod_control_plane_service.list_network_volumes(
+                api_key=cfg.api_key,
+                timeout_seconds=min(cfg.timeout_seconds, 60),
+            )
+            existing = next(
+                (
+                    item for item in volumes
+                    if str(item.get("name") or "") == cfg.network_volume_name
+                    and (not cfg.data_center_id or str(item.get("dataCenterId") or "") == cfg.data_center_id)
+                ),
+                None,
+            )
+            if existing:
+                cfg.network_volume_id = str(existing.get("id") or "")
+                cls.save_runpod(db, cfg)
+                return {"success": True, "message": "Network Volume de RunPod encontrado y vinculado.", "details": existing}
+            if not cfg.data_center_id:
+                return {
+                    "success": False,
+                    "message": "Configura el Data Center ID para crear el Network Volume.",
+                    "details": {"volume_name": cfg.network_volume_name},
+                }
+            created = runpod_control_plane_service.create_network_volume(
+                api_key=cfg.api_key,
+                name=cfg.network_volume_name,
+                size_gb=cfg.network_volume_size_gb,
+                data_center_id=cfg.data_center_id,
+                timeout_seconds=min(cfg.timeout_seconds, 60),
+            )
+            cfg.network_volume_id = str(created.get("id") or "")
+            cls.save_runpod(db, cfg)
+            return {"success": True, "message": "Network Volume de RunPod creado y vinculado.", "details": created}
+        except Exception as exc:
+            return {"success": False, "message": "No fue posible comprobar o crear el Network Volume de RunPod.", "details": {"error": str(exc)}}
 
     @classmethod
     def test_beam(cls, db: Session) -> dict:
