@@ -153,6 +153,7 @@ class RuntimeContextGeneratorService:
         config: RuntimeBuilderConfig,
         payload: Any,
         progress: ProgressCallback | None = None,
+        modal_volume_name: str | None = None,
     ) -> dict[str, Any]:
         notify = progress or (lambda _phase, _percent, _message: None)
         notify("preparing", 2, "Validando instalación local de ComfyUI…")
