@@ -218,7 +218,7 @@ class ModalPipelineAdapterService:
 
             def request_hard_cancellation(attempt: int) -> bool:
                 try:
-                    call.cancel()
+                    call.cancel(terminate_containers=False)
                     logger.warning(
                         "[backend-modal-cancel-sent] call_id=%s attempt=%s",
                         call_id,
