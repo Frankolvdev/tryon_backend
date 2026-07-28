@@ -312,7 +312,13 @@ def list_builds(
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    query = db.query(RuntimeBuilderBuild)
+    # Build history is scoped to the currently selected runtime profile.
+    # RuntimeBuilderBuild already persists runtime_config_id when a build is
+    # created, so no schema, migration or build execution change is needed.
+    config = get_or_create(db)
+    query = db.query(RuntimeBuilderBuild).filter(
+        RuntimeBuilderBuild.runtime_config_id == config.id
+    )
     return {
         "items": query.order_by(RuntimeBuilderBuild.id.desc()).limit(limit).all(),
         "total": query.count(),
