@@ -1,3 +1,4 @@
 # Dependencias exclusivas para el control plane y despliegue de Beam.
 # Se instalan en un entorno virtual aislado; no forman parte del backend principal.
+packaging>=23,<27
 beam-client==0.2.201
