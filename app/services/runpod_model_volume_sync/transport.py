@@ -266,5 +266,11 @@ class RsyncSshTransport:
             if process.poll() is None:
                 process.kill()
         if code != 0:
-            raise RuntimeError(f"rsync terminó con código {code}: {' | '.join(output[-20:])}")
+            joined = "\n".join(output)
+            lower = joined.lower()
+            metadata_only = code == 23 and ("operation not permitted" in lower) and any(token in lower for token in ("chown", "chgrp", "failed to set permissions"))
+            transfer_complete = ("to-chk=0/" in lower) or ("number of regular files transferred:" in lower and "total transferred file size:" in lower)
+            if not (metadata_only and transfer_complete):
+                raise RuntimeError(f"rsync terminó con código {code}: {' | '.join(output[-20:])}")
+            notify("runpod-rsync-metadata-warning", 98, "Los archivos se transfirieron; RunPod rechazó únicamente metadatos Unix de propietario/permisos.")
         return "\n".join(output[-100:])

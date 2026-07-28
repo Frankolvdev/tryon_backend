@@ -69,6 +69,8 @@ from app.api.v1.endpoints.admin import (
     workflow_definitions,
     infrastructure_providers,
     modal_file_manager,
+    runpod_file_manager,
+    beam_file_manager,
 )
 
 admin_router = APIRouter()
@@ -342,3 +344,5 @@ admin_router.include_router(user_library.router, tags=["User Library Admin"])
 
 admin_router.include_router(infrastructure_providers.router, tags=["Admin - Infrastructure Providers"])
 admin_router.include_router(modal_file_manager.router, tags=["Admin - Modal File Manager"])
+admin_router.include_router(runpod_file_manager.router, tags=["Admin - RunPod File Manager"])
+admin_router.include_router(beam_file_manager.router, tags=["Admin - Beam File Manager"])
