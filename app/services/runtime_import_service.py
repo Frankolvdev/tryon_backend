@@ -302,9 +302,9 @@ class RuntimeImportService:
             field_looks_model = any(h in field_lower for h in MODEL_FIELD_HINTS)
             if RuntimeImportService._looks_like_model(value) or field_looks_model:
                 if not any(r['value']==value for r in refs): refs.append({'value':value,'field':field,'model_type':'other','folders':'','class_type':cls})
-        for value in RuntimeImportService._string_values(node.get('widgets_values')):
-            if RuntimeImportService._looks_like_model(value) and not any(r['value']==value for r in refs):
-                refs.append({'value':value,'field':'widgets_values','model_type':'other','folders':'','class_type':cls})
+        # `widgets_values` is UI state, not executable workflow input. rgthree
+        # loaders can retain deleted/disabled rows there (including Add Lora),
+        # which creates phantom models. Every provider must analyze only inputs.
         return refs
 
     @staticmethod
@@ -443,6 +443,102 @@ class RuntimeImportService:
         return deps
 
     @staticmethod
+    def resolve_workflow_models(comfy: Path, workflow_nodes: list[dict[str, Any]]) -> dict[str, Any]:
+        """Single model-analysis method for Modal, RunPod and Beam.
+
+        It reads executable node inputs only, resolves them against the same
+        ComfyUI model roots, and returns one record per physical model.
+        Provider-specific code must consume this result and never re-analyze
+        the workflow independently.
+        """
+        reference_records: list[dict[str, str]] = []
+        for node in workflow_nodes:
+            reference_records.extend(RuntimeImportService._model_references_for_node(node))
+
+        unique_refs: dict[tuple[str, str, str], dict[str, str]] = {}
+        for ref in reference_records:
+            key = (
+                ref['value'].replace('\\', '/').strip().casefold(),
+                str(ref['class_type']).casefold(),
+                str(ref['field']).casefold(),
+            )
+            unique_refs[key] = ref
+        reference_records = list(unique_refs.values())
+
+        model_index, total_models, logical_paths = RuntimeImportService._model_index(comfy)
+        missing_models: list[str] = []
+        ambiguous_models: list[str] = []
+        resolved_models: dict[str, dict[str, Any]] = {}
+
+        for ref in reference_records:
+            reference = ref['value']
+            normalized = reference.replace('\\', '/').lstrip('./').casefold()
+            matches = model_index.get(normalized) or model_index.get(Path(normalized).name.casefold()) or []
+            if not matches:
+                matches = [
+                    path
+                    for key, paths in model_index.items()
+                    if key.endswith('/' + normalized) or key.endswith(normalized)
+                    for path in paths
+                ]
+            unique_matches = list(dict.fromkeys(matches))
+            if not unique_matches:
+                missing_models.append(reference)
+                continue
+            if len(unique_matches) > 1:
+                ambiguous_models.append(reference)
+
+            file = unique_matches[0].resolve()
+            rel = logical_paths.get(str(file).casefold()) or file.name
+            top = rel.split('/', 1)[0].casefold()
+            inferred_type = ref['model_type'] if ref['model_type'] != 'other' else MODEL_TYPE_BY_FOLDER.get(top, 'other')
+            physical_key = str(file).casefold()
+            workflow_ref = {
+                'value': reference,
+                'class_type': ref['class_type'],
+                'field': ref['field'],
+                'folders': ref['folders'],
+            }
+
+            existing = resolved_models.get(physical_key)
+            if existing is not None:
+                known = {
+                    (str(item.get('value') or '').replace('\\', '/').casefold(),
+                     str(item.get('class_type') or '').casefold(),
+                     str(item.get('field') or '').casefold())
+                    for item in existing.setdefault('workflow_references', [])
+                }
+                ref_key = (reference.replace('\\', '/').casefold(), str(ref['class_type']).casefold(), str(ref['field']).casefold())
+                if ref_key not in known:
+                    existing['workflow_references'].append(workflow_ref)
+                continue
+
+            resolved_models[physical_key] = {
+                'name': file.name,
+                'model_type': inferred_type,
+                'source_url': None,
+                'target_path': rel,
+                'sha256': None,
+                'strategy': 'volume',
+                'enabled': True,
+                'size_bytes': file.stat().st_size,
+                'source_path': str(file),
+                'workflow_reference': reference,
+                'workflow_references': [workflow_ref],
+                'resolver': {'class_type': ref['class_type'], 'field': ref['field'], 'folders': ref['folders']},
+                'found': True,
+            }
+
+        return {
+            'references': reference_records,
+            'referenced_models': sorted({item['value'] for item in reference_records}),
+            'models': list(resolved_models.values()),
+            'missing_models': missing_models,
+            'ambiguous_models': ambiguous_models,
+            'installed_models': total_models,
+        }
+
+    @staticmethod
     def resolve_workflow(path: str, workflow: dict[str, Any]) -> dict[str, Any]:
         selected=Path(path).expanduser().resolve(); comfy,source=RuntimeImportService._find_comfy_root(selected)
         repo,commit=RuntimeImportService._git_info(comfy); python=RuntimeImportService._probe_python(comfy,selected)
@@ -561,37 +657,13 @@ class RuntimeImportService:
             if not inferred: node_warnings.append(f'{name}: se detectó localmente, pero no se encontró repositorio.')
             required_nodes.append({'name':name,'repository':inferred or '','commit':node_commit,'enabled':True,'install_requirements':(folder/'requirements.txt').exists() or (folder/'pyproject.toml').exists(),'source_path':str(folder),'confidence':'exact-git' if node_repo else ('inferred-readme' if inferred else 'local-only'),'matched_classes':matched})
             for dep in RuntimeImportService._requirements_for_node(folder): dependencies_by_name.setdefault(dep['package'].lower(),dep)
-        reference_records=[]
-        for node in workflow_nodes: reference_records.extend(RuntimeImportService._model_references_for_node(node))
-        unique_refs={}
-        for ref in reference_records: unique_refs[(ref['value'].replace('\\','/').lower(),ref['class_type'],ref['field'])]=ref
-        reference_records=list(unique_refs.values()); referenced=sorted({r['value'] for r in reference_records})
-        model_index,total_models,logical_paths=RuntimeImportService._model_index(comfy); required_models=[]; missing_models=[]; ambiguous_models=[]
-        # A workflow normal may expose the same model in inputs, widgets_values,
-        # subgraphs, or several nodes. Resolve every reference, but deduplicate the
-        # final result by the real path inside ComfyUI/models. This makes normal
-        # and API workflows produce the same physical model list.
-        resolved_models: dict[str, dict[str, Any]] = {}
-        for ref in reference_records:
-            reference=ref['value']; normalized=reference.replace('\\','/').lstrip('./').lower()
-            matches=model_index.get(normalized) or model_index.get(Path(normalized).name.lower()) or []
-            if not matches: matches=[p for key,paths in model_index.items() if key.endswith('/'+normalized) or key.endswith(normalized) for p in paths]
-            unique=list(dict.fromkeys(matches))
-            if not unique: missing_models.append(reference); continue
-            if len(unique)>1: ambiguous_models.append(reference)
-            file=unique[0].resolve(); rel=logical_paths.get(str(file).casefold()) or file.name; top=rel.split('/',1)[0].lower()
-            inferred_type=ref['model_type'] if ref['model_type']!='other' else MODEL_TYPE_BY_FOLDER.get(top,'other')
-            physical_key=rel.casefold()
-            workflow_ref={'value':reference,'class_type':ref['class_type'],'field':ref['field'],'folders':ref['folders']}
-            existing=resolved_models.get(physical_key)
-            if existing is not None:
-                existing_refs=existing.setdefault('workflow_references',[])
-                ref_key=(reference.replace('\\','/').casefold(),str(ref['class_type']).casefold(),str(ref['field']).casefold())
-                known={(str(item.get('value') or '').replace('\\','/').casefold(),str(item.get('class_type') or '').casefold(),str(item.get('field') or '').casefold()) for item in existing_refs}
-                if ref_key not in known: existing_refs.append(workflow_ref)
-                continue
-            resolved_models[physical_key]={'name':file.name,'model_type':inferred_type,'source_url':None,'target_path':rel,'sha256':None,'strategy':'volume','enabled':True,'size_bytes':file.stat().st_size,'source_path':str(file),'workflow_reference':reference,'workflow_references':[workflow_ref],'resolver':{'class_type':ref['class_type'],'field':ref['field'],'folders':ref['folders']},'found':True}
-        required_models=list(resolved_models.values())
+        model_resolution=RuntimeImportService.resolve_workflow_models(comfy, workflow_nodes)
+        reference_records=model_resolution['references']
+        referenced=model_resolution['referenced_models']
+        required_models=model_resolution['models']
+        missing_models=model_resolution['missing_models']
+        ambiguous_models=model_resolution['ambiguous_models']
+        total_models=model_resolution['installed_models']
         warnings=node_warnings[:]
         if not python.get('python'): warnings.append('No se detectó Python. Se revisaron venv/.venv/env/python_embeded y rutas anidadas de Pinokio.')
         if unresolved_classes: warnings.append(f'{len(unresolved_classes)} clases siguen sin resolver tras consultar ComfyUI, NODE_CLASS_MAPPINGS y reglas conocidas.')
