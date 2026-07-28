@@ -275,11 +275,12 @@ class RuntimeModelVolumeExportService:
 
             logger.info("RunPod S3 export: uploading file=%s key=%s size=%s index=%s/%s", relative, key, file_size, index, total_files)
             file_started = time.monotonic()
-            completed_file_bytes = 0
-            part_size = 32 * 1024 * 1024
-            multipart_id: str | None = None
+            callback_lock = threading.Lock()
+            callback_bytes = 0
+            last_notified_bytes = 0
+            last_notified_at = 0.0
 
-            def report_file_progress(current_file_bytes: int, phase: str = "subiendo") -> None:
+            def report_file_progress(current_file_bytes: int, phase: str = "subiendo en paralelo") -> None:
                 elapsed = max(0.001, time.monotonic() - file_started)
                 current_file_bytes = min(file_size, max(0, current_file_bytes))
                 overall_bytes = min(total_bytes, uploaded_bytes + current_file_bytes)
@@ -292,99 +293,60 @@ class RuntimeModelVolumeExportService:
                     "runpod-copy",
                     overall_percent,
                     (
-                        f"RunPod {index}/{total_files}: {relative} — "
+                        f"RunPod archivo físico {index}/{total_files}: {relative} — "
                         f"{human_bytes(current_file_bytes)} de {human_bytes(file_size)} ({file_percent}%), "
                         f"{human_bytes(speed)}/s, ETA {int(eta)} s ({phase})"
                     ),
                 )
 
+            def transfer_progress(bytes_amount: int) -> None:
+                # S3Transfer invokes callbacks from several worker threads. Keep
+                # counters synchronized and throttle UI writes without blocking
+                # the multipart workers.
+                nonlocal callback_bytes, last_notified_bytes, last_notified_at
+                now = time.monotonic()
+                with callback_lock:
+                    callback_bytes = min(file_size, callback_bytes + max(0, int(bytes_amount or 0)))
+                    should_notify = (
+                        callback_bytes >= file_size
+                        or callback_bytes - last_notified_bytes >= 8 * 1024 * 1024
+                        or now - last_notified_at >= 0.75
+                    )
+                    if not should_notify:
+                        return
+                    current = callback_bytes
+                    last_notified_bytes = current
+                    last_notified_at = now
+                report_file_progress(current)
+
             notify(
                 "runpod-copy",
                 94 + min(4, int(4 * uploaded_bytes / max(1, total_bytes))),
-                f"Iniciando {index} de {total_files}: {relative} ({human_bytes(file_size)})…",
+                f"Iniciando archivo físico {index} de {total_files}: {relative} ({human_bytes(file_size)}), hasta 8 partes concurrentes…",
             )
             try:
-                # boto3.upload_file reports bytes when they are read/queued, not
-                # when RunPod has actually persisted each multipart part. With a
-                # large queue it could remain apparently frozen at ~85%. Upload
-                # explicit parts and advance only after RunPod confirms each one.
-                if file_size >= part_size:
-                    created = s3.create_multipart_upload(Bucket=volume_id, Key=key)
-                    multipart_id = str(created["UploadId"])
-                    parts: list[dict[str, Any]] = []
-                    part_number = 1
-                    with source.open("rb") as handle:
-                        while True:
-                            chunk = handle.read(part_size)
-                            if not chunk:
-                                break
-                            part_started = time.monotonic()
-                            logger.info(
-                                "RunPod S3 export: uploading part file=%s part=%s bytes=%s upload_id=%s",
-                                relative,
-                                part_number,
-                                len(chunk),
-                                multipart_id,
-                            )
-                            response = s3.upload_part(
-                                Bucket=volume_id,
-                                Key=key,
-                                UploadId=multipart_id,
-                                PartNumber=part_number,
-                                Body=chunk,
-                            )
-                            parts.append({"ETag": response["ETag"], "PartNumber": part_number})
-                            completed_file_bytes += len(chunk)
-                            logger.info(
-                                "RunPod S3 export: completed part file=%s part=%s elapsed=%.2fs",
-                                relative,
-                                part_number,
-                                time.monotonic() - part_started,
-                            )
-                            report_file_progress(completed_file_bytes, f"parte {part_number} confirmada")
-                            part_number += 1
-                    report_file_progress(completed_file_bytes, "finalizando multipart")
-                    s3.complete_multipart_upload(
-                        Bucket=volume_id,
-                        Key=key,
-                        UploadId=multipart_id,
-                        MultipartUpload={"Parts": parts},
-                    )
-                    multipart_id = None
-                else:
-                    with source.open("rb") as handle:
-                        s3.put_object(Bucket=volume_id, Key=key, Body=handle, ContentLength=file_size)
-                    completed_file_bytes = file_size
-                    report_file_progress(completed_file_bytes, "confirmado")
+                # Use boto3's transfer manager so multipart parts are uploaded
+                # concurrently. The former explicit upload_part loop sent one
+                # 32 MiB part at a time and ignored TransferConfig.max_concurrency.
+                s3.upload_file(
+                    Filename=str(source),
+                    Bucket=volume_id,
+                    Key=key,
+                    Callback=transfer_progress,
+                    Config=transfer,
+                )
+                with callback_lock:
+                    callback_bytes = file_size
+                report_file_progress(file_size, "confirmado por RunPod")
             except EndpointConnectionError as exc:
-                if multipart_id:
-                    try:
-                        s3.abort_multipart_upload(Bucket=volume_id, Key=key, UploadId=multipart_id)
-                    except Exception:
-                        logger.exception("RunPod S3 export: could not abort multipart upload %s", multipart_id)
                 raise RuntimeError(f"Se perdió la conexión con RunPod S3 mientras se subía {relative}.") from exc
             except ClientError as exc:
-                if multipart_id:
-                    try:
-                        s3.abort_multipart_upload(Bucket=volume_id, Key=key, UploadId=multipart_id)
-                    except Exception:
-                        logger.exception("RunPod S3 export: could not abort multipart upload %s", multipart_id)
                 code = str(exc.response.get("Error", {}).get("Code") or "desconocido")
                 message = str(exc.response.get("Error", {}).get("Message") or exc)
                 raise RuntimeError(f"RunPod S3 rechazó la subida de {relative} ({code}): {message}") from exc
             except BotoCoreError as exc:
-                if multipart_id:
-                    try:
-                        s3.abort_multipart_upload(Bucket=volume_id, Key=key, UploadId=multipart_id)
-                    except Exception:
-                        logger.exception("RunPod S3 export: could not abort multipart upload %s", multipart_id)
-                raise RuntimeError(f"Falló la transferencia multipart de {relative}: {exc}") from exc
+                raise RuntimeError(f"Falló la transferencia concurrente de {relative}: {exc}") from exc
             except Exception as exc:
-                if multipart_id:
-                    try:
-                        s3.abort_multipart_upload(Bucket=volume_id, Key=key, UploadId=multipart_id)
-                    except Exception:
-                        logger.exception("RunPod S3 export: could not abort multipart upload %s", multipart_id)
                 raise RuntimeError(f"Error inesperado al subir {relative} a RunPod S3: {exc}") from exc
 
             uploaded += 1
