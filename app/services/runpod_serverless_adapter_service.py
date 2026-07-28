@@ -84,16 +84,10 @@ class RunPodServerlessAdapterService:
         endpoint_id: str,
         operation: str,
     ) -> str:
-        base_url = (
-            runpod_runtime_config_service
-            .base_url(db)
-        )
-
-        return (
-            f"{base_url}/"
-            f"{endpoint_id}/"
-            f"{operation.lstrip('/')}"
-        )
+        if endpoint_id.startswith("http://") or endpoint_id.startswith("https://"):
+            return endpoint_id.rstrip("/") + "/" + operation.lstrip("/")
+        base_url = runpod_runtime_config_service.base_url(db).rstrip("/")
+        return f"{base_url}/{endpoint_id.strip('/')}/{operation.lstrip('/')}"
 
     def _output_root(self) -> Path:
         local_storage_dir = Path(
