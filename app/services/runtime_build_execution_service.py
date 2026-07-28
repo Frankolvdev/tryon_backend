@@ -596,14 +596,19 @@ class RuntimeBuildExecutionService:
         app_file=Path(__file__).resolve().parents[2]/"beam_worker"/"app.py"
         import tempfile
         home=tempfile.mkdtemp(prefix="tryon-beam-")
+        deployment_name = str(cfg.deployment_name or "tryon-generation-runtime").strip()
+        volume_name = str(cfg.volume_name or "tryon-models").strip()
+        # The Beam volume mount is an internal runtime detail, not a user-facing
+        # resource knob. Keep it stable even for legacy rows with an empty value.
+        volume_mount_path = "/models"
         env=os.environ.copy(); env.update({
             "HOME": home,
             "USERPROFILE": home,
             "TRYON_BEAM_IMAGE_URI": build.image_tag,
-            "TRYON_BEAM_DEPLOYMENT_NAME": cfg.deployment_name,
-            "TRYON_BEAM_VOLUME_NAME": cfg.volume_name,
-            "TRYON_BEAM_VOLUME_PATH": cfg.volume_mount_path,
-            "TRYON_BEAM_GPU": cfg.gpu,
+            "TRYON_BEAM_DEPLOYMENT_NAME": deployment_name,
+            "TRYON_BEAM_VOLUME_NAME": volume_name,
+            "TRYON_BEAM_VOLUME_PATH": volume_mount_path,
+            "TRYON_BEAM_GPU": str(cfg.gpu or "L40S"),
             "TRYON_BEAM_WORKERS": str(cfg.workers),
             "TRYON_BEAM_MIN_CONTAINERS": str(cfg.min_containers),
             "TRYON_BEAM_MAX_CONTAINERS": str(cfg.max_containers),
@@ -620,7 +625,7 @@ class RuntimeBuildExecutionService:
         if configured.returncode!=0:
             raise ValueError("Beam CLI rechazó la API key: "+(configured.stdout or configured.stderr or "")[-2000:])
         RuntimeBuildExecutionService._update_deployment(db,build,deployment,phase="deploying",progress=65,message="Desplegando Beam Task Queue.",log="[beam:4/6] Ejecutando beam deploy.")
-        completed=subprocess.run([executable,"deploy",f"{app_file}:handler","--name",cfg.deployment_name],env=env,capture_output=True,text=True,timeout=max(600,cfg.timeout_seconds))
+        completed=subprocess.run([executable,"deploy",f"{app_file}:handler","--name",deployment_name],env=env,capture_output=True,text=True,timeout=max(600,cfg.timeout_seconds))
         output=(completed.stdout or completed.stderr or "").strip()
         if completed.returncode!=0: raise ValueError("Beam deploy falló: "+output[-4000:])
         import re

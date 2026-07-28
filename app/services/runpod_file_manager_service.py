@@ -26,13 +26,22 @@ class RunPodFileManagerService:
             raise RunPodFileManagerError("Configura el Network Volume ID de RunPod.")
         if not cfg.data_center_id:
             raise RunPodFileManagerError("Configura el Data Center ID de RunPod.")
-        dc = str(cfg.data_center_id).strip().lower()
-        endpoint = f"https://s3api-{dc}.runpod.io"
+        dc_raw = str(cfg.data_center_id).strip()
+        dc = dc_raw.lower()
+        endpoint = f"https://s3api-{dc}.runpod.io/"
         client = boto3.client(
-            "s3", endpoint_url=endpoint,
+            "s3",
+            endpoint_url=endpoint,
+            region_name=dc_raw.upper(),
             aws_access_key_id=cfg.s3_access_key,
             aws_secret_access_key=cfg.s3_secret_key,
-            config=Config(signature_version="s3v4", retries={"max_attempts": 8, "mode": "adaptive"}),
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+                retries={"max_attempts": 12, "mode": "standard"},
+                connect_timeout=60,
+                read_timeout=900,
+            ),
         )
         return cfg, client, str(cfg.network_volume_id)
 
@@ -51,23 +60,35 @@ class RunPodFileManagerService:
         _, client, bucket = cls._client(db)
         clean = cls._clean(path)
         prefix = f"{clean}/" if clean else ""
-        paginator = client.get_paginator("list_objects_v2")
+        # RunPod's S3 layer can return transient 502 responses when listing a
+        # large volume. Keep the root browse bounded and let botocore retry the
+        # request instead of opening an unbounded paginator.
+        page = client.list_objects_v2(
+            Bucket=bucket,
+            Prefix=prefix,
+            Delimiter="/",
+            MaxKeys=1000,
+        )
         items = {}
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
-            for row in page.get("CommonPrefixes", []):
-                key = str(row.get("Prefix") or "").rstrip("/")
-                name = key.split("/")[-1]
-                if name and name != ".s3compat_uploads":
-                    items[key] = {"name": name, "path": key, "type": "directory", "size": 0, "modified_at": None}
-            for row in page.get("Contents", []):
-                key = str(row.get("Key") or "")
-                if not key or key == prefix or key.startswith(".s3compat_uploads/"):
-                    continue
-                relative = key[len(prefix):]
-                if "/" in relative:
-                    continue
-                items[key] = {"name": relative, "path": key, "type": "directory" if key.endswith("/") else "file", "size": int(row.get("Size") or 0), "modified_at": row.get("LastModified").isoformat() if row.get("LastModified") else None}
-        return {"volume": bucket, "path": clean, "items": sorted(items.values(), key=lambda x: (x["type"] != "directory", x["name"].lower()))}
+        for row in page.get("CommonPrefixes", []):
+            key = str(row.get("Prefix") or "").rstrip("/")
+            name = key.split("/")[-1]
+            if name and name != ".s3compat_uploads":
+                items[key] = {"name": name, "path": key, "type": "directory", "size": 0, "modified_at": None}
+        for row in page.get("Contents", []):
+            key = str(row.get("Key") or "")
+            if not key or key == prefix or key.startswith(".s3compat_uploads/"):
+                continue
+            relative = key[len(prefix):]
+            if "/" in relative:
+                continue
+            items[key] = {"name": relative, "path": key, "type": "directory" if key.endswith("/") else "file", "size": int(row.get("Size") or 0), "modified_at": row.get("LastModified").isoformat() if row.get("LastModified") else None}
+        return {
+            "volume": bucket,
+            "path": clean,
+            "items": sorted(items.values(), key=lambda x: (x["type"] != "directory", x["name"].lower())),
+            "truncated": bool(page.get("IsTruncated")),
+        }
 
     @classmethod
     def create_directory(cls, db: Session, volume: str, path: str):

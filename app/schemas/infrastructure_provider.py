@@ -70,7 +70,7 @@ class BeamProviderConfig(BaseModel):
     deployment_name: str = Field(default="tryon-generation-runtime", min_length=1, max_length=120)
     volume_name: str = Field(default="tryon-models", min_length=1, max_length=120)
     volume_mount_path: str = Field(default="/models", min_length=1, max_length=300)
-    gpu: str = Field(default="H100", min_length=1, max_length=120)
+    gpu: str = Field(default="L40S", min_length=1, max_length=120)
     cpu: float = Field(default=8.0, ge=0.1, le=128)
     memory_mb: int = Field(default=65536, ge=128, le=1048576)
     workers: int = Field(default=1, ge=1, le=32)

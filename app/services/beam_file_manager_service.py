@@ -37,7 +37,7 @@ class BeamFileManagerService:
     @classmethod
     def list_volumes(cls, db):
         cfg,_=cls._run(db,["volume","list"],120)
-        return [{"name":cfg.volume_name,"driver":"beam","mountpoint":cfg.volume_mount_path,"scope":"global","labels":{"provider":"beam"},"options":{}}]
+        return [{"name":cfg.volume_name,"driver":"beam","mountpoint":"/models","scope":"global","labels":{"provider":"beam"},"options":{}}]
     @classmethod
     def list_directory(cls,db,volume,path=""):
         cfg=InfrastructureProviderService.get_beam(db); clean=cls._clean(path); target=f"beam://{cfg.volume_name}"+(f"/{clean}" if clean else "")
