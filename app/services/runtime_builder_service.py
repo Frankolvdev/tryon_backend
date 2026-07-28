@@ -1004,7 +1004,10 @@ class ComfyUIServer:
 '''
 
     @staticmethod
-    def validate(config: RuntimeBuilderConfig) -> dict:
+    def validate(
+        config: RuntimeBuilderConfig,
+        models_override: list[dict[str, Any]] | None = None,
+    ) -> dict:
         issues: list[ValidationIssue] = []
         runtime_name = RuntimeBuilderService.sanitize_runtime_name(getattr(config, "runtime_name", None))
         if runtime_name != str(getattr(config, "runtime_name", "") or ""):
@@ -1069,8 +1072,14 @@ class ComfyUIServer:
                     )
                 )
 
-        from app.services.runtime_import_service import RuntimeImportService
-        enabled_models = RuntimeImportService.resolve_runtime_models(config)
+        if models_override is not None:
+            enabled_models = [
+                dict(model) for model in models_override
+                if isinstance(model, dict) and model.get("enabled", True)
+            ]
+        else:
+            from app.services.runtime_import_service import RuntimeImportService
+            enabled_models = RuntimeImportService.resolve_runtime_models(config)
         for index, model in enumerate(enabled_models):
             if model.get("strategy") in {"image", "startup-download"} and not model.get("source_url"):
                 issues.append(
@@ -1140,15 +1149,27 @@ class ComfyUIServer:
         config: RuntimeBuilderConfig,
         modal_volume_name: str | None = None,
     ) -> dict:
-        validation = RuntimeBuilderService.validate(config)
+        # Modal conserva el flujo estable original: consume la lista de modelos
+        # ya validada y persistida en su configuración. RunPod y Beam continúan
+        # usando el resolvedor actual de forma independiente.
+        modal_enabled = RuntimeBuilderService._is_modal(config)
+        modal_models = (
+            [dict(model) for model in (config.models or []) if isinstance(model, dict) and model.get("enabled", True)]
+            if modal_enabled
+            else None
+        )
+        validation = RuntimeBuilderService.validate(config, models_override=modal_models)
         if not validation["valid"]:
             errors = [item["message"] for item in validation["issues"] if item["level"] == "error"]
             raise ValueError("No se puede generar el runtime: " + " | ".join(errors))
 
         nodes = [n for n in RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes) if n.get("enabled", True)]
         deps = [d for d in (config.python_dependencies or []) if d.get("enabled", True)]
-        from app.services.runtime_import_service import RuntimeImportService
-        models = RuntimeImportService.resolve_runtime_models(config)
+        if modal_models is not None:
+            models = modal_models
+        else:
+            from app.services.runtime_import_service import RuntimeImportService
+            models = RuntimeImportService.resolve_runtime_models(config)
 
         node_lines: list[str] = []
         for node in nodes:
@@ -1180,7 +1201,6 @@ class ComfyUIServer:
                     f"-o /app/ComfyUI/models/{model['target_path']}"
                 )
 
-        modal_enabled = RuntimeBuilderService._is_modal(config)
         external_models = RuntimeBuilderService._models_are_external(config)
         volume_path = RuntimeBuilderService._modal_volume_path(config)
         extra_paths_copy = ""
