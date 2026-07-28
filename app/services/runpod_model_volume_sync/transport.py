@@ -74,13 +74,31 @@ class RsyncSshTransport:
             raise RuntimeError("El backend necesita rsync y OpenSSH para exportar modelos a RunPod.")
 
     def path(self, local_path: Path) -> str:
+        """Convierte una ruta local a una ruta utilizable dentro de WSL.
+
+        No invoca ``wslpath`` con una ruta de Windows como argumento directo porque
+        algunas combinaciones de Windows/WSL eliminan las barras invertidas antes de
+        que ``wslpath`` las reciba (por ejemplo, ``C:\\Users`` termina como
+        ``C:Users``). La conversión de rutas con letra de unidad es determinista.
+        """
+        raw = str(local_path)
         if self.mode == "native":
-            return str(local_path)
-        result = self._run(["wsl.exe", "wslpath", "-a", str(local_path)], timeout=30)
-        value = (result.stdout or "").strip()
-        if not value:
-            raise RuntimeError(f"WSL no pudo convertir la ruta: {local_path}")
-        return value
+            return raw
+
+        drive_match = re.match(r"^([A-Za-z]):[\\/](.*)$", raw)
+        if drive_match:
+            drive = drive_match.group(1).lower()
+            remainder = drive_match.group(2).replace("\\", "/")
+            return f"/mnt/{drive}/{remainder}"
+
+        # Una ruta que ya usa sintaxis Linux/WSL no necesita conversión.
+        if raw.startswith("/"):
+            return raw
+
+        raise RuntimeError(
+            "No fue posible convertir la ruta local a WSL. "
+            f"Usa una ruta absoluta de Windows, por ejemplo C:\\Users\\usuario\\.ssh\\id_ed25519. Ruta recibida: {raw}"
+        )
 
     def public_key(self) -> str:
         pub = self.private_key.with_suffix(self.private_key.suffix + ".pub")
