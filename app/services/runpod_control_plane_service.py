@@ -99,6 +99,21 @@ class RunPodControlPlaneService:
             response_text=last_response.text if last_response else "Sin respuesta de RunPod.",
         )
 
+
+    def create_pod(self, *, api_key: str, payload: dict[str, Any], timeout_seconds: int = 60) -> dict[str, Any]:
+        return self.request(
+            "POST", "pods", api_key=api_key, timeout_seconds=timeout_seconds,
+            json=payload, retry_server_errors=2,
+        )
+
+    def get_pod(self, pod_id: str, *, api_key: str, timeout_seconds: int = 60) -> dict[str, Any]:
+        return self.request("GET", f"pods/{pod_id}", api_key=api_key, timeout_seconds=timeout_seconds)
+
+    def delete_pod(self, pod_id: str, *, api_key: str, timeout_seconds: int = 60) -> Any:
+        if not str(pod_id or "").strip():
+            raise ValueError("Se requiere el ID del Pod temporal para eliminarlo.")
+        return self.request("DELETE", f"pods/{pod_id}", api_key=api_key, timeout_seconds=timeout_seconds)
+
     def account_probe(self, *, api_key: str, timeout_seconds: int = 30) -> dict[str, Any]:
         endpoints = self.request("GET", "endpoints", api_key=api_key, timeout_seconds=timeout_seconds)
         return {"endpoint_count": len(endpoints or [])}

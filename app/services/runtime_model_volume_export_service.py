@@ -108,246 +108,25 @@ class RuntimeModelVolumeExportService:
 
     @staticmethod
     def _copy_to_runpod(session: Any, models_root: Path, remote_path: str, overwrite: bool, notify: ProgressCallback) -> dict[str, Any]:
-        """Upload the prepared model tree to a RunPod Network Volume.
+        """Sincroniza modelos mediante un Pod temporal + SSH + rsync.
 
-        This method is intentionally isolated from every other provider. It
-        prefers the AWS CLI transfer engine for large files because it owns the
-        multipart lifecycle, retry policy and connection reuse. When AWS CLI is
-        unavailable it falls back to boto3's native Transfer Manager. No custom
-        multipart loop is used here.
+        Esta rama está completamente aislada de Exportar Runtime y de los
+        destinos local, Docker, Modal y Beam.
         """
-        from boto3 import client as boto3_client
-        from boto3.s3.transfer import TransferConfig
-        from botocore.config import Config
-        from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
         from app.services.infrastructure_provider_service import InfrastructureProviderService
+        from app.services.runpod_volume_sync_service import RunPodVolumeSyncService
 
         cfg = InfrastructureProviderService.get_runpod(session)
-        volume_id = str(cfg.network_volume_id or "").strip()
-        data_center = str(cfg.data_center_id or "").strip().upper()
-        access_key = str(cfg.s3_access_key or "").strip()
-        secret_key = str(cfg.s3_secret_key or "").strip()
-        missing = [
-            name
-            for name, value in (
-                ("Network Volume ID", volume_id),
-                ("Data Center ID", data_center),
-                ("S3 Access Key", access_key),
-                ("S3 Secret Key", secret_key),
-            )
-            if not value
-        ]
-        if missing:
-            raise ValueError("Configura RunPod antes de exportar: " + ", ".join(missing) + ".")
-
-        endpoint = f"https://s3api-{data_center.lower()}.runpod.io/"
-        notify("runpod-connecting", 94, f"Validando RunPod S3 en {data_center}…")
-
-        s3 = boto3_client(
-            "s3",
-            endpoint_url=endpoint,
-            region_name=data_center.lower(),
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            config=Config(
-                retries={"max_attempts": 10, "mode": "adaptive"},
-                s3={"addressing_style": "path"},
-                connect_timeout=15,
-                read_timeout=300,
-                max_pool_connections=12,
-                tcp_keepalive=True,
-            ),
+        return RunPodVolumeSyncService.sync_tree(
+            api_key=str(cfg.api_key or ""),
+            volume_id=str(cfg.network_volume_id or ""),
+            data_center_id=str(cfg.data_center_id or ""),
+            models_root=models_root,
+            remote_path=remote_path,
+            overwrite=overwrite,
+            timeout_seconds=int(cfg.timeout_seconds or 900),
+            notify=notify,
         )
-        try:
-            s3.list_objects_v2(Bucket=volume_id, MaxKeys=1)
-        except Exception as exc:
-            raise RuntimeError(f"No fue posible validar el volumen RunPod {volume_id}: {exc}") from exc
-
-        files = sorted(
-            (item for item in models_root.rglob("*") if item.is_file()),
-            key=lambda item: item.relative_to(models_root).as_posix().casefold(),
-        )
-        total_files = len(files)
-        total_bytes = sum(item.stat().st_size for item in files)
-        processed_bytes = 0
-        uploaded = 0
-        skipped = 0
-        operation_started = time.monotonic()
-        aws_executable = shutil.which("aws")
-
-        # Conservative values avoid the stalls caused by hundreds of tiny parts
-        # while still allowing the SDK/CLI to keep several requests in flight.
-        transfer = TransferConfig(
-            multipart_threshold=128 * 1024 * 1024,
-            multipart_chunksize=128 * 1024 * 1024,
-            max_concurrency=4,
-            max_io_queue=16,
-            io_chunksize=8 * 1024 * 1024,
-            use_threads=True,
-        )
-
-        def human_bytes(value: float) -> str:
-            units = ("B", "KB", "MB", "GB", "TB")
-            size = float(max(0, value))
-            for unit in units:
-                if size < 1024 or unit == units[-1]:
-                    return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
-                size /= 1024
-            return f"{size:.1f} TB"
-
-        for index, source in enumerate(files, start=1):
-            relative = source.relative_to(models_root).as_posix()
-            key = "/".join(part for part in (remote_path.strip("/"), relative) if part)
-            file_size = source.stat().st_size
-
-            if not overwrite:
-                try:
-                    remote = s3.head_object(Bucket=volume_id, Key=key)
-                    if int(remote.get("ContentLength") or -1) == file_size:
-                        skipped += 1
-                        processed_bytes += file_size
-                        notify(
-                            "runpod-copy",
-                            94 + min(4, int(4 * processed_bytes / max(1, total_bytes))),
-                            f"Omitido {index}/{total_files}: {relative} (ya existe).",
-                        )
-                        continue
-                except ClientError as exc:
-                    status = int(exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") or 0)
-                    code = str(exc.response.get("Error", {}).get("Code") or "")
-                    if status not in {403, 404} and code not in {"404", "NoSuchKey", "NotFound"}:
-                        raise RuntimeError(f"RunPod no pudo comprobar {relative}: {exc}") from exc
-
-            file_started = time.monotonic()
-            notify(
-                "runpod-copy",
-                94 + min(4, int(4 * processed_bytes / max(1, total_bytes))),
-                f"RunPod {index}/{total_files}: iniciando {relative} ({human_bytes(file_size)})…",
-            )
-
-            if aws_executable:
-                env = os.environ.copy()
-                env.update(
-                    {
-                        "AWS_ACCESS_KEY_ID": access_key,
-                        "AWS_SECRET_ACCESS_KEY": secret_key,
-                        "AWS_DEFAULT_REGION": data_center.lower(),
-                        "AWS_EC2_METADATA_DISABLED": "true",
-                        "AWS_REQUEST_CHECKSUM_CALCULATION": "when_required",
-                        "AWS_RESPONSE_CHECKSUM_VALIDATION": "when_required",
-                    }
-                )
-                destination = f"s3://{volume_id}/{key}"
-                command = [
-                    aws_executable,
-                    "s3",
-                    "cp",
-                    str(source),
-                    destination,
-                    "--endpoint-url",
-                    endpoint,
-                    "--region",
-                    data_center.lower(),
-                    "--no-progress",
-                    "--only-show-errors",
-                ]
-                logger.info("RunPod upload using AWS CLI file=%s destination=%s", relative, destination)
-                process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    env=env,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                while process.poll() is None:
-                    elapsed = max(0.001, time.monotonic() - file_started)
-                    notify(
-                        "runpod-copy",
-                        94 + min(4, int(4 * processed_bytes / max(1, total_bytes))),
-                        f"RunPod {index}/{total_files}: {relative} — AWS CLI transfiriendo ({int(elapsed)} s).",
-                    )
-                    time.sleep(5)
-                stdout, stderr = process.communicate()
-                if process.returncode != 0:
-                    detail = (stderr or stdout or "error desconocido").strip()
-                    raise RuntimeError(f"AWS CLI no pudo subir {relative}: {detail}")
-                transport = "aws-cli"
-            else:
-                transferred = 0
-                progress_lock = threading.Lock()
-                last_report = 0.0
-
-                def callback(delta: int) -> None:
-                    nonlocal transferred, last_report
-                    now = time.monotonic()
-                    with progress_lock:
-                        transferred = min(file_size, transferred + int(delta))
-                        if now - last_report < 1.0 and transferred < file_size:
-                            return
-                        last_report = now
-                        elapsed = max(0.001, now - file_started)
-                        speed = transferred / elapsed
-                        eta = (file_size - transferred) / speed if speed > 0 else 0
-                        notify(
-                            "runpod-copy",
-                            94 + min(4, int(4 * (processed_bytes + transferred) / max(1, total_bytes))),
-                            (
-                                f"RunPod {index}/{total_files}: {relative} — "
-                                f"{human_bytes(transferred)} de {human_bytes(file_size)}, "
-                                f"{human_bytes(speed)}/s, ETA {int(eta)} s "
-                                "(Transfer Manager)."
-                            ),
-                        )
-
-                logger.info("RunPod upload using boto3 Transfer Manager file=%s key=%s", relative, key)
-                try:
-                    s3.upload_file(
-                        Filename=str(source),
-                        Bucket=volume_id,
-                        Key=key,
-                        Callback=callback,
-                        Config=transfer,
-                    )
-                except (EndpointConnectionError, BotoCoreError, ClientError) as exc:
-                    raise RuntimeError(f"Transfer Manager no pudo subir {relative}: {exc}") from exc
-                transport = "boto3-transfer-manager"
-
-            # Confirm that the remote object is complete before moving on.
-            try:
-                remote = s3.head_object(Bucket=volume_id, Key=key)
-                remote_size = int(remote.get("ContentLength") or -1)
-            except Exception as exc:
-                raise RuntimeError(f"RunPod recibió {relative}, pero no pudo verificarse: {exc}") from exc
-            if remote_size != file_size:
-                raise RuntimeError(
-                    f"RunPod confirmó un tamaño incorrecto para {relative}: "
-                    f"local={file_size}, remoto={remote_size}."
-                )
-
-            uploaded += 1
-            processed_bytes += file_size
-            elapsed = max(0.001, time.monotonic() - file_started)
-            notify(
-                "runpod-copy",
-                94 + min(4, int(4 * processed_bytes / max(1, total_bytes))),
-                f"Completado {index}/{total_files}: {relative} mediante {transport} ({human_bytes(file_size / elapsed)}/s).",
-            )
-
-        elapsed_total = max(0.001, time.monotonic() - operation_started)
-        return {
-            "volume_id": volume_id,
-            "data_center_id": data_center,
-            "endpoint": endpoint,
-            "path": remote_path,
-            "files_total": total_files,
-            "files_uploaded": uploaded,
-            "files_skipped": skipped,
-            "bytes_total": total_bytes,
-            "bytes_processed": processed_bytes,
-            "elapsed_seconds": round(elapsed_total, 3),
-            "transport": "aws-cli" if aws_executable else "boto3-transfer-manager",
-        }
 
     @staticmethod
     def _copy_to_beam(session: Any, models_root: Path, remote_path: str, overwrite: bool, notify: ProgressCallback) -> dict[str, Any]:
