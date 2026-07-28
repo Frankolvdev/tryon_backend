@@ -436,42 +436,119 @@ class RuntimeBuildExecutionService:
             message="Creando o actualizando endpoint Serverless.",
             log=f"[runpod:4/6] Plantilla lista: {template_id}.",
         )
+        if cfg.workers_min > cfg.workers_max:
+            raise ValueError("RunPod requiere workersMin menor o igual que workersMax.")
+
         endpoint_payload = {
             "templateId": template_id,
             "computeType": "GPU",
-            "executionTimeoutMs": cfg.execution_timeout_seconds * 1000,
-            "flashboot": cfg.flashboot,
+            "executionTimeoutMs": int(cfg.execution_timeout_seconds) * 1000,
+            "flashboot": bool(cfg.flashboot),
             "gpuCount": 1,
-            "gpuTypeIds": cfg.gpu_type_ids,
-            "idleTimeout": cfg.idle_timeout_seconds,
-            "name": cfg.endpoint_name,
-            "scalerType": cfg.scaler_type,
-            "scalerValue": cfg.scaler_value,
-            "workersMax": cfg.workers_max,
-            "workersMin": cfg.workers_min,
+            "gpuTypeIds": [str(value).strip() for value in cfg.gpu_type_ids if str(value).strip()],
+            "idleTimeout": int(cfg.idle_timeout_seconds),
+            "name": str(cfg.endpoint_name).strip(),
+            "scalerType": str(cfg.scaler_type).strip(),
+            "scalerValue": int(cfg.scaler_value),
+            "workersMax": int(cfg.workers_max),
+            "workersMin": int(cfg.workers_min),
         }
-        if cfg.allowed_cuda_versions:
-            endpoint_payload["allowedCudaVersions"] = cfg.allowed_cuda_versions
-        if cfg.data_center_id:
-            endpoint_payload["dataCenterIds"] = [cfg.data_center_id]
-        if cfg.network_volume_id:
-            endpoint_payload["networkVolumeId"] = cfg.network_volume_id
-            endpoint_payload["networkVolumeIds"] = [cfg.network_volume_id]
+        allowed_cuda_versions = [
+            str(value).strip() for value in cfg.allowed_cuda_versions if str(value).strip()
+        ]
+        if allowed_cuda_versions:
+            endpoint_payload["allowedCudaVersions"] = allowed_cuda_versions
 
-        if cfg.endpoint_id:
+        configured_data_center = str(cfg.data_center_id or "").strip()
+        network_volume_id = str(cfg.network_volume_id or "").strip()
+        if network_volume_id:
+            # A RunPod network volume belongs to exactly one datacenter. Sending a
+            # different datacenter (or both singular/plural volume fields) can make
+            # endpoint creation fail with an opaque HTTP 500. Resolve the authoritative
+            # datacenter from RunPod and send only the documented single-volume field.
+            volume = runpod_control_plane_service.get_network_volume(
+                network_volume_id,
+                api_key=cfg.api_key,
+                timeout_seconds=min(cfg.timeout_seconds, 90),
+            )
+            volume_data_center = str(volume.get("dataCenterId") or "").strip()
+            if configured_data_center and volume_data_center and configured_data_center != volume_data_center:
+                raise ValueError(
+                    "El volumen RunPod y el centro de datos configurado no coinciden: "
+                    f"volumen={volume_data_center}, configuración={configured_data_center}."
+                )
+            endpoint_payload["networkVolumeId"] = network_volume_id
+            if volume_data_center:
+                endpoint_payload["dataCenterIds"] = [volume_data_center]
+        elif configured_data_center:
+            endpoint_payload["dataCenterIds"] = [configured_data_center]
+
+        timeout_seconds = min(cfg.timeout_seconds, 120)
+        endpoint = None
+        endpoint_id = str(cfg.endpoint_id or "").strip()
+
+        # Recover an endpoint created by a previous attempt before creating another one.
+        if not endpoint_id:
+            existing = runpod_control_plane_service.find_endpoint_by_name(
+                endpoint_payload["name"],
+                api_key=cfg.api_key,
+                timeout_seconds=min(cfg.timeout_seconds, 90),
+            )
+            endpoint_id = str((existing or {}).get("id") or "").strip()
+            if endpoint_id:
+                cfg.endpoint_id = endpoint_id
+                InfrastructureProviderService.save_runpod(db, cfg)
+
+        if endpoint_id:
             endpoint = runpod_control_plane_service.update_endpoint(
-                cfg.endpoint_id,
+                endpoint_id,
                 api_key=cfg.api_key,
                 payload=endpoint_payload,
-                timeout_seconds=min(cfg.timeout_seconds, 120),
+                timeout_seconds=timeout_seconds,
             )
         else:
-            endpoint = runpod_control_plane_service.create_endpoint(
-                api_key=cfg.api_key,
-                payload=endpoint_payload,
-                timeout_seconds=min(cfg.timeout_seconds, 120),
-            )
-            cfg.endpoint_id = str(endpoint.get("id") or "")
+            try:
+                endpoint = runpod_control_plane_service.create_endpoint(
+                    api_key=cfg.api_key,
+                    payload=endpoint_payload,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as first_error:
+                # Some RunPod control-plane failures return HTTP 500 for an optional
+                # setting rather than a validation response. Create the endpoint using
+                # the smallest documented contract, persist its ID, then apply the full
+                # configuration through PATCH. This fallback is RunPod-only.
+                minimal_payload = {
+                    "templateId": template_id,
+                    "name": endpoint_payload["name"],
+                    "computeType": "GPU",
+                }
+                try:
+                    endpoint = runpod_control_plane_service.create_endpoint(
+                        api_key=cfg.api_key,
+                        payload=minimal_payload,
+                        timeout_seconds=timeout_seconds,
+                    )
+                except Exception as fallback_error:
+                    raise RuntimeError(
+                        "RunPod no pudo crear el endpoint ni con el contrato completo ni "
+                        "con el contrato mínimo. Error completo: " + str(first_error)
+                        + " | Error mínimo: " + str(fallback_error)
+                    ) from fallback_error
+
+                endpoint_id = str(endpoint.get("id") or "").strip()
+                if not endpoint_id:
+                    raise RuntimeError("RunPod creó una respuesta sin ID de endpoint.")
+                cfg.endpoint_id = endpoint_id
+                InfrastructureProviderService.save_runpod(db, cfg)
+                endpoint = runpod_control_plane_service.update_endpoint(
+                    endpoint_id,
+                    api_key=cfg.api_key,
+                    payload=endpoint_payload,
+                    timeout_seconds=timeout_seconds,
+                )
+
+            cfg.endpoint_id = str(endpoint.get("id") or "").strip()
             InfrastructureProviderService.save_runpod(db, cfg)
 
         endpoint_id = str(endpoint.get("id") or cfg.endpoint_id or "")
