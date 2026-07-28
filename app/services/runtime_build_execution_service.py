@@ -304,7 +304,9 @@ class RuntimeBuildExecutionService:
             raise ValueError("La compilación no tiene una imagen Docker asignada.")
 
         if image_tag.startswith("ghcr.io/your-org/"):
-            username = (cfg.ghcr_username or "").strip()
+            # GHCR/Docker exige que el propietario del repositorio esté en minúsculas.
+            # Esta normalización pertenece exclusivamente al despliegue de RunPod.
+            username = (cfg.ghcr_username or "").strip().lower()
             if not username:
                 raise RuntimeError(
                     "El deploy de RunPod no puede publicar en ghcr.io/your-org: 'your-org' "
