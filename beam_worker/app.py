@@ -43,8 +43,6 @@ def start_runtime() -> dict[str, Any]:
     name=DEPLOYMENT_NAME,
     image=image,
     gpu=os.environ.get("TRYON_BEAM_GPU", "H100"),
-    cpu=float(os.environ.get("TRYON_BEAM_CPU", "8")),
-    memory=int(os.environ.get("TRYON_BEAM_MEMORY_MB", "65536")),
     workers=int(os.environ.get("TRYON_BEAM_WORKERS", "1")),
     keep_warm_seconds=int(os.environ.get("TRYON_BEAM_KEEP_WARM_SECONDS", "10")),
     max_pending_tasks=int(os.environ.get("TRYON_BEAM_MAX_PENDING_TASKS", "100")),

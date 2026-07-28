@@ -604,8 +604,6 @@ class RuntimeBuildExecutionService:
             "TRYON_BEAM_VOLUME_NAME": cfg.volume_name,
             "TRYON_BEAM_VOLUME_PATH": cfg.volume_mount_path,
             "TRYON_BEAM_GPU": cfg.gpu,
-            "TRYON_BEAM_CPU": str(cfg.cpu),
-            "TRYON_BEAM_MEMORY_MB": str(cfg.memory_mb),
             "TRYON_BEAM_WORKERS": str(cfg.workers),
             "TRYON_BEAM_MIN_CONTAINERS": str(cfg.min_containers),
             "TRYON_BEAM_MAX_CONTAINERS": str(cfg.max_containers),

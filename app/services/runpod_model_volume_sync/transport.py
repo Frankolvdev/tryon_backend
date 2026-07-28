@@ -232,8 +232,9 @@ class RsyncSshTransport:
         source = self.path(source_root).rstrip("/") + "/"
         ssh_transport = "ssh " + " ".join(shlex.quote(part) for part in self.ssh_options(target))
         flags = [
-            "-a", "--human-readable", "--info=progress2,stats2", "--partial",
-            "--partial-dir=.rsync-partial", "--delay-updates", "--protect-args",
+            "-a", "--no-owner", "--no-group", "--no-perms", "--human-readable",
+            "--info=progress2,stats2", "--partial", "--partial-dir=.rsync-partial",
+            "--delay-updates", "--protect-args",
         ]
         if not overwrite:
             flags.append("--ignore-existing")
