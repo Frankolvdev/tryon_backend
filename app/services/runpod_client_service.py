@@ -1,3 +1,4 @@
+import threading
 from typing import Any
 
 import httpx
@@ -10,6 +11,27 @@ from app.services.integration_service import integration_service
 
 
 class RunPodClientService:
+    def __init__(self) -> None:
+        self._http_local = threading.local()
+
+    def _client(self, timeout: float) -> httpx.Client:
+        client = getattr(self._http_local, "client", None)
+        current_timeout = getattr(self._http_local, "timeout", None)
+        if client is None or current_timeout != float(timeout):
+            if client is not None:
+                client.close()
+            client = httpx.Client(
+                timeout=timeout,
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                    keepalive_expiry=30.0,
+                ),
+            )
+            self._http_local.client = client
+            self._http_local.timeout = float(timeout)
+        return client
+
     def _get_config(self, db: Session):
         config = integration_service.get_config(db, IntegrationProvider.RUNPOD)
 
@@ -30,8 +52,7 @@ class RunPodClientService:
     def health_check(self, db: Session) -> dict[str, Any]:
         config = self._get_config(db)
 
-        with httpx.Client(timeout=20.0) as client:
-            response = client.get(
+        response = self._client(20.0).get(
                 "https://api.runpod.ai/v2/user",
                 headers=self._headers(config.api_key),
             )
@@ -55,8 +76,7 @@ class RunPodClientService:
 
         url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
 
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(
+        response = self._client(60.0).post(
                 url,
                 headers=self._headers(config.api_key),
                 json=jsonable_encoder({"input": input_payload}),
@@ -76,8 +96,7 @@ class RunPodClientService:
 
         url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{provider_job_id}"
 
-        with httpx.Client(timeout=60.0) as client:
-            response = client.get(
+        response = self._client(60.0).get(
                 url,
                 headers=self._headers(config.api_key),
             )
@@ -96,8 +115,7 @@ class RunPodClientService:
 
         url = f"https://api.runpod.ai/v2/{endpoint_id}/cancel/{provider_job_id}"
 
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(
+        response = self._client(60.0).post(
                 url,
                 headers=self._headers(config.api_key),
             )

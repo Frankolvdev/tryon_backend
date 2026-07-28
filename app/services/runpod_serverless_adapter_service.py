@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,66 @@ logger = logging.getLogger(__name__)
 
 
 class RunPodServerlessAdapterService:
+    """RunPod adapter with connection reuse isolated from other providers."""
+
+    def __init__(self) -> None:
+        self._http_local = threading.local()
+
+    def _new_http_client(self, timeout: float | int) -> httpx.Client:
+        return httpx.Client(
+            timeout=timeout,
+            limits=httpx.Limits(
+                max_connections=20,
+                max_keepalive_connections=10,
+                keepalive_expiry=30.0,
+            ),
+        )
+
+    def _http_client(self, timeout: float | int) -> httpx.Client:
+        client = getattr(self._http_local, "client", None)
+        configured_timeout = float(timeout)
+        if client is None or getattr(self._http_local, "timeout", None) != configured_timeout:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    logger.debug("Could not close stale RunPod HTTP client.", exc_info=True)
+            client = self._new_http_client(configured_timeout)
+            self._http_local.client = client
+            self._http_local.timeout = configured_timeout
+        return client
+
+    def _reset_http_client(self) -> None:
+        client = getattr(self._http_local, "client", None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                logger.debug("Could not close failed RunPod HTTP client.", exc_info=True)
+        self._http_local.client = None
+        self._http_local.timeout = None
+
+    @staticmethod
+    def _is_transient_transport_error(error: BaseException) -> bool:
+        if isinstance(
+            error,
+            (
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.PoolTimeout,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+                httpx.RemoteProtocolError,
+            ),
+        ):
+            return True
+        winerror = getattr(error, "winerror", None)
+        if winerror in {10054, 10055, 10060, 10061}:
+            return True
+        cause = getattr(error, "__cause__", None)
+        return bool(cause and cause is not error and RunPodServerlessAdapterService._is_transient_transport_error(cause))
+
     TERMINAL_STATUSES = {
         "COMPLETED",
         "FAILED",
@@ -126,13 +187,10 @@ class RunPodServerlessAdapterService:
         )
 
         try:
-            with httpx.Client(
-                timeout=(
-                    runpod_runtime_config_service
-                    .http_timeout_seconds()
-                ),
-            ) as client:
-                response = client.get(
+            client = self._http_client(
+                runpod_runtime_config_service.http_timeout_seconds()
+            )
+            response = client.get(
                     self._endpoint_url(
                         db,
                         endpoint_id=(
@@ -143,9 +201,9 @@ class RunPodServerlessAdapterService:
                     headers=self._headers(db),
                 )
 
-                response.raise_for_status()
+            response.raise_for_status()
 
-                return {
+            return {
                     "available": True,
                     "endpoint_id": (
                         resolved_endpoint_id
@@ -194,13 +252,10 @@ class RunPodServerlessAdapterService:
         if policy:
             body["policy"] = policy
 
-        with httpx.Client(
-            timeout=(
-                runpod_runtime_config_service
-                .http_timeout_seconds()
-            ),
-        ) as client:
-            response = client.post(
+        client = self._http_client(
+            runpod_runtime_config_service.http_timeout_seconds()
+        )
+        response = client.post(
                 self._endpoint_url(
                     db,
                     endpoint_id=(
@@ -212,9 +267,9 @@ class RunPodServerlessAdapterService:
                 json=jsonable_encoder(body),
             )
 
-            response.raise_for_status()
+        response.raise_for_status()
 
-            data = response.json()
+        data = response.json()
 
         provider_job_id = data.get("id")
 
@@ -244,59 +299,31 @@ class RunPodServerlessAdapterService:
         *,
         provider_job_id: str,
         endpoint_id: str | None = None,
+        client: httpx.Client | None = None,
     ) -> dict[str, Any]:
-        resolved_endpoint_id = (
-            self._endpoint_id(
-                db,
-                override=endpoint_id,
-            )
+        resolved_endpoint_id = self._endpoint_id(db, override=endpoint_id)
+        active_client = client or self._http_client(
+            runpod_runtime_config_service.http_timeout_seconds()
         )
-
-        with httpx.Client(
-            timeout=(
-                runpod_runtime_config_service
-                .http_timeout_seconds()
+        response = active_client.get(
+            self._endpoint_url(
+                db,
+                endpoint_id=resolved_endpoint_id,
+                operation=f"status/{provider_job_id}",
             ),
-        ) as client:
-            response = client.get(
-                self._endpoint_url(
-                    db,
-                    endpoint_id=(
-                        resolved_endpoint_id
-                    ),
-                    operation=(
-                        "status/"
-                        f"{provider_job_id}"
-                    ),
-                ),
-                headers=self._headers(db),
-            )
-
-            response.raise_for_status()
-
-            data = response.json()
+            headers=self._headers(db),
+        )
+        response.raise_for_status()
+        data = response.json()
 
         return {
-            "provider_job_id": (
-                provider_job_id
-            ),
-            "endpoint_id": (
-                resolved_endpoint_id
-            ),
-            "status": str(
-                data.get(
-                    "status",
-                    "UNKNOWN",
-                )
-            ).upper(),
+            "provider_job_id": provider_job_id,
+            "endpoint_id": resolved_endpoint_id,
+            "status": str(data.get("status", "UNKNOWN")).upper(),
             "output": data.get("output"),
             "error": data.get("error"),
-            "execution_time": data.get(
-                "executionTime"
-            ),
-            "delay_time": data.get(
-                "delayTime"
-            ),
+            "execution_time": data.get("executionTime"),
+            "delay_time": data.get("delayTime"),
             "raw": data,
         }
 
@@ -314,13 +341,10 @@ class RunPodServerlessAdapterService:
             )
         )
 
-        with httpx.Client(
-            timeout=(
-                runpod_runtime_config_service
-                .http_timeout_seconds()
-            ),
-        ) as client:
-            response = client.post(
+        client = self._http_client(
+            runpod_runtime_config_service.http_timeout_seconds()
+        )
+        response = client.post(
                 self._endpoint_url(
                     db,
                     endpoint_id=(
@@ -335,14 +359,14 @@ class RunPodServerlessAdapterService:
                 json={},
             )
 
-            response.raise_for_status()
+        response.raise_for_status()
 
-            try:
-                data = response.json()
-            except ValueError:
-                data = {
-                    "message": response.text,
-                }
+        try:
+            data = response.json()
+        except ValueError:
+            data = {
+                "message": response.text,
+            }
 
         return {
             "canceled": True,
@@ -368,13 +392,10 @@ class RunPodServerlessAdapterService:
             )
         )
 
-        with httpx.Client(
-            timeout=(
-                runpod_runtime_config_service
-                .http_timeout_seconds()
-            ),
-        ) as client:
-            response = client.post(
+        client = self._http_client(
+            runpod_runtime_config_service.http_timeout_seconds()
+        )
+        response = client.post(
                 self._endpoint_url(
                     db,
                     endpoint_id=(
@@ -386,9 +407,9 @@ class RunPodServerlessAdapterService:
                 json={},
             )
 
-            response.raise_for_status()
+        response.raise_for_status()
 
-            return response.json()
+        return response.json()
 
     def _progress_from_status(
         self,
@@ -449,6 +470,11 @@ class RunPodServerlessAdapterService:
             .polling_interval_seconds()
         )
 
+        active_client = self._http_client(
+            runpod_runtime_config_service.http_timeout_seconds()
+        )
+        transient_failures = 0
+
         while True:
             elapsed = (
                 time.monotonic()
@@ -494,13 +520,31 @@ class RunPodServerlessAdapterService:
                     "was requested."
                 )
 
-            status_data = self.get_status(
-                db,
-                provider_job_id=(
-                    provider_job_id
-                ),
-                endpoint_id=endpoint_id,
-            )
+            try:
+                status_data = self.get_status(
+                    db,
+                    provider_job_id=provider_job_id,
+                    endpoint_id=endpoint_id,
+                    client=active_client,
+                )
+                transient_failures = 0
+            except Exception as error:
+                if not self._is_transient_transport_error(error):
+                    raise
+                transient_failures += 1
+                logger.warning(
+                    "Transient RunPod status transport error; preserving job and retrying: "
+                    "job_id=%s attempt=%s error=%s",
+                    provider_job_id,
+                    transient_failures,
+                    error,
+                )
+                self._reset_http_client()
+                active_client = self._http_client(
+                    runpod_runtime_config_service.http_timeout_seconds()
+                )
+                time.sleep(min(8.0, max(1.0, polling_interval) * transient_failures))
+                continue
 
             status = status_data["status"]
 
@@ -552,12 +596,8 @@ class RunPodServerlessAdapterService:
             if status in self.TERMINAL_STATUSES:
                 return status_data
 
-            time.sleep(
-                max(
-                    polling_interval,
-                    0.5,
-                )
-            )
+            time.sleep(max(polling_interval, 0.5))
+            polling_interval = min(6.0, max(0.5, polling_interval + 0.5))
 
     def _safe_filename(
         self,
