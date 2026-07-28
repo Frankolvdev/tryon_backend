@@ -27,6 +27,24 @@ class BeamServerlessAdapterService:
     def _headers(api_key: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
+    @staticmethod
+    def _normalize_endpoint(endpoint: str) -> str:
+        target = str(endpoint or "").strip().rstrip("/")
+        if not target:
+            return ""
+        if not target.startswith(("https://", "http://")):
+            raise AppException("Beam endpoint must be an absolute HTTP or HTTPS URL.")
+        return target
+
+    @staticmethod
+    def _task_output(task: dict[str, Any]) -> Any:
+        outputs = task.get("outputs")
+        if isinstance(outputs, list) and len(outputs) == 1:
+            return outputs[0]
+        if outputs is not None:
+            return outputs
+        return task.get("output") or {}
+
     def _new_session(self) -> requests.Session:
         session = requests.Session()
         adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=0, pool_block=True)
@@ -70,7 +88,7 @@ class BeamServerlessAdapterService:
 
     def submit_job(self, db: Session, *, input_data: dict[str, Any], endpoint: str | None = None) -> dict[str, Any]:
         cfg = infrastructure_provider_service.get_beam(db)
-        target = str(endpoint or cfg.endpoint or "").strip()
+        target = self._normalize_endpoint(endpoint or cfg.endpoint or "")
         if not cfg.enabled or not cfg.api_key or not target:
             raise AppException("Beam is selected, but its API key or endpoint is not configured.")
         # Deliberately no automatic retry: replaying submission could duplicate a paid job.
@@ -167,11 +185,7 @@ class BeamServerlessAdapterService:
                     {"provider_status": status},
                 )
             if status == "COMPLETE":
-                outputs = task.get("outputs")
-                if isinstance(outputs, list) and len(outputs) == 1:
-                    outputs = outputs[0]
-                if outputs is None:
-                    outputs = task.get("output") or {}
+                outputs = self._task_output(task)
                 return {
                     "provider": "beam",
                     "provider_job_id": provider_job_id,
@@ -187,6 +201,31 @@ class BeamServerlessAdapterService:
 
             time.sleep(polling_interval)
             polling_interval = min(6.0, polling_interval + 0.5)
+
+    def submit_pipeline(self, db: Session, *, payload: dict[str, Any], endpoint: str | None = None) -> str:
+        """Beam equivalent of Modal ``spawn``: enqueue and return a persistent task ID."""
+        submitted = self.submit_job(db, input_data=payload, endpoint=endpoint)
+        return str(submitted["provider_job_id"])
+
+    def poll_result(self, db: Session, *, task_id: str) -> tuple[bool, dict[str, Any] | None]:
+        """Beam equivalent of ``FunctionCall.from_id(...).get(timeout=0)``."""
+        cfg = infrastructure_provider_service.get_beam(db)
+        task = self.get_task(cfg.api_key, task_id)
+        status = str(task.get("status") or "PENDING").upper()
+        if status in {"PENDING", "RUNNING", "RETRY", "QUEUED"}:
+            return False, None
+        if status == "COMPLETE":
+            output = self._task_output(task)
+            if not isinstance(output, dict):
+                raise AppException("Beam task returned an invalid pipeline result.")
+            return True, output
+        if status == "CANCELLED":
+            raise InterruptedError("Beam task cancellation confirmed.")
+        raise AppException(str(task.get("error") or f"Beam task ended with status {status}."))
+
+    def cancel_task(self, db: Session, *, task_id: str) -> dict[str, Any]:
+        """Beam equivalent of ``FunctionCall.cancel``."""
+        return self.cancel_job(db, provider_job_id=task_id)
 
 
 beam_serverless_adapter_service = BeamServerlessAdapterService()

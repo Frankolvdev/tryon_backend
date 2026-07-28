@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ModalProviderConfig(BaseModel):
@@ -80,8 +80,17 @@ class BeamProviderConfig(BaseModel):
     keep_warm_seconds: int = Field(default=10, ge=0, le=86400)
     max_pending_tasks: int = Field(default=100, ge=1, le=100000)
     retries: int = Field(default=2, ge=0, le=20)
+    callback_url: str = Field(default="", max_length=1000)
+    authorized: bool = True
     checkpoint_enabled: bool = False
     timeout_seconds: int = Field(default=900, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def validate_container_range(self):
+        if self.max_containers < self.min_containers:
+            raise ValueError("max_containers must be greater than or equal to min_containers")
+        return self
+
 
 class BeamProviderResponse(BeamProviderConfig):
     api_key: str = ""

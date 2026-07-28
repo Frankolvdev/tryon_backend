@@ -596,7 +596,28 @@ class RuntimeBuildExecutionService:
         app_file=Path(__file__).resolve().parents[2]/"beam_worker"/"app.py"
         import tempfile
         home=tempfile.mkdtemp(prefix="tryon-beam-")
-        env=os.environ.copy(); env.update({"HOME":home,"USERPROFILE":home,"TRYON_BEAM_IMAGE_URI":build.image_tag,"TRYON_BEAM_DEPLOYMENT_NAME":cfg.deployment_name,"TRYON_BEAM_VOLUME_NAME":cfg.volume_name,"TRYON_BEAM_VOLUME_PATH":cfg.volume_mount_path,"TRYON_BEAM_GPU":cfg.gpu,"TRYON_BEAM_CPU":str(cfg.cpu),"TRYON_BEAM_MEMORY_MB":str(cfg.memory_mb),"TRYON_BEAM_WORKERS":str(cfg.workers),"TRYON_BEAM_KEEP_WARM_SECONDS":str(cfg.keep_warm_seconds),"TRYON_BEAM_MAX_PENDING_TASKS":str(cfg.max_pending_tasks),"TRYON_BEAM_TIMEOUT":str(cfg.timeout_seconds),"TRYON_BEAM_RETRIES":str(cfg.retries),"TRYON_BEAM_CHECKPOINT":str(cfg.checkpoint_enabled).lower()})
+        env=os.environ.copy(); env.update({
+            "HOME": home,
+            "USERPROFILE": home,
+            "TRYON_BEAM_IMAGE_URI": build.image_tag,
+            "TRYON_BEAM_DEPLOYMENT_NAME": cfg.deployment_name,
+            "TRYON_BEAM_VOLUME_NAME": cfg.volume_name,
+            "TRYON_BEAM_VOLUME_PATH": cfg.volume_mount_path,
+            "TRYON_BEAM_GPU": cfg.gpu,
+            "TRYON_BEAM_CPU": str(cfg.cpu),
+            "TRYON_BEAM_MEMORY_MB": str(cfg.memory_mb),
+            "TRYON_BEAM_WORKERS": str(cfg.workers),
+            "TRYON_BEAM_MIN_CONTAINERS": str(cfg.min_containers),
+            "TRYON_BEAM_MAX_CONTAINERS": str(cfg.max_containers),
+            "TRYON_BEAM_TASKS_PER_CONTAINER": str(cfg.tasks_per_container),
+            "TRYON_BEAM_KEEP_WARM_SECONDS": str(cfg.keep_warm_seconds),
+            "TRYON_BEAM_MAX_PENDING_TASKS": str(cfg.max_pending_tasks),
+            "TRYON_BEAM_TIMEOUT": str(cfg.timeout_seconds),
+            "TRYON_BEAM_RETRIES": str(cfg.retries),
+            "TRYON_BEAM_CALLBACK_URL": str(cfg.callback_url or ""),
+            "TRYON_BEAM_AUTHORIZED": str(cfg.authorized).lower(),
+            "TRYON_BEAM_CHECKPOINT": str(cfg.checkpoint_enabled).lower(),
+        })
         configured=subprocess.run([executable,"configure","default","--token",cfg.api_key],env=env,capture_output=True,text=True,timeout=30)
         if configured.returncode!=0:
             raise ValueError("Beam CLI rechazó la API key: "+(configured.stdout or configured.stderr or "")[-2000:])
