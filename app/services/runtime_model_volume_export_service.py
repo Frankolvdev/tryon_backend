@@ -114,10 +114,10 @@ class RuntimeModelVolumeExportService:
         destinos local, Docker, Modal y Beam.
         """
         from app.services.infrastructure_provider_service import InfrastructureProviderService
-        from app.services.runpod_volume_sync_service import RunPodVolumeSyncService
+        from app.services.runpod_model_volume_sync import RunPodModelVolumeSyncService
 
         cfg = InfrastructureProviderService.get_runpod(session)
-        return RunPodVolumeSyncService.sync_tree(
+        return RunPodModelVolumeSyncService.sync_tree(
             api_key=str(cfg.api_key or ""),
             volume_id=str(cfg.network_volume_id or ""),
             data_center_id=str(cfg.data_center_id or ""),
