@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import AppException
 from app.services.infrastructure_provider_service import infrastructure_provider_service
+from app.services.beam_credentials_service import beam_credentials_service
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,8 @@ class BeamServerlessAdapterService:
 
     @staticmethod
     def _headers(api_key: str) -> dict[str, str]:
-        return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        token = beam_credentials_service.normalize_token(api_key)
+        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     @staticmethod
     def _normalize_endpoint(endpoint: str) -> str:

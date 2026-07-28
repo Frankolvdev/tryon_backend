@@ -582,8 +582,10 @@ class RuntimeBuildExecutionService:
     def _beam_deployment(db, build, deployment):
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         cfg=InfrastructureProviderService.get_beam(db)
-        if not cfg.enabled or not cfg.api_key:
-            raise ValueError("Activa Beam y configura su API key antes del deploy.")
+        if not cfg.enabled:
+            raise ValueError("Activa Beam antes del deploy.")
+        from app.services.beam_credentials_service import beam_credentials_service
+        beam_credentials_service.require_token(cfg)
         from app.services.beam_cli_environment_service import beam_cli_environment_service
         try:
             executable = beam_cli_environment_service.ensure(timeout_seconds=max(900, cfg.timeout_seconds))
@@ -621,9 +623,10 @@ class RuntimeBuildExecutionService:
             "TRYON_BEAM_AUTHORIZED": str(cfg.authorized).lower(),
             "TRYON_BEAM_CHECKPOINT": str(cfg.checkpoint_enabled).lower(),
         })
-        configured=subprocess.run([executable,"configure","default","--token",cfg.api_key],env=env,capture_output=True,text=True,timeout=30)
-        if configured.returncode!=0:
-            raise ValueError("Beam CLI rechazó la API key: "+(configured.stdout or configured.stderr or "")[-2000:])
+        auth = beam_credentials_service.configure_cli(
+            executable=executable, config=cfg, env=env, timeout_seconds=30
+        )
+        env = auth.env
         RuntimeBuildExecutionService._update_deployment(db,build,deployment,phase="deploying",progress=65,message="Desplegando Beam Task Queue.",log="[beam:4/6] Ejecutando beam deploy.")
         completed=subprocess.run([executable,"deploy",f"{app_file}:handler","--name",deployment_name],env=env,capture_output=True,text=True,timeout=max(600,cfg.timeout_seconds))
         output=(completed.stdout or completed.stderr or "").strip()

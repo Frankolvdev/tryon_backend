@@ -134,8 +134,8 @@ class RuntimeModelVolumeExportService:
         from app.services.beam_cli_environment_service import beam_cli_environment_service
 
         cfg = InfrastructureProviderService.get_beam(session)
-        if not cfg.api_key:
-            raise ValueError("Configura la API key de Beam antes de exportar.")
+        from app.services.beam_credentials_service import beam_credentials_service
+        beam_credentials_service.require_token(cfg)
         volume_name = str(cfg.volume_name or "").strip()
         if not volume_name:
             raise ValueError("Configura el nombre del volumen Beam antes de exportar.")
@@ -144,10 +144,10 @@ class RuntimeModelVolumeExportService:
         env = os.environ.copy()
         home = tempfile.mkdtemp(prefix="tryon-beam-export-")
         env.update({"HOME": home, "USERPROFILE": home})
-        configured = subprocess.run([executable, "configure", "default", "--token", cfg.api_key], env=env, capture_output=True, text=True, timeout=30)
-        if configured.returncode != 0:
-            output = "\n".join(part for part in (configured.stdout, configured.stderr) if part).strip()
-            raise RuntimeError(f"Beam CLI rechazó la API key: {output[-3000:]}")
+        auth = beam_credentials_service.configure_cli(
+            executable=executable, config=cfg, env=env, timeout_seconds=30
+        )
+        env = auth.env
         target = f"beam://{volume_name}" + (f"/{remote_path.strip('/')}" if remote_path.strip('/') else "")
         notify("beam-copy", 94, f"Subiendo modelos al volumen Beam {volume_name}…")
         command = [executable, "cp", str(models_root), target]

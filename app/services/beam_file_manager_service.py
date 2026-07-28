@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.services.beam_cli_environment_service import beam_cli_environment_service
 from app.services.infrastructure_provider_service import InfrastructureProviderService
+from app.services.beam_credentials_service import beam_credentials_service
 
 class BeamFileManagerError(RuntimeError): pass
 
@@ -17,13 +18,21 @@ class BeamFileManagerService:
     @classmethod
     def _env(cls, db: Session):
         cfg = InfrastructureProviderService.get_beam(db)
-        if not cfg.api_key: raise BeamFileManagerError("Configura la API key de Beam.")
+        try:
+            beam_credentials_service.require_token(cfg)
+        except Exception as exc:
+            raise BeamFileManagerError(str(exc)) from exc
         exe = beam_cli_environment_service.ensure(timeout_seconds=900)
         home = tempfile.mkdtemp(prefix="tryon-beam-file-manager-")
         env = os.environ.copy(); env.update({"HOME": home, "USERPROFILE": home})
-        done = subprocess.run([exe, "configure", "default", "--token", cfg.api_key], env=env, capture_output=True, text=True, timeout=30)
-        if done.returncode != 0: raise BeamFileManagerError((done.stderr or done.stdout or "Beam rechazó la API key")[-3000:])
-        return cfg, exe, env, home
+        try:
+            auth = beam_credentials_service.configure_cli(
+                executable=exe, config=cfg, env=env, timeout_seconds=30
+            )
+        except Exception as exc:
+            shutil.rmtree(home, ignore_errors=True)
+            raise BeamFileManagerError(str(exc)) from exc
+        return cfg, exe, auth.env, home
     @classmethod
     def _run(cls, db, args, timeout=3600):
         cfg, exe, env, home = cls._env(db)

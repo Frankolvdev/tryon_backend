@@ -240,21 +240,47 @@ class InfrastructureProviderService:
 
     @classmethod
     def test_beam(cls, db: Session) -> dict:
-        import requests
-        cfg=cls.get_beam(db)
-        if not cfg.api_key: return {"success":False,"message":"Configura el Token de Beam.","details":{}}
+        cfg = cls.get_beam(db)
+        from app.services.beam_cli_environment_service import beam_cli_environment_service
+        from app.services.beam_credentials_service import BeamCredentialError, beam_credentials_service
+        import tempfile
+        import shutil as _shutil
+
+        home = tempfile.mkdtemp(prefix="tryon-beam-test-")
         try:
-            r=requests.get("https://api.beam.cloud/v2/task/00000000-0000-0000-0000-000000000000/",headers={"Authorization":f"Bearer {cfg.api_key}"},timeout=20)
-            if r.status_code in {401,403}: return {"success":False,"message":"Beam rechazó el Token.","details":{"status_code":r.status_code}}
-            return {"success":True,"message":"Credenciales Beam validadas.","details":{"workspace":cfg.workspace,"status_code":r.status_code}}
+            executable = beam_cli_environment_service.ensure(timeout_seconds=900)
+            env = os.environ.copy()
+            env.update({"HOME": home, "USERPROFILE": home})
+            result = beam_credentials_service.configure_cli(
+                executable=executable,
+                config=cfg,
+                env=env,
+                timeout_seconds=30,
+            )
+            return {
+                "success": True,
+                "message": "Token de Beam validado correctamente.",
+                "details": {
+                    "primary_key": str(cfg.workspace or "").strip() or None,
+                    "output": result.output[-2000:],
+                },
+            }
+        except BeamCredentialError as exc:
+            return {"success": False, "message": str(exc), "details": {}}
         except Exception as exc:
-            return {"success":False,"message":"No fue posible conectar con Beam.","details":{"error":str(exc)}}
+            return {
+                "success": False,
+                "message": "No fue posible comprobar las credenciales de Beam.",
+                "details": {"error": str(exc)},
+            }
+        finally:
+            _shutil.rmtree(home, ignore_errors=True)
 
     @classmethod
     def ensure_beam_volume(cls, db: Session) -> dict:
-        cfg=cls.get_beam(db)
-        if not cfg.api_key: return {"success":False,"message":"Configura el Token de Beam.","details":{}}
+        cfg = cls.get_beam(db)
         from app.services.beam_cli_environment_service import beam_cli_environment_service
+        from app.services.beam_credentials_service import BeamCredentialError, beam_credentials_service
         try:
             executable = beam_cli_environment_service.ensure(timeout_seconds=900)
         except Exception as exc:
@@ -264,18 +290,33 @@ class InfrastructureProviderService:
                 "details": {"error": str(exc), "requirements": "requirements-beam.txt"},
             }
         import tempfile
-        home=tempfile.mkdtemp(prefix="tryon-beam-")
-        env=os.environ.copy(); env["HOME"]=home; env["USERPROFILE"]=home
-        configured=subprocess.run([executable,"configure","default","--token",cfg.api_key],env=env,capture_output=True,text=True,timeout=30)
-        if configured.returncode!=0:
-            return {"success":False,"message":"Beam CLI rechazó el Token.","details":{"output":(configured.stdout or configured.stderr or "")[-3000:]}}
-        listed=subprocess.run([executable,"volume","list"],env=env,capture_output=True,text=True,timeout=60)
-        output=(listed.stdout or listed.stderr or "")
-        if cfg.volume_name in output:
-            return {"success":True,"message":"Volumen Beam disponible.","details":{"volume_name":cfg.volume_name,"output":output[-3000:]}}
-        created=subprocess.run([executable,"volume","create",cfg.volume_name],env=env,capture_output=True,text=True,timeout=120)
-        out=(created.stdout or created.stderr or "").strip()
-        return {"success":created.returncode==0,"message":"Volumen Beam creado." if created.returncode==0 else "No fue posible crear el volumen Beam.","details":{"volume_name":cfg.volume_name,"output":out[-3000:]}}
+        import shutil as _shutil
+        home = tempfile.mkdtemp(prefix="tryon-beam-")
+        try:
+            env = os.environ.copy()
+            env.update({"HOME": home, "USERPROFILE": home})
+            auth = beam_credentials_service.configure_cli(
+                executable=executable, config=cfg, env=env, timeout_seconds=30
+            )
+            listed = subprocess.run(
+                [executable, "volume", "list"], env=auth.env,
+                capture_output=True, text=True, timeout=60,
+            )
+            output = (listed.stdout or listed.stderr or "")
+            if listed.returncode != 0:
+                return {"success": False, "message": "Beam no pudo listar los volúmenes.", "details": {"output": output[-3000:]}}
+            if cfg.volume_name in output:
+                return {"success": True, "message": "Volumen Beam disponible.", "details": {"volume_name": cfg.volume_name, "output": output[-3000:]}}
+            created = subprocess.run(
+                [executable, "volume", "create", cfg.volume_name], env=auth.env,
+                capture_output=True, text=True, timeout=120,
+            )
+            out = (created.stdout or created.stderr or "").strip()
+            return {"success": created.returncode == 0, "message": "Volumen Beam creado." if created.returncode == 0 else "No fue posible crear el volumen Beam.", "details": {"volume_name": cfg.volume_name, "output": out[-3000:]}}
+        except BeamCredentialError as exc:
+            return {"success": False, "message": str(exc), "details": {}}
+        finally:
+            _shutil.rmtree(home, ignore_errors=True)
 
     @staticmethod
     def _modal_env(config: ModalProviderConfig) -> dict[str, str]:
