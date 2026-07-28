@@ -505,7 +505,7 @@ def import_resolve_workflow(
     db: Session = Depends(get_db),
 ):
     try:
-        result = RuntimeImportService.resolve_workflow(
+        result = RuntimeImportService.resolve_current_workflow(
             payload.path,
             payload.workflow,
         )

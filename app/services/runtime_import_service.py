@@ -294,7 +294,13 @@ class RuntimeImportService:
             if isinstance(value,str): refs.append({'value':value,'field':field,'model_type':model_type,'folders':','.join(folders),'class_type':cls})
         for field,value in inputs.items():
             field_lower = str(field).strip().lower()
-            if not isinstance(value, str) or RuntimeImportService._is_non_model_workflow_value(value, field_lower):
+            # UI action fields such as rgthree's "➕ Add Lora" are commonly
+            # serialized as an empty string. Never attempt to resolve an empty
+            # reference: suffix matching with "" would match every indexed model
+            # and incorrectly select the first physical file.
+            if not isinstance(value, str) or not value.strip():
+                continue
+            if RuntimeImportService._is_non_model_workflow_value(value, field_lower):
                 continue
             # Generic field-name detection is retained for custom loaders, but
             # only after excluding known processing fields and values. Explicit
@@ -522,6 +528,17 @@ class RuntimeImportService:
         return {'source_type':source,'selected_path':str(selected),'comfyui_path':str(comfy),'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),'torch_cuda_version':python.get('cuda'),'gpu_name':python.get('gpu'),'python_candidates':python.get('candidate_attempts',[]),'workflow':{'node_count':len(workflow_nodes),'class_types':class_types,'referenced_models':referenced},'resolved_classes':resolved_classes,'core_classes':[r['class_type'] for r in resolved_classes if r['provider']=='core'],'custom_nodes':required_nodes,'models':required_models,'python_dependencies':list(dependencies_by_name.values()),'environment_variables':[],'volumes':[{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],'unresolved_classes':unresolved_classes,'missing_models':sorted(set(missing_models)),'ambiguous_models':sorted(set(ambiguous_models)),'warnings':warnings,'summary':{'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),'core_classes':sum(1 for r in resolved_classes if r['provider']=='core'),'resolved_custom_classes':sum(1 for r in resolved_classes if r['provider']=='custom'),'required_custom_nodes':len(required_nodes),'required_models':len(required_models),'referenced_models':len(reference_records),'missing_models':len(set(missing_models)),'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),'installed_custom_nodes':len(folders),'installed_models':total_models,'runtime_catalog_classes':max(0,len(runtime_catalog)-int('__error__' in runtime_catalog)),'knowledge_base_rules':len(MODEL_INPUT_RULES),'intelligence_index_classes':int(intelligence_summary.get('classes') or 0),'intelligence_index_providers':int(intelligence_summary.get('providers') or 0),'alias_resolved_classes':sum(1 for r in resolved_classes if r.get('confidence')=='alias-resolver'),'compatibility_score':score}}
 
     @staticmethod
+    def resolve_current_workflow(path: str, workflow: dict[str, Any]) -> dict[str, Any]:
+        """Return the single normalized workflow-resolution result.
+
+        This is the public boundary shared by the direct resolver endpoint and
+        every runtime provider. Each invocation analyzes only the supplied
+        workflow and ComfyUI installation; no provider-specific or global model
+        list is reused.
+        """
+        return RuntimeImportService.resolve_workflow(path, workflow)
+
+    @staticmethod
     def resolve_runtime_models(config: Any) -> list[dict[str, Any]]:
         """Resolve models for this runtime's current workflow without shared state.
 
@@ -533,7 +550,7 @@ class RuntimeImportService:
         path = str(getattr(config, "source_comfyui_path", None) or "").strip()
         workflow = getattr(config, "workflow_json", None)
         if path and isinstance(workflow, dict) and workflow:
-            report = RuntimeImportService.resolve_workflow(path, workflow)
+            report = RuntimeImportService.resolve_current_workflow(path, workflow)
             return [dict(item) for item in (report.get("models") or []) if item.get("enabled", True)]
         return [dict(item) for item in (getattr(config, "models", None) or []) if item.get("enabled", True)]
 
