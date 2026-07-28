@@ -82,6 +82,44 @@ class RuntimeContextGeneratorService:
         return unique[0] if len(unique) == 1 else None
 
     @staticmethod
+    def _model_relative_path(comfy: Path, source: Path, item: dict[str, Any]) -> Path:
+        """Return the logical ComfyUI models path for local or external files.
+
+        Older exports assumed every physical file was below ``ComfyUI/models``.
+        Current installations may expose model roots through
+        ``extra_model_paths.yaml``. The runtime context must preserve the logical
+        target path without requiring the physical source to be a child of the
+        default models directory.
+        """
+        source = source.resolve()
+        models_root = (comfy / "models").resolve()
+        try:
+            return source.relative_to(models_root)
+        except ValueError:
+            pass
+
+        target = str(item.get("target_path") or "").replace("\\", "/").strip("/")
+        if target:
+            target_path = Path(target)
+            if target_path.name.casefold() == source.name.casefold():
+                return target_path
+
+        try:
+            from app.services.runtime_import_service import RuntimeImportService
+            roots = RuntimeImportService._configured_model_roots(comfy)
+            logical = RuntimeImportService._logical_model_path(source, roots)
+            logical = str(logical or "").replace("\\", "/").strip("/")
+            if logical:
+                return Path(logical)
+        except Exception:
+            pass
+
+        category = str(item.get("category") or item.get("type") or "").replace("\\", "/").strip("/")
+        if category:
+            return Path(category) / source.name
+        return Path(source.name)
+
+    @staticmethod
     def _normalize_node_name(value: str | None) -> str:
         """Normaliza nombres de repositorios/carpetas sin perder identidad.
 
@@ -282,7 +320,7 @@ class RuntimeContextGeneratorService:
                 record.update({"included": False, "source_path": None})
                 model_manifest.append(record)
                 continue
-            relative = source.relative_to(comfy / "models")
+            relative = RuntimeContextGeneratorService._model_relative_path(comfy, source, item)
             destination = output / "models" / relative
             size = source.stat().st_size
             sha = RuntimeContextGeneratorService._sha256(source) if payload.calculate_sha256 else item.get("sha256")
