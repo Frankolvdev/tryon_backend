@@ -44,42 +44,18 @@ class RuntimeContextGeneratorService:
 
     @staticmethod
     def _find_model(comfy: Path, item: dict[str, Any]) -> Path | None:
-        # Prefer the exact path recorded by the shared workflow resolver. This is
-        # required for models loaded through extra_model_paths.yaml (Pinokio,
-        # Stability Matrix, external drives, etc.).
-        source_raw = str(item.get("source_path") or "").strip()
-        if source_raw:
-            source = Path(source_raw).expanduser()
-            if source.is_file():
-                return source.resolve()
-
+        root = comfy / "models"
         target = str(item.get("target_path") or "").replace("\\", "/").lstrip("/")
         name = str(item.get("name") or "").strip()
-        try:
-            from app.services.runtime_import_service import RuntimeImportService
-            roots = RuntimeImportService._configured_model_roots(comfy)
-        except Exception:
-            roots = [("", (comfy / "models").resolve())]
-
-        matches: list[Path] = []
-        target_folded = target.casefold()
+        direct = root / target if target else None
+        if direct and direct.is_file():
+            return direct
         needle = Path(target).name if target else name
-        for prefix, root in roots:
-            if target:
-                candidates = []
-                if prefix and target_folded.startswith(prefix.casefold() + "/"):
-                    candidates.append(root / target[len(prefix) + 1:])
-                candidates.append(root / target)
-                for candidate in candidates:
-                    if candidate.is_file():
-                        matches.append(candidate.resolve())
-            if needle and root.exists():
-                matches.extend(
-                    path.resolve() for path in root.rglob("*")
-                    if path.is_file() and path.name.casefold() == needle.casefold()
-                )
-        unique = list({str(path).casefold(): path for path in matches}.values())
-        return unique[0] if len(unique) == 1 else None
+        matches = [
+            path for path in root.rglob("*")
+            if path.is_file() and path.name.lower() == needle.lower()
+        ] if needle else []
+        return matches[0] if len(matches) == 1 else None
 
     @staticmethod
     def _normalize_node_name(value: str | None) -> str:
@@ -173,42 +149,10 @@ class RuntimeContextGeneratorService:
         return changed
 
     @staticmethod
-    def _copy_generation_runtime(output: Path) -> list[str]:
-        """Copy the canonical remote pipeline runtime into every exported image.
-
-        Modal and RunPod use the same generation-runtime/v1 implementation.
-        Keeping one canonical source prevents the exported Modal endpoint from
-        existing without the code that actually executes workflow/Python steps.
-        """
-        backend_root = Path(__file__).resolve().parents[2]
-        source = backend_root / "runpod_worker" / "generation_runtime"
-        if not source.is_dir() or not (source / "runtime.py").is_file():
-            raise RuntimeError(
-                "No se encontró runpod_worker/generation_runtime en el backend. "
-                "No se puede exportar un runtime remoto funcional."
-            )
-        target = output / "runpod_worker" / "generation_runtime"
-        shutil.copytree(
-            source,
-            target,
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
-        )
-        init_file = output / "runpod_worker" / "__init__.py"
-        init_file.parent.mkdir(parents=True, exist_ok=True)
-        init_file.touch(exist_ok=True)
-        return [
-            str(path.relative_to(output)).replace("\\", "/")
-            for path in target.rglob("*")
-            if path.is_file()
-        ]
-
-    @staticmethod
     def generate(
         config: RuntimeBuilderConfig,
         payload: Any,
         progress: ProgressCallback | None = None,
-        modal_volume_name: str | None = None,
     ) -> dict[str, Any]:
         notify = progress or (lambda _phase, _percent, _message: None)
         notify("preparing", 2, "Validando instalación local de ComfyUI…")
@@ -237,8 +181,7 @@ class RuntimeContextGeneratorService:
         for folder in ("models", "custom_nodes", "workflow", "scripts"):
             (output / folder).mkdir(parents=True, exist_ok=True)
 
-        remote_runtime_files = RuntimeContextGeneratorService._copy_generation_runtime(output)
-        generated = RuntimeBuilderService.generate(config, modal_volume_name=modal_volume_name)
+        generated = RuntimeBuilderService.generate(config)
 
         # La decisión real de copiar modelos pertenece a la exportación. Si el
         # usuario desmarca "Copiar modelos" y existe un Volume configurado, se
@@ -251,7 +194,7 @@ class RuntimeContextGeneratorService:
             generated["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(volume_path)
             generated["runtime_manifest"]["model_storage"] = "external-volume"
             if RuntimeBuilderService._is_modal(config):
-                volume_name = str(modal_volume_name or "").strip() or next(
+                volume_name = next(
                     (str(volume.get("name")) for volume in (config.volumes or []) if volume.get("name")),
                     f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models",
                 )
@@ -435,16 +378,59 @@ except Exception:
     report["nvidia_driver"] = None
 print("[runtime-performance] " + json.dumps(report, ensure_ascii=False, sort_keys=True))
 '''
+        rgthree_lora_path_hotfix = r'''from __future__ import annotations
+
+import py_compile
+import re
+from pathlib import Path
+
+TARGET = Path("/app/ComfyUI/custom_nodes/rgthree-comfy/py/power_prompt_utils.py")
+MARKER = "TRYON HOTFIX: normalize Windows LoRA paths for Linux"
+NORMALIZATION = 'file_path = str(file_path).replace("\\\\", "/")'
+
+
+def main() -> None:
+    if not TARGET.is_file():
+        print("[HOTFIX] rgthree-comfy no está instalado; parche omitido.")
+        return
+
+    source = TARGET.read_text(encoding="utf-8")
+    if MARKER in source or NORMALIZATION in source:
+        print("[HOTFIX] La normalización de rutas de rgthree ya estaba aplicada.")
+        return
+
+    lines = source.splitlines(keepends=True)
+    signature_start = next(
+        (index for index, line in enumerate(lines) if re.match(r"^\s*def\s+get_lora_by_filename\s*\(", line)),
+        None,
+    )
+    if signature_start is None:
+        raise RuntimeError(f"No se encontró get_lora_by_filename en {TARGET}.")
+
+    signature_end = signature_start
+    while signature_end < len(lines) and not lines[signature_end].rstrip().endswith(":"):
+        signature_end += 1
+    if signature_end >= len(lines):
+        raise RuntimeError(f"La firma get_lora_by_filename está incompleta en {TARGET}.")
+
+    function_indent = re.match(r"^(\s*)", lines[signature_start]).group(1)
+    body_indent = function_indent + "    "
+    insertion = (
+        f"{body_indent}# {MARKER}\n"
+        f"{body_indent}{NORMALIZATION}\n"
+    )
+    lines.insert(signature_end + 1, insertion)
+    TARGET.write_text("".join(lines), encoding="utf-8", newline="\n")
+    py_compile.compile(str(TARGET), doraise=True)
+    print("[HOTFIX] Normalización de rutas de LoRA de rgthree aplicada.")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
         startup = f'''#!/usr/bin/env bash
 set -euo pipefail
-
-# Compatibilidad con runtimes que pasan un comando explícito al ENTRYPOINT.
-# Docker Desktop y RunPod, al arrancar sin argumentos, conservan el flujo
-# tradicional definido debajo.
-if [ "$#" -gt 0 ]; then
-  echo "[runtime] Delegando el proceso solicitado: $*"
-  exec "$@"
-fi
 
 MODELS_ROOT="${{MODELS_ROOT:-/models}}"
 WORKFLOWS_ROOT="${{WORKFLOWS_ROOT:-/workflows}}"
@@ -484,35 +470,11 @@ fi
             "scripts/startup.sh": startup,
             "scripts/healthcheck.py": health,
             "scripts/performance_probe.py": performance_probe,
+            "scripts/apply_runtime_hotfixes.py": rgthree_lora_path_hotfix,
             ".dockerignore": "**/.git\n**/__pycache__\n**/*.pyc\n.venv\nnode_modules\n",
-            "tryon_runtime_guard/__init__.py": generated["tryon_runtime_guard"],
         }
         if generated.get("modal_app"):
-            modal_app = generated["modal_app"]
-            required_modal_fragments = (
-                'class ComfyUIServer:',
-                '@modal.method()',
-                'def run_pipeline(self, payload):',
-                'TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"',
-                'from generation_runtime import GenerationRuntime',
-            )
-            missing_fragments = [
-                fragment for fragment in required_modal_fragments if fragment not in modal_app
-            ]
-            if missing_fragments:
-                raise RuntimeError(
-                    "El generador produjo un modal_app.py incompleto. "
-                    f"Faltan componentes obligatorios: {missing_fragments}"
-                )
-            files["modal_app.py"] = modal_app
-            # Modal debe construir una imagen sin el ENTRYPOINT de Docker/RunPod.
-            # De lo contrario startup.sh arranca ComfyUI antes de que el runtime
-            # de modal_app.py pueda controlar el lifecycle y publicar web_server.
-            files["Dockerfile.modal"] = RuntimeContextGeneratorService._modal_dockerfile(
-                config,
-                payload.copy_models,
-                payload.copy_custom_nodes,
-            )
+            files["modal_app.py"] = generated["modal_app"]
         if generated.get("extra_model_paths"):
             files["extra_model_paths.yaml"] = generated["extra_model_paths"]
 
@@ -531,26 +493,10 @@ fi
             "models_copied": models_copied,
             "custom_nodes_copied": nodes_copied,
             "bytes_copied": total,
-            "files_generated": sorted(set(files) | set(remote_runtime_files)),
+            "files_generated": sorted(files),
             "warnings": warnings,
             "manifest": manifest,
         }
-
-    @staticmethod
-    def _modal_dockerfile(config: RuntimeBuilderConfig, models: bool, nodes: bool) -> str:
-        """Genera la imagen de Modal sin ENTRYPOINT ni HEALTHCHECK de Docker.
-
-        Modal inyecta y supervisa su propio proceso para ejecutar modal_app.py.
-        El Dockerfile normal se conserva intacto para Docker Desktop y RunPod.
-        """
-        dockerfile = RuntimeContextGeneratorService._dockerfile(config, models, nodes)
-        excluded_prefixes = ("ENTRYPOINT ", "CMD ", "HEALTHCHECK ")
-        lines = [
-            line
-            for line in dockerfile.splitlines()
-            if not line.lstrip().startswith(excluded_prefixes)
-        ]
-        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _dockerfile(config: RuntimeBuilderConfig, models: bool, nodes: bool) -> str:
@@ -578,6 +524,8 @@ fi
         if nodes:
             lines += [
                 f"COPY custom_nodes/ {comfy_target}/custom_nodes/",
+                "COPY scripts/apply_runtime_hotfixes.py /tmp/apply_runtime_hotfixes.py",
+                "RUN python /tmp/apply_runtime_hotfixes.py && rm -f /tmp/apply_runtime_hotfixes.py",
                 f"RUN find {comfy_target}/custom_nodes -type f -name requirements.txt -print | sort | while IFS= read -r req; do echo '[runtime] Installing' \"$req\"; sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|\\$)/Id\" \"$req\"; python -m pip install --constraint /tmp/runtime-constraints.txt -r \"$req\" || exit 1; done",
                 'RUN set -eu; check_output="$(python -m pip check 2>&1)" && { printf \'%s\\n\' "$check_output"; exit 0; }; check_status=$?; printf \'%s\\n\' "$check_output"; unexpected="$(printf \'%s\\n\' "$check_output" | sed -E \'/^decord 0\\.6\\.0 is not supported on this platform$/d; /^[[:space:]]*$/d\')"; if [ -n "$unexpected" ]; then echo \'[runtime] pip check encontró errores no permitidos.\' >&2; exit "$check_status"; fi; echo \'[runtime] Advertencia conocida ignorada: decord 0.6.0 no declara soporte para esta plataforma.\'',
                 "RUN python -c 'import sys, torch, transformers; assert sys.version_info[:2] == (3, 11); assert torch.version.cuda and torch.version.cuda.startswith(\"12.8\"); assert int(transformers.__version__.split(\".\")[0]) < 5; print(sys.version); print(torch.__version__, torch.version.cuda); print(transformers.__version__)'",
@@ -587,8 +535,6 @@ fi
         elif external_models:
             lines.append(f"COPY extra_model_paths.yaml {comfy_target}/extra_model_paths.yaml")
         lines += [
-            f"COPY tryon_runtime_guard/ {comfy_target}/custom_nodes/zzz_tryon_runtime_guard/",
-            f"COPY runpod_worker/ {workdir}/runtime/runpod_worker/",
             f"COPY scripts/ {workdir}/runtime/scripts/",
             f"RUN chmod +x {workdir}/runtime/scripts/startup.sh",
             f"WORKDIR {comfy_target}",
