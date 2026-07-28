@@ -48,20 +48,24 @@ apt-get update
 apt-get install -y --no-install-recommends openssh-server rsync python3 ca-certificates
 mkdir -p /run/sshd /root/.ssh
 chmod 700 /root/.ssh
-KEY_VALUE="${SSH_PUBLIC_KEY:-${PUBLIC_KEY:-}}"
-if [ -z "$KEY_VALUE" ]; then
-  echo 'No se recibió SSH_PUBLIC_KEY/PUBLIC_KEY' >&2
+KEY_B64="${TRYON_SSH_PUBLIC_KEY_B64:-}"
+if [ -z "$KEY_B64" ]; then
+  echo 'No se recibió TRYON_SSH_PUBLIC_KEY_B64' >&2
   exit 64
 fi
-printf '%s\n' "$KEY_VALUE" > /root/.ssh/authorized_keys
+printf '%s' "$KEY_B64" | base64 -d > /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
 ssh-keygen -A
 printf '%s\n' \
-  'PermitRootLogin prohibit-password' \
+  'PermitRootLogin yes' \
   'PasswordAuthentication no' \
   'PubkeyAuthentication yes' \
+  'KbdInteractiveAuthentication no' \
   'ChallengeResponseAuthentication no' \
+  'AuthorizedKeysFile /root/.ssh/authorized_keys' \
   > /etc/ssh/sshd_config.d/99-tryon-model-sync.conf
+/usr/sbin/sshd -t
+touch /tmp/tryon-sshd-ready
 exec /usr/sbin/sshd -D -e
 """.strip()
         return ["bash", "-lc", script]
@@ -78,7 +82,7 @@ exec /usr/sbin/sshd -D -e
             "imageName": settings.pod_image,
             "dockerEntrypoint": [],
             "dockerStartCmd": cls._startup_command(),
-            "env": {"PUBLIC_KEY": public_key, "SSH_PUBLIC_KEY": public_key},
+            "env": {"TRYON_SSH_PUBLIC_KEY_B64": public_key},
             "interruptible": False,
             "locked": False,
             "dataCenterIds": [data_center_id],
@@ -182,7 +186,7 @@ exec /usr/sbin/sshd -D -e
                     settings=settings,
                     volume_id=volume_id,
                     data_center_id=data_center_id,
-                    public_key=transport.public_key(),
+                    public_key=transport.public_key_b64(),
                 )
             )
             pod_id = str(pod.get("id") or "").strip()
@@ -191,6 +195,12 @@ exec /usr/sbin/sshd -D -e
             target = cls._wait_for_target(
                 control, pod_id,
                 timeout=min(max(timeout_seconds, 60), settings.pod_ready_timeout_seconds),
+                poll_interval=settings.poll_interval_seconds,
+                notify=notify,
+            )
+            transport.wait_for_tcp_port(
+                target,
+                timeout=settings.ssh_port_timeout_seconds,
                 poll_interval=settings.poll_interval_seconds,
                 notify=notify,
             )

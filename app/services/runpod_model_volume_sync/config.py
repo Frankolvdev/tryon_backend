@@ -15,6 +15,7 @@ class RunPodModelVolumeSyncSettings:
     vcpu_count: int = 2
     container_disk_gb: int = 10
     pod_ready_timeout_seconds: int = 900
+    ssh_port_timeout_seconds: int = 360
     ssh_ready_timeout_seconds: int = 360
     transfer_timeout_seconds: int = 24 * 60 * 60
     poll_interval_seconds: int = 5
@@ -28,6 +29,7 @@ class RunPodModelVolumeSyncSettings:
             vcpu_count=max(1, int(os.getenv("RUNPOD_MODEL_SYNC_VCPU", str(cls.vcpu_count)))),
             container_disk_gb=max(5, int(os.getenv("RUNPOD_MODEL_SYNC_DISK_GB", str(cls.container_disk_gb)))),
             pod_ready_timeout_seconds=max(60, int(os.getenv("RUNPOD_MODEL_SYNC_POD_TIMEOUT", str(cls.pod_ready_timeout_seconds)))),
+            ssh_port_timeout_seconds=max(30, int(os.getenv("RUNPOD_MODEL_SYNC_SSH_PORT_TIMEOUT", str(cls.ssh_port_timeout_seconds)))),
             ssh_ready_timeout_seconds=max(60, int(os.getenv("RUNPOD_MODEL_SYNC_SSH_TIMEOUT", str(cls.ssh_ready_timeout_seconds)))),
             transfer_timeout_seconds=max(300, int(os.getenv("RUNPOD_MODEL_SYNC_TRANSFER_TIMEOUT", str(cls.transfer_timeout_seconds)))),
             poll_interval_seconds=max(2, int(os.getenv("RUNPOD_MODEL_SYNC_POLL_INTERVAL", str(cls.poll_interval_seconds)))),
@@ -40,11 +42,27 @@ def resolve_private_key_path() -> Path:
         path = Path(os.path.expandvars(os.path.expanduser(configured)))
     else:
         home = Path(os.getenv("USERPROFILE") or Path.home())
-        path = home / ".ssh" / "id_ed25519"
+        dedicated = home / ".ssh" / "tryon_runpod_export"
+        path = dedicated if dedicated.is_file() else home / ".ssh" / "id_ed25519"
     path = path.resolve()
     if not path.is_file():
         raise RuntimeError(
             "No se encontró la clave privada SSH de RunPod. Configura RUNPOD_SSH_PRIVATE_KEY "
             f"o crea la clave esperada en: {path}"
+        )
+    return path
+
+
+def resolve_public_key_path(private_key: Path) -> Path:
+    configured = str(os.getenv("RUNPOD_SSH_PUBLIC_KEY") or "").strip()
+    if configured:
+        path = Path(os.path.expandvars(os.path.expanduser(configured)))
+    else:
+        path = Path(str(private_key) + ".pub")
+    path = path.resolve()
+    if not path.is_file():
+        raise RuntimeError(
+            "No se encontró la clave pública asociada. Debe existir junto a la privada con extensión .pub "
+            f"o configurarse RUNPOD_SSH_PUBLIC_KEY. Ruta esperada: {path}"
         )
     return path
