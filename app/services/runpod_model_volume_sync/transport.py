@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shlex
@@ -87,16 +88,22 @@ class RsyncSshTransport:
 
     def _copy_private_key_to_wsl(self) -> str:
         try:
-            key_text = self.private_key.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
+            key_bytes = self.private_key.read_bytes()
+        except OSError as exc:
             raise RuntimeError(f"No fue posible leer la clave privada SSH: {self.private_key}") from exc
-        if "PRIVATE KEY" not in key_text:
+
+        # Validate without decoding or normalizing line endings. OpenSSH private
+        # keys are sensitive to CRLF transformations, and subprocess text mode
+        # on Windows can otherwise rewrite LF as CRLF before WSL receives them.
+        if b"PRIVATE KEY" not in key_bytes:
             raise RuntimeError(f"El archivo configurado no parece una clave privada SSH válida: {self.private_key}")
 
         target = f"/tmp/tryon-runpod-key-{os.getpid()}-{uuid.uuid4().hex}"
-        # The target is generated internally and contains only safe characters.
-        script = f"umask 077; cat > {target}; chmod 600 {target}; test -s {target}"
-        self._run(["wsl.exe", "bash", "-lc", script], timeout=30, stdin_text=key_text)
+        encoded_key = base64.b64encode(key_bytes).decode("ascii")
+        # Transfer as base64 text and decode inside WSL so the exact original
+        # bytes reach ssh-keygen/ssh, regardless of Windows newline handling.
+        script = f"umask 077; base64 -d > {target}; chmod 600 {target}; test -s {target}"
+        self._run(["wsl.exe", "bash", "-lc", script], timeout=30, stdin_text=encoded_key)
         probe = self._run(["wsl.exe", "bash", "-lc", f"stat -c '%a %s' {target}"], timeout=15)
         detail = (probe.stdout or "").strip()
         if not detail.startswith("600 "):
