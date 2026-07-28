@@ -38,9 +38,10 @@ def ensure_modal_volume(db: Session = Depends(get_db)):
 
 def _runpod_response(config: RunPodProviderConfig) -> RunPodProviderResponse:
     return RunPodProviderResponse(
-        **{**config.model_dump(), "api_key": "", "s3_secret_key": ""},
+        **{**config.model_dump(), "api_key": "", "s3_secret_key": "", "ghcr_token": ""},
         api_key_configured=bool(config.api_key),
         s3_secret_key_configured=bool(config.s3_secret_key),
+        ghcr_token_configured=bool(config.ghcr_token),
     )
 
 @router.get("/runpod", response_model=RunPodProviderResponse)

@@ -83,7 +83,7 @@ class InfrastructureProviderService:
     @classmethod
     def get_runpod(cls, db: Session): return cls._get_config(db, cls.RUNPOD_KEY, RunPodProviderConfig)
     @classmethod
-    def save_runpod(cls, db: Session, payload): return cls._save_config(db, cls.RUNPOD_KEY, "RunPod Serverless infrastructure provider", payload, ("api_key", "s3_secret_key"))
+    def save_runpod(cls, db: Session, payload): return cls._save_config(db, cls.RUNPOD_KEY, "RunPod Serverless infrastructure provider", payload, ("api_key", "s3_secret_key", "ghcr_token"))
     @classmethod
     def get_beam(cls, db: Session): return cls._get_config(db, cls.BEAM_KEY, BeamProviderConfig)
     @classmethod

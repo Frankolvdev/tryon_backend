@@ -292,6 +292,65 @@ class RuntimeBuildExecutionService:
         RuntimeBuildExecutionService._save_deployment(db, build, deployment)
 
     @staticmethod
+    def _prepare_runpod_registry_image(build, cfg):
+        """Resolve and validate the registry image used only by RunPod deployments.
+
+        GHCR requires a real owner instead of the historical ``your-org`` placeholder.
+        When GHCR_USERNAME is configured, the placeholder is replaced and the already
+        built local image is retagged without rebuilding it.
+        """
+        image_tag = (build.image_tag or "").strip()
+        if not image_tag:
+            raise ValueError("La compilación no tiene una imagen Docker asignada.")
+
+        if image_tag.startswith("ghcr.io/your-org/"):
+            username = (cfg.ghcr_username or "").strip()
+            if not username:
+                raise RuntimeError(
+                    "El deploy de RunPod no puede publicar en ghcr.io/your-org: 'your-org' "
+                    "es un valor provisional. Configura el usuario/organización y token de GHCR en el proveedor RunPod, o cambia 'Imagen del registro' por ghcr.io/<usuario>/<imagen>."
+                )
+            resolved_tag = "ghcr.io/" + username + "/" + image_tag[len("ghcr.io/your-org/"):]
+            retag = subprocess.run(
+                ["docker", "tag", image_tag, resolved_tag],
+                capture_output=True, text=True, timeout=60,
+            )
+            if retag.returncode != 0:
+                raise RuntimeError(
+                    "No fue posible etiquetar la imagen para GHCR: "
+                    + ((retag.stderr or retag.stdout or "error desconocido").strip())
+                )
+            build.image_tag = resolved_tag
+            image_tag = resolved_tag
+
+        return image_tag
+
+    @staticmethod
+    def _login_runpod_registry(image_tag, cfg):
+        """Authenticate for the RunPod image registry without affecting other providers."""
+        registry = image_tag.split("/", 1)[0] if "/" in image_tag else "docker.io"
+        if registry != "ghcr.io":
+            return None
+
+        username = (cfg.ghcr_username or "").strip()
+        token = (cfg.ghcr_token or "").strip()
+        if not username or not token:
+            # Docker may already be authenticated through its credential store. In that
+            # case push is allowed to continue; any denial is converted to a precise error.
+            return None
+
+        login = subprocess.run(
+            ["docker", "login", "ghcr.io", "-u", username, "--password-stdin"],
+            input=token, capture_output=True, text=True, timeout=60,
+        )
+        if login.returncode != 0:
+            raise RuntimeError(
+                "No fue posible iniciar sesión en GHCR para el deploy de RunPod: "
+                + ((login.stderr or login.stdout or "credenciales rechazadas").strip())
+            )
+        return "Autenticación GHCR validada para RunPod."
+
+    @staticmethod
     def _runpod_deployment(db, build, deployment):
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         from app.services.runpod_control_plane_service import runpod_control_plane_service
@@ -299,25 +358,37 @@ class RuntimeBuildExecutionService:
         cfg = InfrastructureProviderService.get_runpod(db)
         if not cfg.enabled or not cfg.api_key:
             raise ValueError("Activa RunPod y configura su API key en Proveedores de infraestructura.")
-        if not build.image_tag:
-            raise ValueError("La compilación no tiene una imagen Docker asignada.")
+        image_tag = RuntimeBuildExecutionService._prepare_runpod_registry_image(build, cfg)
+        login_message = RuntimeBuildExecutionService._login_runpod_registry(image_tag, cfg)
+        db.add(build)
+        db.commit()
 
         RuntimeBuildExecutionService._update_deployment(
             db, build, deployment,
             phase="publishing-image", progress=25,
             message="Publicando imagen Docker.",
-            log=f"[runpod:2/6] Publicando {build.image_tag} en el registro.",
+            log=(
+                (f"[runpod:auth] {login_message}\n" if login_message else "")
+                + f"[runpod:2/6] Publicando {image_tag} en el registro."
+            ),
+            image_tag=image_tag,
             app_name=cfg.endpoint_name,
             volume_name=cfg.network_volume_name,
         )
         if not build.published:
-            pushed = subprocess.run(["docker", "push", build.image_tag], capture_output=True, text=True)
+            pushed = subprocess.run(["docker", "push", image_tag], capture_output=True, text=True)
             RuntimeBuildExecutionService._update_deployment(
                 db, build, deployment,
                 log=(pushed.stdout or "") + (pushed.stderr or ""),
             )
             if pushed.returncode != 0:
-                raise RuntimeError("docker push terminó con error. Inicia sesión en el registro configurado.")
+                output = ((pushed.stderr or "") + "\n" + (pushed.stdout or "")).strip()
+                if "denied" in output.lower() or "unauthorized" in output.lower():
+                    raise RuntimeError(
+                        "GHCR rechazó la publicación del deploy de RunPod. Verifica que "
+                        "el usuario/organización GHCR del proveedor RunPod corresponda al propietario de la imagen y que el token tenga permiso write:packages. Imagen: " + image_tag
+                    )
+                raise RuntimeError("docker push terminó con error: " + (output[-1200:] or "error desconocido"))
             build.published = True
             db.add(build)
             db.commit()

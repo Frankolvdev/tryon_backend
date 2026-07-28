@@ -34,6 +34,8 @@ class RunPodProviderConfig(BaseModel):
     template_id: str = Field(default="", max_length=500, description="Opcional. Déjalo vacío para buscar o crear automáticamente el Template durante el despliegue.")
     template_name: str = Field(default="tryon-generation-runtime", min_length=1, max_length=191)
     registry_auth_id: str = Field(default="", max_length=500, description="Solo es necesario cuando la imagen utiliza un registro Docker privado.")
+    ghcr_username: str = Field(default="", max_length=191, description="Usuario u organización propietaria de la imagen en GitHub Container Registry.")
+    ghcr_token: str = Field(default="", max_length=1000, description="Personal Access Token de GitHub con permisos read:packages y write:packages.")
     network_volume_id: str = Field(default="", max_length=500)
     network_volume_name: str = Field(default="tryon-models", min_length=1, max_length=120)
     network_volume_size_gb: int = Field(default=100, ge=1, le=4000)
@@ -54,8 +56,10 @@ class RunPodProviderConfig(BaseModel):
 class RunPodProviderResponse(RunPodProviderConfig):
     api_key: str = ""
     s3_secret_key: str = ""
+    ghcr_token: str = ""
     api_key_configured: bool = False
     s3_secret_key_configured: bool = False
+    ghcr_token_configured: bool = False
 
 
 class BeamProviderConfig(BaseModel):
