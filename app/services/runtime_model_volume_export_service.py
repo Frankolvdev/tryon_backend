@@ -107,7 +107,13 @@ class RuntimeModelVolumeExportService:
         from boto3 import client as boto3_client
         from boto3.s3.transfer import TransferConfig
         from botocore.config import Config
-        from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
+        from botocore.exceptions import (
+            BotoCoreError,
+            ClientError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            ReadTimeoutError,
+        )
         from app.services.infrastructure_provider_service import InfrastructureProviderService
 
         cfg = InfrastructureProviderService.get_runpod(session)
@@ -120,12 +126,95 @@ class RuntimeModelVolumeExportService:
             raise ValueError("Configura RunPod antes de exportar: " + ", ".join(missing) + ".")
 
         endpoint = f"https://s3api-{data_center.lower()}.runpod.io/"
-        notify("runpod-connecting", 94, f"Conectando con RunPod S3 en {data_center}…")
-        logger.info("RunPod S3 export: connecting endpoint=%s volume=%s", endpoint, volume_id)
+        logger.info("RunPod S3 export: preparing endpoint=%s volume=%s", endpoint, volume_id)
+
+        # Validate connectivity with a dedicated client that fails quickly. The
+        # upload client keeps the more tolerant retry policy needed for large
+        # transfers, but the initial check must never leave the UI showing
+        # "Conectando" for several minutes.
+        notify("runpod-connecting", 94, f"Creando cliente S3 para {data_center}…")
+        validation_client = boto3_client(
+            "s3",
+            endpoint_url=endpoint,
+            region_name=data_center.lower(),
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(
+                retries={"total_max_attempts": 1, "mode": "standard"},
+                s3={"addressing_style": "path"},
+                connect_timeout=8,
+                read_timeout=15,
+                max_pool_connections=2,
+                tcp_keepalive=True,
+            ),
+        )
+
+        validation_started = time.monotonic()
+        try:
+            notify("runpod-connecting", 94, f"Validando credenciales y volumen {volume_id}…")
+            logger.info(
+                "RunPod S3 export: validating endpoint=%s volume=%s connect_timeout=8 read_timeout=15 attempts=1",
+                endpoint,
+                volume_id,
+            )
+            validation_client.list_objects_v2(Bucket=volume_id, MaxKeys=1)
+            logger.info(
+                "RunPod S3 export: validation succeeded endpoint=%s volume=%s elapsed=%.2fs",
+                endpoint,
+                volume_id,
+                time.monotonic() - validation_started,
+            )
+            notify("runpod-connecting", 94, f"Conexión con RunPod S3 confirmada en {data_center}.")
+        except ConnectTimeoutError as exc:
+            elapsed = time.monotonic() - validation_started
+            logger.exception("RunPod S3 export: connect timeout endpoint=%s elapsed=%.2fs", endpoint, elapsed)
+            raise RuntimeError(
+                f"RunPod S3 no respondió al conectar con {endpoint} después de {elapsed:.1f} s. "
+                "Verifica el Data Center ID, DNS, firewall y conexión a Internet."
+            ) from exc
+        except ReadTimeoutError as exc:
+            elapsed = time.monotonic() - validation_started
+            logger.exception("RunPod S3 export: read timeout endpoint=%s elapsed=%.2fs", endpoint, elapsed)
+            raise RuntimeError(
+                f"RunPod S3 aceptó la conexión, pero no respondió al validar el volumen {volume_id} "
+                f"después de {elapsed:.1f} s."
+            ) from exc
+        except EndpointConnectionError as exc:
+            elapsed = time.monotonic() - validation_started
+            logger.exception("RunPod S3 export: endpoint connection error endpoint=%s elapsed=%.2fs", endpoint, elapsed)
+            raise RuntimeError(
+                f"No fue posible conectar con RunPod S3 en {endpoint}. "
+                "Verifica el Data Center ID y que el endpoint sea accesible desde este equipo."
+            ) from exc
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code") or "desconocido")
+            message = str(exc.response.get("Error", {}).get("Message") or exc)
+            status = int(exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") or 0)
+            logger.exception(
+                "RunPod S3 export: validation rejected endpoint=%s volume=%s status=%s code=%s",
+                endpoint,
+                volume_id,
+                status,
+                code,
+            )
+            raise RuntimeError(
+                f"RunPod S3 rechazó la validación del volumen {volume_id} "
+                f"(HTTP {status or 'desconocido'}, {code}): {message}"
+            ) from exc
+        except BotoCoreError as exc:
+            logger.exception("RunPod S3 export: initial validation failed endpoint=%s volume=%s", endpoint, volume_id)
+            raise RuntimeError(f"Falló la validación inicial de RunPod S3: {exc}") from exc
+        finally:
+            try:
+                validation_client.close()
+            except Exception:
+                logger.debug("RunPod S3 export: validation client could not be closed cleanly", exc_info=True)
+
+        notify("runpod-connecting", 94, "Preparando cliente de transferencia de RunPod S3…")
         s3 = boto3_client(
             "s3",
             endpoint_url=endpoint,
-            region_name=data_center,
+            region_name=data_center.lower(),
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             config=Config(
@@ -137,19 +226,6 @@ class RuntimeModelVolumeExportService:
                 tcp_keepalive=True,
             ),
         )
-
-        try:
-            # A bounded request verifies endpoint, credentials, and volume before
-            # a potentially multi-GB upload starts.
-            s3.list_objects_v2(Bucket=volume_id, MaxKeys=1)
-        except EndpointConnectionError as exc:
-            raise RuntimeError(f"No fue posible conectar con RunPod S3 ({endpoint}). Verifica el Data Center ID y tu conexión.") from exc
-        except ClientError as exc:
-            code = str(exc.response.get("Error", {}).get("Code") or "desconocido")
-            message = str(exc.response.get("Error", {}).get("Message") or exc)
-            raise RuntimeError(f"RunPod S3 rechazó la validación del volumen {volume_id} ({code}): {message}") from exc
-        except BotoCoreError as exc:
-            raise RuntimeError(f"Falló la validación inicial de RunPod S3: {exc}") from exc
 
         files = sorted((item for item in models_root.rglob("*") if item.is_file()), key=lambda item: item.relative_to(models_root).as_posix().casefold())
         total_files = len(files)
