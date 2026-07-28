@@ -48,12 +48,14 @@ apt-get update
 apt-get install -y --no-install-recommends openssh-server rsync python3 ca-certificates
 mkdir -p /run/sshd /root/.ssh
 chmod 700 /root/.ssh
-if [ -z "${PUBLIC_KEY:-}" ]; then
-  echo 'PUBLIC_KEY no fue proporcionada' >&2
+KEY_VALUE="${SSH_PUBLIC_KEY:-${PUBLIC_KEY:-}}"
+if [ -z "$KEY_VALUE" ]; then
+  echo 'No se recibió SSH_PUBLIC_KEY/PUBLIC_KEY' >&2
   exit 64
 fi
-printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
+printf '%s\n' "$KEY_VALUE" > /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
+ssh-keygen -A
 printf '%s\n' \
   'PermitRootLogin prohibit-password' \
   'PasswordAuthentication no' \
@@ -76,7 +78,7 @@ exec /usr/sbin/sshd -D -e
             "imageName": settings.pod_image,
             "dockerEntrypoint": [],
             "dockerStartCmd": cls._startup_command(),
-            "env": {"PUBLIC_KEY": public_key},
+            "env": {"PUBLIC_KEY": public_key, "SSH_PUBLIC_KEY": public_key},
             "interruptible": False,
             "locked": False,
             "dataCenterIds": [data_center_id],
