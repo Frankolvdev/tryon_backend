@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -214,7 +215,7 @@ class RunPodServerlessAdapterService:
                     operation="run",
                 ),
                 headers=self._headers(db),
-                json=body,
+                json=jsonable_encoder(body),
             )
 
             response.raise_for_status()

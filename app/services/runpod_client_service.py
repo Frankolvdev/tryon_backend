@@ -1,6 +1,7 @@
 from typing import Any
 
 import httpx
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
 from app.common.enums import IntegrationProvider
@@ -58,7 +59,7 @@ class RunPodClientService:
             response = client.post(
                 url,
                 headers=self._headers(config.api_key),
-                json={"input": input_payload},
+                json=jsonable_encoder({"input": input_payload}),
             )
 
         response.raise_for_status()
