@@ -28,11 +28,42 @@ class RsyncSshTransport:
         self._wsl_key_path: str | None = None
         self._validate_tools()
         if self.mode == "wsl":
-            source = self.path(self.private_key)
-            target = f"/tmp/tryon-runpod-key-{os.getpid()}-{int(time.time() * 1000)}"
-            command = f"install -m 600 -- {shlex.quote(source)} {shlex.quote(target)}"
-            self._run(["wsl.exe", "bash", "-lc", command], timeout=30)
-            self._wsl_key_path = target
+            self._install_wsl_key()
+
+
+    def _install_wsl_key(self) -> str:
+        """Copia la clave a un archivo real dentro del filesystem de WSL.
+
+        No presupone que /tmp sea compartido entre invocaciones. ``mktemp`` devuelve
+        la ruta exacta creada por la distribución WSL que ejecutará ssh/rsync.
+        """
+        source = self.path(self.private_key)
+        command = (
+            "set -e; "
+            "mkdir -p \"$HOME/.ssh\"; chmod 700 \"$HOME/.ssh\"; "
+            "target=$(mktemp \"$HOME/.ssh/tryon-runpod-key.XXXXXX\"); "
+            f"install -m 600 -- {shlex.quote(source)} \"$target\"; "
+            "test -s \"$target\"; printf '%s' \"$target\""
+        )
+        result = self._run(["wsl.exe", "bash", "-lc", command], timeout=30)
+        target = (result.stdout or "").strip()
+        if not target.startswith("/"):
+            raise RuntimeError(f"WSL no devolvió una ruta válida para la clave SSH: {target!r}")
+        self._wsl_key_path = target
+        return target
+
+    def _ensure_wsl_key(self) -> str:
+        if self.mode != "wsl":
+            return str(self.private_key)
+        if self._wsl_key_path:
+            probe = self._run(
+                ["wsl.exe", "bash", "-lc", f"test -s -- {shlex.quote(self._wsl_key_path)}"],
+                timeout=15,
+                check=False,
+            )
+            if probe.returncode == 0:
+                return self._wsl_key_path
+        return self._install_wsl_key()
 
     @staticmethod
     def _creation_flags() -> int:
@@ -122,7 +153,7 @@ class RsyncSshTransport:
             self._wsl_key_path = None
 
     def ssh_options(self, target: SshTarget) -> list[str]:
-        key_path = self._wsl_key_path if self.mode == "wsl" else str(self.private_key)
+        key_path = self._ensure_wsl_key() if self.mode == "wsl" else str(self.private_key)
         if not key_path:
             raise RuntimeError("La copia segura de la clave SSH no está disponible.")
         return [
