@@ -56,8 +56,18 @@ class RuntimeModelVolumeExportService:
                 continue
 
             source = source.resolve()
-            relative = source.relative_to((comfy / "models").resolve())
-            physical_key = relative.as_posix().casefold()
+            # All destinations consume this same normalized target path. The
+            # physical file may live outside ComfyUI/models through
+            # extra_model_paths.yaml, so never call relative_to(models_root)
+            # blindly here.
+            try:
+                from app.services.runtime_import_service import RuntimeImportService
+                roots = RuntimeImportService._configured_model_roots(comfy)
+                logical_path = RuntimeImportService._logical_model_path(source, roots)
+            except Exception:
+                logical_path = str(item.get("target_path") or source.name).replace("\\", "/").lstrip("/")
+            logical_path = logical_path or source.name
+            physical_key = str(source).casefold()
             existing = seen_sources.get(physical_key)
             if existing is not None:
                 references = existing.setdefault("workflow_references", [])
@@ -69,8 +79,8 @@ class RuntimeModelVolumeExportService:
             record.update({
                 "found": True,
                 "source_path": str(source),
-                "relative_path": f"models/{relative.as_posix()}",
-                "target_path": relative.as_posix(),
+                "relative_path": f"models/{logical_path}",
+                "target_path": logical_path,
                 "size_bytes": source.stat().st_size,
             })
             seen_sources[physical_key] = record
@@ -400,7 +410,7 @@ class RuntimeModelVolumeExportService:
                 continue
 
             source = Path(str(item["source_path"]))
-            relative = source.relative_to(comfy / "models")
+            relative = Path(str(item.get("target_path") or source.name).replace("\\", "/").lstrip("/"))
             destination = models_root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -408,7 +418,7 @@ class RuntimeModelVolumeExportService:
             # archivos y subdirectorios de models/sam3. Las demás categorías
             # continúan exportándose modelo por modelo.
             if relative.parts and relative.parts[0].lower() == "sam3" and not sam3_tree_processed:
-                sam3_source = comfy / "models" / relative.parts[0]
+                sam3_source = source.parent if len(relative.parts) == 1 else source.parents[len(relative.parts) - 2]
                 sam3_destination = models_root / relative.parts[0]
                 for tree_source in [path for path in sam3_source.rglob("*") if path.is_file()]:
                     tree_relative = tree_source.relative_to(sam3_source)

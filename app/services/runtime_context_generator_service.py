@@ -44,18 +44,42 @@ class RuntimeContextGeneratorService:
 
     @staticmethod
     def _find_model(comfy: Path, item: dict[str, Any]) -> Path | None:
-        root = comfy / "models"
+        # Prefer the exact path recorded by the shared workflow resolver. This is
+        # required for models loaded through extra_model_paths.yaml (Pinokio,
+        # Stability Matrix, external drives, etc.).
+        source_raw = str(item.get("source_path") or "").strip()
+        if source_raw:
+            source = Path(source_raw).expanduser()
+            if source.is_file():
+                return source.resolve()
+
         target = str(item.get("target_path") or "").replace("\\", "/").lstrip("/")
         name = str(item.get("name") or "").strip()
-        direct = root / target if target else None
-        if direct and direct.is_file():
-            return direct
+        try:
+            from app.services.runtime_import_service import RuntimeImportService
+            roots = RuntimeImportService._configured_model_roots(comfy)
+        except Exception:
+            roots = [("", (comfy / "models").resolve())]
+
+        matches: list[Path] = []
+        target_folded = target.casefold()
         needle = Path(target).name if target else name
-        matches = [
-            path for path in root.rglob("*")
-            if path.is_file() and path.name.lower() == needle.lower()
-        ] if needle else []
-        return matches[0] if len(matches) == 1 else None
+        for prefix, root in roots:
+            if target:
+                candidates = []
+                if prefix and target_folded.startswith(prefix.casefold() + "/"):
+                    candidates.append(root / target[len(prefix) + 1:])
+                candidates.append(root / target)
+                for candidate in candidates:
+                    if candidate.is_file():
+                        matches.append(candidate.resolve())
+            if needle and root.exists():
+                matches.extend(
+                    path.resolve() for path in root.rglob("*")
+                    if path.is_file() and path.name.casefold() == needle.casefold()
+                )
+        unique = list({str(path).casefold(): path for path in matches}.values())
+        return unique[0] if len(unique) == 1 else None
 
     @staticmethod
     def _normalize_node_name(value: str | None) -> str:
