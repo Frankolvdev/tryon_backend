@@ -42,8 +42,11 @@ class RuntimeModelVolumeExportService:
         # This is the final safety boundary shared by every destination.
         seen_sources: dict[str, dict[str, Any]] = {}
         seen_missing: set[str] = set()
-        from app.services.runtime_import_service import RuntimeImportService
-        for item in RuntimeImportService.resolve_runtime_models(config):
+        # Export Runtime and reproducible model-volume export must consume the
+        # model list already analyzed and persisted in the selected profile.
+        # Re-running the workflow resolver here couples export to UI workflow
+        # parsing and can leave the job blocked in the initial progress phase.
+        for item in [model for model in (config.models or []) if model.get("enabled", True)]:
             source = RuntimeContextGeneratorService._find_model(comfy, item)
             record = dict(item)
             if source is None:
