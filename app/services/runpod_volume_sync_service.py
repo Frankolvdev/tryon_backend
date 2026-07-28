@@ -74,10 +74,43 @@ class RunPodVolumeSyncService:
 
     @classmethod
     def _wsl_path(cls, path: Path) -> str:
-        result = cls._run(["wsl.exe", "wslpath", "-a", str(path)], timeout=30)
-        value = (result.stdout or "").strip()
+        """Convierte rutas Windows a WSL sin pasar backslashes por wslpath.
+
+        Algunas combinaciones de Windows/WSL interpretan las barras invertidas
+        como escapes y convierten, por ejemplo, C:\\Users\\frank en
+        C:Usersfrank. La conversión directa evita ese problema.
+        """
+        raw = str(path.resolve())
+        normalized = raw.replace("\\", "/")
+
+        # Ruta local con letra de unidad: C:/Users/... -> /mnt/c/Users/...
+        if len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/":
+            drive = normalized[0].lower()
+            remainder = normalized[3:].lstrip("/")
+            return f"/mnt/{drive}/{remainder}"
+
+        # Si ya es una ruta POSIX/WSL, se conserva.
+        if normalized.startswith("/"):
+            return normalized
+
+        # Las rutas UNC no tienen una traducción universal estable; se intenta
+        # la conversión oficial pasando la ruta por stdin para no perder barras.
+        try:
+            completed = subprocess.run(
+                ["wsl.exe", "bash", "-lc", "read -r p; wslpath -a -u -- \"$p\""],
+                input=raw + "\n",
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise RuntimeError(f"WSL no pudo convertir la ruta: {raw}") from exc
+
+        value = (completed.stdout or "").strip()
         if not value:
-            raise RuntimeError(f"WSL no pudo convertir la ruta: {path}")
+            raise RuntimeError(f"WSL no pudo convertir la ruta: {raw}")
         return value
 
     @classmethod
