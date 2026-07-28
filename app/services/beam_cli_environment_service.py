@@ -28,7 +28,21 @@ class BeamCliEnvironmentService:
         configured = str(os.environ.get("BEAM_PROVIDER_VENV") or "").strip()
         if configured:
             return Path(configured).expanduser().resolve()
-        return cls._project_root() / ".provider_envs" / "beam"
+
+        # El entorno aislado no debe crearse dentro del repositorio: cuando
+        # Uvicorn se ejecuta con --reload, WatchFiles observa cada archivo que
+        # pip instala y reinicia el backend en mitad de la operación.
+        if os.name == "nt":
+            base = Path(
+                os.environ.get("LOCALAPPDATA")
+                or os.environ.get("APPDATA")
+                or Path.home()
+            )
+            return (base / "TryOn" / "provider_envs" / "beam").resolve()
+
+        cache_home = str(os.environ.get("XDG_CACHE_HOME") or "").strip()
+        base = Path(cache_home).expanduser() if cache_home else Path.home() / ".cache"
+        return (base / "tryon" / "provider_envs" / "beam").resolve()
 
     @staticmethod
     def _beam_executable(environment_path: Path) -> Path:
