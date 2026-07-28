@@ -242,10 +242,10 @@ class InfrastructureProviderService:
     def test_beam(cls, db: Session) -> dict:
         import requests
         cfg=cls.get_beam(db)
-        if not cfg.api_key: return {"success":False,"message":"Configura la API key de Beam.","details":{}}
+        if not cfg.api_key: return {"success":False,"message":"Configura el Token de Beam.","details":{}}
         try:
             r=requests.get("https://api.beam.cloud/v2/task/00000000-0000-0000-0000-000000000000/",headers={"Authorization":f"Bearer {cfg.api_key}"},timeout=20)
-            if r.status_code in {401,403}: return {"success":False,"message":"Beam rechazó la API key.","details":{"status_code":r.status_code}}
+            if r.status_code in {401,403}: return {"success":False,"message":"Beam rechazó el Token.","details":{"status_code":r.status_code}}
             return {"success":True,"message":"Credenciales Beam validadas.","details":{"workspace":cfg.workspace,"status_code":r.status_code}}
         except Exception as exc:
             return {"success":False,"message":"No fue posible conectar con Beam.","details":{"error":str(exc)}}
@@ -253,7 +253,7 @@ class InfrastructureProviderService:
     @classmethod
     def ensure_beam_volume(cls, db: Session) -> dict:
         cfg=cls.get_beam(db)
-        if not cfg.api_key: return {"success":False,"message":"Configura la API key de Beam.","details":{}}
+        if not cfg.api_key: return {"success":False,"message":"Configura el Token de Beam.","details":{}}
         from app.services.beam_cli_environment_service import beam_cli_environment_service
         try:
             executable = beam_cli_environment_service.ensure(timeout_seconds=900)
@@ -268,7 +268,7 @@ class InfrastructureProviderService:
         env=os.environ.copy(); env["HOME"]=home; env["USERPROFILE"]=home
         configured=subprocess.run([executable,"configure","default","--token",cfg.api_key],env=env,capture_output=True,text=True,timeout=30)
         if configured.returncode!=0:
-            return {"success":False,"message":"Beam CLI rechazó la API key.","details":{"output":(configured.stdout or configured.stderr or "")[-3000:]}}
+            return {"success":False,"message":"Beam CLI rechazó el Token.","details":{"output":(configured.stdout or configured.stderr or "")[-3000:]}}
         listed=subprocess.run([executable,"volume","list"],env=env,capture_output=True,text=True,timeout=60)
         output=(listed.stdout or listed.stderr or "")
         if cfg.volume_name in output:

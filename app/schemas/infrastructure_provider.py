@@ -73,7 +73,7 @@ class BeamProviderConfig(BaseModel):
     gpu: str = Field(default="L40S", min_length=1, max_length=120)
     cpu: float = Field(default=8.0, ge=0.1, le=128)
     memory_mb: int = Field(default=65536, ge=128, le=1048576)
-    workers: int = Field(default=1, ge=1, le=32)
+    workers: int = Field(default=1, ge=1, le=1000)
     min_containers: int = Field(default=0, ge=0, le=128)
     max_containers: int = Field(default=5, ge=1, le=256)
     tasks_per_container: int = Field(default=1, ge=1, le=64)

@@ -129,11 +129,15 @@ class RunPodFileManagerService:
         paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             keys.extend(str(o["Key"]) for o in page.get("Contents", []))
-        for i in range(0, len(keys), 1000):
-            batch = [{"Key": k} for k in dict.fromkeys(keys[i:i+1000]) if k]
-            if batch:
-                client.delete_objects(Bucket=bucket, Delete={"Objects": batch, "Quiet": True})
-        return {"success": True, "volume": bucket, "path": key}
+        # RunPod's S3-compatible layer can redirect the multi-object DELETE
+        # operation (DeleteObjects) with HTTP 307. Botocore does not safely
+        # replay that request, so delete each object with the standard
+        # DeleteObject operation instead. This is slower but deterministic and
+        # avoids leaving a copied duplicate after rename/move.
+        unique_keys = [item for item in dict.fromkeys(keys) if item]
+        for object_key in unique_keys:
+            client.delete_object(Bucket=bucket, Key=object_key)
+        return {"success": True, "volume": bucket, "path": key, "deleted": len(unique_keys)}
 
     @classmethod
     def transfer(cls, db: Session, source_path: str, destination_path: str, operation: str):
@@ -150,12 +154,26 @@ class RunPodFileManagerService:
                 sources.extend(str(o["Key"]) for o in page.get("Contents", []))
         else:
             sources = [source]
-        for key in sources:
-            suffix = key[len(source):].lstrip("/") if is_dir else ""
-            dest_key = "/".join(x for x in [destination.rstrip("/"), suffix] if x)
-            client.copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": key}, Key=dest_key)
-        if operation == "move":
-            cls.delete_path(db, bucket, source)
+        copied_keys: list[str] = []
+        try:
+            for key in sources:
+                suffix = key[len(source):].lstrip("/") if is_dir else ""
+                dest_key = "/".join(x for x in [destination.rstrip("/"), suffix] if x)
+                client.copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": key}, Key=dest_key)
+                copied_keys.append(dest_key)
+            if operation == "move":
+                cls.delete_path(db, bucket, source)
+        except Exception:
+            # A rename is copy + delete in S3. If deleting the source fails,
+            # remove the newly-created destination objects so the UI does not
+            # leave a misleading duplicate behind.
+            if operation == "move":
+                for copied_key in reversed(copied_keys):
+                    try:
+                        client.delete_object(Bucket=bucket, Key=copied_key)
+                    except Exception:
+                        pass
+            raise
         return {"success": True, "operation": operation, "source_path": source, "destination_path": destination}
 
     @classmethod
