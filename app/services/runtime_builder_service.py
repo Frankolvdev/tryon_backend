@@ -201,9 +201,13 @@ class RuntimeBuilderService:
 
     @staticmethod
     def _is_modal(config: RuntimeBuilderConfig) -> bool:
-        # Compatibilidad con configuraciones anteriores: todavía no existe un
-        # selector visual de proveedor. Modal se detecta por plataforma/notas,
-        # variables de entorno o por la existencia del Volume de modelos.
+        # Los perfiles nuevos declaran el proveedor explícitamente. Esta es la
+        # fuente de verdad y permite múltiples runtimes Modal independientes.
+        provider = str(getattr(config, "provider", "") or "").strip().lower()
+        if provider:
+            return provider == "modal"
+
+        # Compatibilidad exclusiva con perfiles antiguos sin campo provider.
         values = [
             str(getattr(config, "target_platform", "") or ""),
             str(getattr(config, "notes", "") or ""),
@@ -225,8 +229,12 @@ class RuntimeBuilderService:
 
     @staticmethod
     def _models_are_external(config: RuntimeBuilderConfig) -> bool:
-        from app.services.runtime_import_service import RuntimeImportService
-        enabled = RuntimeImportService.resolve_runtime_models(config)
+        # Export Runtime nunca vuelve a resolver el workflow. Consume la lista
+        # persistida del perfil, igual que el flujo Modal original funcional.
+        enabled = [
+            dict(item) for item in (config.models or [])
+            if isinstance(item, dict) and item.get("enabled", True)
+        ]
         if not enabled:
             return False
         external_strategies = {"volume", "external-volume", "external_volume", "mounted"}
@@ -1078,8 +1086,10 @@ class ComfyUIServer:
                 if isinstance(model, dict) and model.get("enabled", True)
             ]
         else:
-            from app.services.runtime_import_service import RuntimeImportService
-            enabled_models = RuntimeImportService.resolve_runtime_models(config)
+            enabled_models = [
+                dict(model) for model in (config.models or [])
+                if isinstance(model, dict) and model.get("enabled", True)
+            ]
         for index, model in enumerate(enabled_models):
             if model.get("strategy") in {"image", "startup-download"} and not model.get("source_url"):
                 issues.append(
@@ -1149,27 +1159,22 @@ class ComfyUIServer:
         config: RuntimeBuilderConfig,
         modal_volume_name: str | None = None,
     ) -> dict:
-        # Modal conserva el flujo estable original: consume la lista de modelos
-        # ya validada y persistida en su configuración. RunPod y Beam continúan
-        # usando el resolvedor actual de forma independiente.
+        # Todos los proveedores comparten el mismo método de exportación y
+        # consumen exclusivamente los modelos persistidos en su propio perfil.
+        # El análisis del workflow es una operación previa e independiente.
         modal_enabled = RuntimeBuilderService._is_modal(config)
-        modal_models = (
-            [dict(model) for model in (config.models or []) if isinstance(model, dict) and model.get("enabled", True)]
-            if modal_enabled
-            else None
-        )
-        validation = RuntimeBuilderService.validate(config, models_override=modal_models)
+        profile_models = [
+            dict(model) for model in (config.models or [])
+            if isinstance(model, dict) and model.get("enabled", True)
+        ]
+        validation = RuntimeBuilderService.validate(config, models_override=profile_models)
         if not validation["valid"]:
             errors = [item["message"] for item in validation["issues"] if item["level"] == "error"]
             raise ValueError("No se puede generar el runtime: " + " | ".join(errors))
 
         nodes = [n for n in RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes) if n.get("enabled", True)]
         deps = [d for d in (config.python_dependencies or []) if d.get("enabled", True)]
-        if modal_models is not None:
-            models = modal_models
-        else:
-            from app.services.runtime_import_service import RuntimeImportService
-            models = RuntimeImportService.resolve_runtime_models(config)
+        models = profile_models
 
         node_lines: list[str] = []
         for node in nodes:

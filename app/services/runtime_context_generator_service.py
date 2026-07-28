@@ -266,17 +266,13 @@ class RuntimeContextGeneratorService:
         nodes_copied = 0
 
         notify("models", 8, "Revisando modelos requeridos por el workflow…")
-        if RuntimeBuilderService._is_modal(config):
-            # Flujo Modal encapsulado y estable: no vuelve a resolver el workflow
-            # durante la exportación. Usa exactamente los modelos persistidos que
-            # ya fueron validados por el botón de análisis.
-            enabled_models = [
-                dict(model) for model in (config.models or [])
-                if isinstance(model, dict) and model.get("enabled", True)
-            ]
-        else:
-            from app.services.runtime_import_service import RuntimeImportService
-            enabled_models = RuntimeImportService.resolve_runtime_models(config)
+        # Contrato del exportador: usa el snapshot persistido del perfil activo.
+        # Modal, RunPod, Beam y Local comparten esta fase; solo cambia la
+        # configuración generada para el proveedor al final.
+        enabled_models = [
+            dict(model) for model in (config.models or [])
+            if isinstance(model, dict) and model.get("enabled", True)
+        ]
         sam3_tree_copied = False
         for index, item in enumerate(enabled_models):
             source = RuntimeContextGeneratorService._find_model(comfy, item)
