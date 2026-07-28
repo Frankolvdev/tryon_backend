@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    from app.services.runpod_model_volume_sync.private_key_inline import (
+        RUNPOD_SSH_PRIVATE_KEY_INLINE,
+        RUNPOD_SSH_PUBLIC_KEY_INLINE,
+    )
+except ImportError:
+    RUNPOD_SSH_PRIVATE_KEY_INLINE = ""
+    RUNPOD_SSH_PUBLIC_KEY_INLINE = ""
 
 
 @dataclass(frozen=True)
@@ -36,7 +46,26 @@ class RunPodModelVolumeSyncSettings:
         )
 
 
+def _materialize_inline_secret(value: str, *, suffix: str) -> Path:
+    normalized = str(value or "").strip().replace("\r\n", "\n") + "\n"
+    target = Path(tempfile.gettempdir()) / f"tryon-runpod-inline-{os.getpid()}{suffix}"
+    target.write_text(normalized, encoding="utf-8", newline="\n")
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+    return target.resolve()
+
+
 def resolve_private_key_path() -> Path:
+    inline = str(RUNPOD_SSH_PRIVATE_KEY_INLINE or "").strip()
+    if inline and "PEGA_AQUI_LA_CLAVE_PRIVADA_COMPLETA" not in inline:
+        if "BEGIN OPENSSH PRIVATE KEY" not in inline:
+            raise RuntimeError(
+                "RUNPOD_SSH_PRIVATE_KEY_INLINE no contiene una clave privada OpenSSH válida."
+            )
+        return _materialize_inline_secret(inline, suffix=".key")
+
     configured = str(os.getenv("RUNPOD_SSH_PRIVATE_KEY") or "").strip()
     if configured:
         path = Path(os.path.expandvars(os.path.expanduser(configured)))
@@ -47,13 +76,22 @@ def resolve_private_key_path() -> Path:
     path = path.resolve()
     if not path.is_file():
         raise RuntimeError(
-            "No se encontró la clave privada SSH de RunPod. Configura RUNPOD_SSH_PRIVATE_KEY "
-            f"o crea la clave esperada en: {path}"
+            "No se encontró la clave privada SSH de RunPod. Pega temporalmente la clave en "
+            "app/services/runpod_model_volume_sync/private_key_inline.py, configura "
+            "RUNPOD_SSH_PRIVATE_KEY o crea una clave SSH local."
         )
     return path
 
 
 def resolve_public_key_path(private_key: Path) -> Path:
+    inline = str(RUNPOD_SSH_PUBLIC_KEY_INLINE or "").strip()
+    if inline and "PEGA_AQUI_LA_CLAVE_PUBLICA_COMPLETA" not in inline:
+        if not inline.startswith(("ssh-", "ecdsa-")):
+            raise RuntimeError(
+                "RUNPOD_SSH_PUBLIC_KEY_INLINE no contiene una clave pública SSH válida."
+            )
+        return _materialize_inline_secret(inline, suffix=".pub")
+
     configured = str(os.getenv("RUNPOD_SSH_PUBLIC_KEY") or "").strip()
     if configured:
         path = Path(os.path.expandvars(os.path.expanduser(configured)))
@@ -62,7 +100,9 @@ def resolve_public_key_path(private_key: Path) -> Path:
     path = path.resolve()
     if not path.is_file():
         raise RuntimeError(
-            "No se encontró la clave pública asociada. Debe existir junto a la privada con extensión .pub "
-            f"o configurarse RUNPOD_SSH_PUBLIC_KEY. Ruta esperada: {path}"
+            "No se encontró la clave pública asociada. Pégala temporalmente en "
+            "app/services/runpod_model_volume_sync/private_key_inline.py o configura "
+            f"RUNPOD_SSH_PUBLIC_KEY. Ruta esperada: {path}"
         )
     return path
+

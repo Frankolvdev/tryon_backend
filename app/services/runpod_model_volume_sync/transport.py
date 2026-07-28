@@ -8,6 +8,7 @@ import shutil
 import socket
 import subprocess
 import time
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +123,14 @@ class RsyncSshTransport:
         if self.mode == "wsl" and self._wsl_key_path:
             self._run(["wsl.exe", "bash", "-lc", f"rm -f {shlex.quote(self._wsl_key_path)}"], timeout=30, check=False)
             self._wsl_key_path = None
+
+        # Borra únicamente los archivos temporales creados desde las constantes inline.
+        for candidate in (self.private_key, self.public_key_path):
+            try:
+                if candidate.name.startswith("tryon-runpod-inline-") and candidate.parent == Path(tempfile.gettempdir()):
+                    candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def path(self, local_path: Path) -> str:
         raw = str(local_path)
