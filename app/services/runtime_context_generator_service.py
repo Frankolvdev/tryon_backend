@@ -225,6 +225,7 @@ class RuntimeContextGeneratorService:
                 "No se encontró runpod_worker/generation_runtime en el backend. "
                 "No se puede exportar un runtime remoto funcional."
             )
+        worker_source = backend_root / "runpod_worker"
         target = output / "runpod_worker" / "generation_runtime"
         shutil.copytree(
             source,
@@ -232,12 +233,27 @@ class RuntimeContextGeneratorService:
             dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
         )
+
+        # RunPod has its own lifecycle wrapper. Modal continues importing the
+        # canonical GenerationRuntime directly, so these files cannot alter
+        # Modal execution or any other provider.
+        for filename in ("handler.py", "runpod_runtime.py", "requirements.txt"):
+            source_file = worker_source / filename
+            if not source_file.is_file():
+                raise RuntimeError(
+                    f"No se encontró runpod_worker/{filename} en el backend. "
+                    "No se puede exportar el runtime de RunPod completo."
+                )
+            destination = output / "runpod_worker" / filename
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_file, destination)
+
         init_file = output / "runpod_worker" / "__init__.py"
         init_file.parent.mkdir(parents=True, exist_ok=True)
         init_file.touch(exist_ok=True)
         return [
             str(path.relative_to(output)).replace("\\", "/")
-            for path in target.rglob("*")
+            for path in (output / "runpod_worker").rglob("*")
             if path.is_file()
         ]
 
