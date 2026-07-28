@@ -265,7 +265,8 @@ class RuntimeContextGeneratorService:
         models_copied = 0
         nodes_copied = 0
 
-        enabled_models = [m for m in (config.models or []) if m.get("enabled", True)]
+        from app.services.runtime_import_service import RuntimeImportService
+        enabled_models = RuntimeImportService.resolve_runtime_models(config)
         sam3_tree_copied = False
         notify("models", 8, "Revisando modelos requeridos por el workflow…")
         for index, item in enumerate(enabled_models):

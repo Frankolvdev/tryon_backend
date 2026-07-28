@@ -302,9 +302,9 @@ class RuntimeImportService:
             field_looks_model = any(h in field_lower for h in MODEL_FIELD_HINTS)
             if RuntimeImportService._looks_like_model(value) or field_looks_model:
                 if not any(r['value']==value for r in refs): refs.append({'value':value,'field':field,'model_type':'other','folders':'','class_type':cls})
-        # `widgets_values` is UI state, not executable workflow input. rgthree
-        # loaders can retain deleted/disabled rows there (including Add Lora),
-        # which creates phantom models. Every provider must analyze only inputs.
+        for value in RuntimeImportService._string_values(node.get('widgets_values')):
+            if RuntimeImportService._looks_like_model(value) and not any(r['value']==value for r in refs):
+                refs.append({'value':value,'field':'widgets_values','model_type':'other','folders':'','class_type':cls})
         return refs
 
     @staticmethod
@@ -339,94 +339,17 @@ class RuntimeImportService:
         ))
 
     @staticmethod
-    def _configured_model_roots(comfy: Path) -> list[tuple[str, Path]]:
-        """Return every ComfyUI model root as (logical_prefix, physical_root).
-
-        The built-in models directory and extra_model_paths.yaml are normalized
-        into the same logical layout. This is the single source of truth used by
-        workflow analysis and every export destination.
-        """
-        roots: list[tuple[str, Path]] = [("", (comfy / "models").resolve())]
-        config_path = comfy / "extra_model_paths.yaml"
-        if config_path.is_file():
-            try:
-                import yaml
-                payload = yaml.safe_load(config_path.read_text(encoding="utf-8", errors="ignore")) or {}
-            except Exception:
-                payload = {}
-            if isinstance(payload, dict):
-                for section in payload.values():
-                    if not isinstance(section, dict):
-                        continue
-                    base_raw = str(section.get("base_path") or "").strip()
-                    if not base_raw:
-                        continue
-                    base = Path(base_raw).expanduser()
-                    if not base.is_absolute():
-                        base = (config_path.parent / base).resolve()
-                    else:
-                        base = base.resolve()
-                    for category, value in section.items():
-                        if category == "base_path" or not isinstance(value, (str, list, tuple)):
-                            continue
-                        values = [value] if isinstance(value, str) else list(value)
-                        for raw in values:
-                            raw_text = str(raw or "").strip()
-                            if not raw_text:
-                                continue
-                            physical = Path(raw_text).expanduser()
-                            if not physical.is_absolute():
-                                physical = (base / physical).resolve()
-                            else:
-                                physical = physical.resolve()
-                            roots.append((str(category).replace("\\", "/").strip("/"), physical))
-        unique: list[tuple[str, Path]] = []
-        seen: set[tuple[str, str]] = set()
-        for prefix, root in roots:
-            key = (prefix.casefold(), str(root).casefold())
-            if key not in seen and root.exists() and root.is_dir():
-                seen.add(key)
-                unique.append((prefix, root))
-        return unique
-
-    @staticmethod
-    def _logical_model_path(file: Path, roots: list[tuple[str, Path]]) -> str:
-        file = file.resolve()
-        candidates: list[tuple[int, str]] = []
-        for prefix, root in roots:
-            try:
-                relative = file.relative_to(root.resolve()).as_posix()
-            except ValueError:
-                continue
-            logical = f"{prefix}/{relative}" if prefix else relative
-            candidates.append((len(root.parts), logical.strip("/")))
-        if not candidates:
-            return file.name
-        return max(candidates, key=lambda item: item[0])[1]
-
-    @staticmethod
-    def _model_index(comfy: Path) -> tuple[dict[str, list[Path]], int, dict[str, str]]:
+    def _model_index(comfy: Path) -> tuple[dict[str, list[Path]], int]:
         index: dict[str, list[Path]] = {}
-        logical_paths: dict[str, str] = {}
         count = 0
-        roots = RuntimeImportService._configured_model_roots(comfy)
-        seen_files: set[str] = set()
-        for _prefix, root in roots:
-            for file in root.rglob('*'):
-                if not file.is_file() or file.suffix.lower() not in MODEL_EXTENSIONS:
-                    continue
-                physical_key = str(file.resolve()).casefold()
-                logical = RuntimeImportService._logical_model_path(file, roots)
-                logical_paths[physical_key] = logical
-                if physical_key not in seen_files:
-                    seen_files.add(physical_key)
-                    count += 1
-                keys = {file.name.casefold(), logical.casefold()}
-                for key in keys:
-                    bucket = index.setdefault(key, [])
-                    if all(str(existing.resolve()).casefold() != physical_key for existing in bucket):
-                        bucket.append(file.resolve())
-        return index, count, logical_paths
+        root = comfy / 'models'
+        if not root.exists(): return index, count
+        for file in root.rglob('*'):
+            if not file.is_file() or file.suffix.lower() not in MODEL_EXTENSIONS: continue
+            count += 1
+            keys = {file.name.lower(), file.relative_to(root).as_posix().lower()}
+            for key in keys: index.setdefault(key, []).append(file)
+        return index, count
 
     @staticmethod
     def _requirements_for_node(folder: Path) -> list[dict[str, Any]]:
@@ -441,102 +364,6 @@ class RuntimeImportService:
                     deps.append({'package': match.group(1), 'version': match.group(2) or None, 'enabled': True,
                                  'source': folder.name})
         return deps
-
-    @staticmethod
-    def resolve_workflow_models(comfy: Path, workflow_nodes: list[dict[str, Any]]) -> dict[str, Any]:
-        """Single model-analysis method for Modal, RunPod and Beam.
-
-        It reads executable node inputs only, resolves them against the same
-        ComfyUI model roots, and returns one record per physical model.
-        Provider-specific code must consume this result and never re-analyze
-        the workflow independently.
-        """
-        reference_records: list[dict[str, str]] = []
-        for node in workflow_nodes:
-            reference_records.extend(RuntimeImportService._model_references_for_node(node))
-
-        unique_refs: dict[tuple[str, str, str], dict[str, str]] = {}
-        for ref in reference_records:
-            key = (
-                ref['value'].replace('\\', '/').strip().casefold(),
-                str(ref['class_type']).casefold(),
-                str(ref['field']).casefold(),
-            )
-            unique_refs[key] = ref
-        reference_records = list(unique_refs.values())
-
-        model_index, total_models, logical_paths = RuntimeImportService._model_index(comfy)
-        missing_models: list[str] = []
-        ambiguous_models: list[str] = []
-        resolved_models: dict[str, dict[str, Any]] = {}
-
-        for ref in reference_records:
-            reference = ref['value']
-            normalized = reference.replace('\\', '/').lstrip('./').casefold()
-            matches = model_index.get(normalized) or model_index.get(Path(normalized).name.casefold()) or []
-            if not matches:
-                matches = [
-                    path
-                    for key, paths in model_index.items()
-                    if key.endswith('/' + normalized) or key.endswith(normalized)
-                    for path in paths
-                ]
-            unique_matches = list(dict.fromkeys(matches))
-            if not unique_matches:
-                missing_models.append(reference)
-                continue
-            if len(unique_matches) > 1:
-                ambiguous_models.append(reference)
-
-            file = unique_matches[0].resolve()
-            rel = logical_paths.get(str(file).casefold()) or file.name
-            top = rel.split('/', 1)[0].casefold()
-            inferred_type = ref['model_type'] if ref['model_type'] != 'other' else MODEL_TYPE_BY_FOLDER.get(top, 'other')
-            physical_key = str(file).casefold()
-            workflow_ref = {
-                'value': reference,
-                'class_type': ref['class_type'],
-                'field': ref['field'],
-                'folders': ref['folders'],
-            }
-
-            existing = resolved_models.get(physical_key)
-            if existing is not None:
-                known = {
-                    (str(item.get('value') or '').replace('\\', '/').casefold(),
-                     str(item.get('class_type') or '').casefold(),
-                     str(item.get('field') or '').casefold())
-                    for item in existing.setdefault('workflow_references', [])
-                }
-                ref_key = (reference.replace('\\', '/').casefold(), str(ref['class_type']).casefold(), str(ref['field']).casefold())
-                if ref_key not in known:
-                    existing['workflow_references'].append(workflow_ref)
-                continue
-
-            resolved_models[physical_key] = {
-                'name': file.name,
-                'model_type': inferred_type,
-                'source_url': None,
-                'target_path': rel,
-                'sha256': None,
-                'strategy': 'volume',
-                'enabled': True,
-                'size_bytes': file.stat().st_size,
-                'source_path': str(file),
-                'workflow_reference': reference,
-                'workflow_references': [workflow_ref],
-                'resolver': {'class_type': ref['class_type'], 'field': ref['field'], 'folders': ref['folders']},
-                'found': True,
-            }
-
-        return {
-            'references': reference_records,
-            'referenced_models': sorted({item['value'] for item in reference_records}),
-            'models': list(resolved_models.values()),
-            'missing_models': missing_models,
-            'ambiguous_models': ambiguous_models,
-            'installed_models': total_models,
-        }
 
     @staticmethod
     def resolve_workflow(path: str, workflow: dict[str, Any]) -> dict[str, Any]:
@@ -657,13 +484,22 @@ class RuntimeImportService:
             if not inferred: node_warnings.append(f'{name}: se detectó localmente, pero no se encontró repositorio.')
             required_nodes.append({'name':name,'repository':inferred or '','commit':node_commit,'enabled':True,'install_requirements':(folder/'requirements.txt').exists() or (folder/'pyproject.toml').exists(),'source_path':str(folder),'confidence':'exact-git' if node_repo else ('inferred-readme' if inferred else 'local-only'),'matched_classes':matched})
             for dep in RuntimeImportService._requirements_for_node(folder): dependencies_by_name.setdefault(dep['package'].lower(),dep)
-        model_resolution=RuntimeImportService.resolve_workflow_models(comfy, workflow_nodes)
-        reference_records=model_resolution['references']
-        referenced=model_resolution['referenced_models']
-        required_models=model_resolution['models']
-        missing_models=model_resolution['missing_models']
-        ambiguous_models=model_resolution['ambiguous_models']
-        total_models=model_resolution['installed_models']
+        reference_records=[]
+        for node in workflow_nodes: reference_records.extend(RuntimeImportService._model_references_for_node(node))
+        unique_refs={}
+        for ref in reference_records: unique_refs[(ref['value'].replace('\\','/').lower(),ref['class_type'],ref['field'])]=ref
+        reference_records=list(unique_refs.values()); referenced=sorted({r['value'] for r in reference_records})
+        model_index,total_models=RuntimeImportService._model_index(comfy); required_models=[]; missing_models=[]; ambiguous_models=[]; models_root=comfy/'models'
+        for ref in reference_records:
+            reference=ref['value']; normalized=reference.replace('\\','/').lstrip('./').lower()
+            matches=model_index.get(normalized) or model_index.get(Path(normalized).name.lower()) or []
+            if not matches: matches=[p for key,paths in model_index.items() if key.endswith('/'+normalized) or key.endswith(normalized) for p in paths]
+            unique=list(dict.fromkeys(matches))
+            if not unique: missing_models.append(reference); continue
+            if len(unique)>1: ambiguous_models.append(reference)
+            file=unique[0]; rel=file.relative_to(models_root).as_posix(); top=rel.split('/',1)[0].lower()
+            inferred_type=ref['model_type'] if ref['model_type']!='other' else MODEL_TYPE_BY_FOLDER.get(top,'other')
+            required_models.append({'name':file.name,'model_type':inferred_type,'source_url':None,'target_path':rel,'sha256':None,'strategy':'volume','enabled':True,'size_bytes':file.stat().st_size,'workflow_reference':reference,'resolver':{'class_type':ref['class_type'],'field':ref['field'],'folders':ref['folders']},'found':True})
         warnings=node_warnings[:]
         if not python.get('python'): warnings.append('No se detectó Python. Se revisaron venv/.venv/env/python_embeded y rutas anidadas de Pinokio.')
         if unresolved_classes: warnings.append(f'{len(unresolved_classes)} clases siguen sin resolver tras consultar ComfyUI, NODE_CLASS_MAPPINGS y reglas conocidas.')
@@ -672,6 +508,22 @@ class RuntimeImportService:
         weighted_ok=(len(class_types)-len(unresolved_classes))+(len(reference_records)-len(set(missing_models)))+sum(bool(python.get(k)) for k in ('python','torch','cuda','gpu'))
         score=max(0,min(100,round(weighted_ok/weighted_total*100)))
         return {'source_type':source,'selected_path':str(selected),'comfyui_path':str(comfy),'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),'torch_cuda_version':python.get('cuda'),'gpu_name':python.get('gpu'),'python_candidates':python.get('candidate_attempts',[]),'workflow':{'node_count':len(workflow_nodes),'class_types':class_types,'referenced_models':referenced},'resolved_classes':resolved_classes,'core_classes':[r['class_type'] for r in resolved_classes if r['provider']=='core'],'custom_nodes':required_nodes,'models':required_models,'python_dependencies':list(dependencies_by_name.values()),'environment_variables':[],'volumes':[{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],'unresolved_classes':unresolved_classes,'missing_models':sorted(set(missing_models)),'ambiguous_models':sorted(set(ambiguous_models)),'warnings':warnings,'summary':{'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),'core_classes':sum(1 for r in resolved_classes if r['provider']=='core'),'resolved_custom_classes':sum(1 for r in resolved_classes if r['provider']=='custom'),'required_custom_nodes':len(required_nodes),'required_models':len(required_models),'referenced_models':len(reference_records),'missing_models':len(set(missing_models)),'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),'installed_custom_nodes':len(folders),'installed_models':total_models,'runtime_catalog_classes':max(0,len(runtime_catalog)-int('__error__' in runtime_catalog)),'knowledge_base_rules':len(MODEL_INPUT_RULES),'intelligence_index_classes':int(intelligence_summary.get('classes') or 0),'intelligence_index_providers':int(intelligence_summary.get('providers') or 0),'alias_resolved_classes':sum(1 for r in resolved_classes if r.get('confidence')=='alias-resolver'),'compatibility_score':score}}
+
+    @staticmethod
+    def resolve_runtime_models(config: Any) -> list[dict[str, Any]]:
+        """Resolve models for this runtime's current workflow without shared state.
+
+        This intentionally calls the exact workflow resolver used by Modal. The
+        result is local to the current operation and is never copied from another
+        runtime or workflow. Legacy config.models is only a fallback when the
+        runtime has no workflow attached yet.
+        """
+        path = str(getattr(config, "source_comfyui_path", None) or "").strip()
+        workflow = getattr(config, "workflow_json", None)
+        if path and isinstance(workflow, dict) and workflow:
+            report = RuntimeImportService.resolve_workflow(path, workflow)
+            return [dict(item) for item in (report.get("models") or []) if item.get("enabled", True)]
+        return [dict(item) for item in (getattr(config, "models", None) or []) if item.get("enabled", True)]
 
     @staticmethod
     def scan_path(path: str, include_all_models: bool = True) -> dict[str, Any]:
@@ -685,7 +537,7 @@ class RuntimeImportService:
             node_repo,node_commit=RuntimeImportService._git_info(folder); inferred=node_repo or RuntimeImportService._infer_repo(folder)
             nodes.append({'name':folder.name,'repository':inferred or '','commit':node_commit,'enabled':True,
                           'install_requirements':(folder/'requirements.txt').exists(),'source_path':str(folder)})
-        index,total,_logical_paths=RuntimeImportService._model_index(comfy)
+        index,total=RuntimeImportService._model_index(comfy)
         return {'source_type':source,'selected_path':str(Path(path).resolve()),'comfyui_path':str(comfy),
                 'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,
                 'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),

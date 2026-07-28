@@ -225,7 +225,8 @@ class RuntimeBuilderService:
 
     @staticmethod
     def _models_are_external(config: RuntimeBuilderConfig) -> bool:
-        enabled = [item for item in (config.models or []) if item.get("enabled", True)]
+        from app.services.runtime_import_service import RuntimeImportService
+        enabled = RuntimeImportService.resolve_runtime_models(config)
         if not enabled:
             return False
         external_strategies = {"volume", "external-volume", "external_volume", "mounted"}
@@ -1068,7 +1069,8 @@ class ComfyUIServer:
                     )
                 )
 
-        enabled_models = [item for item in (config.models or []) if item.get("enabled", True)]
+        from app.services.runtime_import_service import RuntimeImportService
+        enabled_models = RuntimeImportService.resolve_runtime_models(config)
         for index, model in enumerate(enabled_models):
             if model.get("strategy") in {"image", "startup-download"} and not model.get("source_url"):
                 issues.append(
@@ -1145,7 +1147,8 @@ class ComfyUIServer:
 
         nodes = [n for n in RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes) if n.get("enabled", True)]
         deps = [d for d in (config.python_dependencies or []) if d.get("enabled", True)]
-        models = [m for m in (config.models or []) if m.get("enabled", True)]
+        from app.services.runtime_import_service import RuntimeImportService
+        models = RuntimeImportService.resolve_runtime_models(config)
 
         node_lines: list[str] = []
         for node in nodes:

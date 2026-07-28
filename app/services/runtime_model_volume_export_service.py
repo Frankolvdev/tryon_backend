@@ -42,7 +42,8 @@ class RuntimeModelVolumeExportService:
         # This is the final safety boundary shared by every destination.
         seen_sources: dict[str, dict[str, Any]] = {}
         seen_missing: set[str] = set()
-        for item in [m for m in (config.models or []) if m.get("enabled", True)]:
+        from app.services.runtime_import_service import RuntimeImportService
+        for item in RuntimeImportService.resolve_runtime_models(config):
             source = RuntimeContextGeneratorService._find_model(comfy, item)
             record = dict(item)
             if source is None:
