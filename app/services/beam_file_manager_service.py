@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -59,7 +60,15 @@ class BeamFileManagerService:
         executable = beam_cli_environment_service.ensure(timeout_seconds=30)
         home = tempfile.mkdtemp(prefix="tryon-beam-file-manager-")
         env = os.environ.copy()
-        env.update({"HOME": home, "USERPROFILE": home})
+        env.update({
+            "HOME": home,
+            "USERPROFILE": home,
+            # Evita que Rich/Beam recorte nombres largos cuando stdout está capturado.
+            "COLUMNS": "500",
+            "TERM": "dumb",
+            "NO_COLOR": "1",
+            "FORCE_COLOR": "0",
+        })
         try:
             auth = beam_credentials_service.configure_cli(
                 executable=executable,
@@ -76,32 +85,59 @@ class BeamFileManagerService:
     def _run(cls, db: Session, args: list[str], timeout: int = 3600):
         cfg, executable, env, home = cls._env(db)
         try:
-            try:
-                completed = subprocess.run(
-                    [executable, *args],
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=max(10, int(timeout)),
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise BeamFileManagerError(
-                    f"Beam CLI excedió {max(10, int(timeout))} segundos ejecutando: "
-                    + " ".join(args)
-                ) from exc
-
-            output = "\n".join(
-                part.strip()
-                for part in (completed.stdout, completed.stderr)
-                if part and part.strip()
+            transient_markers = (
+                "unable to connect to gateway",
+                "connection lost",
+                "reconnecting",
+                "connection reset",
+                "temporarily unavailable",
+                "deadline exceeded",
             )
-            if completed.returncode != 0:
-                raise BeamFileManagerError(
-                    (output or "Beam CLI terminó con error")[-6000:]
+            attempts = 3 if args and args[0] in {"cp", "ls", "mv", "rm"} else 1
+            last_output = ""
+            for attempt in range(1, attempts + 1):
+                try:
+                    completed = subprocess.run(
+                        [executable, *args],
+                        env=env,
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                        errors="replace",
+                        timeout=max(10, int(timeout)),
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise BeamFileManagerError(
+                        f"Beam CLI excedió {max(10, int(timeout))} segundos ejecutando: "
+                        + " ".join(args)
+                    ) from exc
+
+                output = "\n".join(
+                    part.strip()
+                    for part in (completed.stdout, completed.stderr)
+                    if part and part.strip()
                 )
-            return cfg, output
+                last_output = output
+                if completed.returncode == 0:
+                    return cfg, output
+
+                lowered = output.casefold()
+                is_transient = any(marker in lowered for marker in transient_markers)
+                if not is_transient or attempt >= attempts:
+                    break
+                time.sleep(2 if attempt == 1 else 5)
+
+            lowered = last_output.casefold()
+            if "unable to connect to gateway" in lowered or "connection lost" in lowered:
+                raise BeamFileManagerError(
+                    "Beam perdió la conexión con su gateway después de 3 intentos. "
+                    "Actualiza beam-client en el mismo venv del backend con: "
+                    "pip install --upgrade beam-client. Detalle: "
+                    + (last_output or "Beam CLI terminó con error")[-5000:]
+                )
+            raise BeamFileManagerError(
+                (last_output or "Beam CLI terminó con error")[-6000:]
+            )
         finally:
             shutil.rmtree(home, ignore_errors=True)
 

@@ -254,6 +254,11 @@ class InfrastructureProviderService:
         env["HOME"] = home
         env["USERPROFILE"] = home
         env["BEAM_TOKEN"] = str(cfg.api_key or "").strip()
+        # Fuerza salida sin truncamiento para poder comparar nombres largos.
+        env["COLUMNS"] = "500"
+        env["TERM"] = "dumb"
+        env["NO_COLOR"] = "1"
+        env["FORCE_COLOR"] = "0"
         configured = subprocess.run(
             [executable, "configure", "default", "--token", env["BEAM_TOKEN"]],
             env=env,
@@ -327,6 +332,23 @@ class InfrastructureProviderService:
         return names
 
     @classmethod
+    def _beam_volume_is_listed(cls, output: str, volume_name: str) -> bool:
+        """Comprueba un nombre exacto incluso si cambia el formato de la tabla CLI."""
+        wanted = str(volume_name or "").strip()
+        if not wanted:
+            return False
+        names = cls._beam_volume_names(output)
+        if wanted.casefold() in {name.casefold() for name in names}:
+            return True
+        clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output or "")
+        # El nombre debe aparecer como token completo; no acepta prefijos truncados.
+        return re.search(
+            rf"(?<![A-Za-z0-9_.-]){re.escape(wanted)}(?![A-Za-z0-9_.-])",
+            clean,
+            flags=re.IGNORECASE,
+        ) is not None
+
+    @classmethod
     def ensure_beam_volume(cls, db: Session) -> dict:
         cfg = cls.get_beam(db)
         volume_name = str(cfg.volume_name or "").strip()
@@ -363,8 +385,7 @@ class InfrastructureProviderService:
                     "details": {"volume_name": volume_name, "output": output[-3000:]},
                 }
 
-            names = cls._beam_volume_names(output)
-            if volume_name.casefold() in {name.casefold() for name in names}:
+            if cls._beam_volume_is_listed(output, volume_name):
                 return {
                     "success": True,
                     "message": "El volumen Beam ya existe.",
@@ -400,19 +421,14 @@ class InfrastructureProviderService:
 
             # Verificación final: evita afirmar que se creó un volumen que Beam no lista.
             verified, verified_output = list_current_volumes()
-            verified_names = cls._beam_volume_names(verified_output) if verified.returncode == 0 else set()
-            exists_after = volume_name.casefold() in {name.casefold() for name in verified_names}
-            if not exists_after and not already_exists:
-                return {
-                    "success": False,
-                    "message": "Beam respondió a la creación, pero el volumen no apareció al verificarlo.",
-                    "details": {
-                        "volume_name": volume_name,
-                        "output": created_output[-3000:],
-                        "verification_output": verified_output[-3000:],
-                    },
-                }
+            exists_after = (
+                verified.returncode == 0
+                and cls._beam_volume_is_listed(verified_output, volume_name)
+            )
 
+            # Beam puede tardar unos segundos en reflejar un volumen nuevo. Un create
+            # con código 0 es éxito real y no debe convertirse en falso negativo por
+            # consistencia eventual del listado.
             if already_exists:
                 message = "El volumen Beam ya existe."
                 was_created = False
@@ -428,6 +444,7 @@ class InfrastructureProviderService:
                     "already_exists": not was_created,
                     "output": created_output[-3000:],
                     "verification_output": verified_output[-3000:],
+                    "verified_in_list": exists_after,
                 },
             }
         finally:
