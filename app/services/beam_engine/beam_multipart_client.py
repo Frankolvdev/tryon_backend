@@ -112,9 +112,20 @@ class BeamMultipartClient:
     def upload_file(cls, config: BeamSyncConfig, source: Path, destination: str, on_line: LineCallback) -> None:
         cls.patch_windows_sdk()
         normalized_destination = destination.replace("\\", "/")
+        process_env = dict(config.env)
+        # Beam/Rich suppresses dynamic progress when stdout/stderr are pipes.
+        # These variables force terminal rendering while keeping the process
+        # non-interactive and capturable by the backend.
+        process_env.setdefault("PYTHONUNBUFFERED", "1")
+        process_env.setdefault("PYTHONIOENCODING", "utf-8")
+        process_env.setdefault("FORCE_COLOR", "1")
+        process_env.setdefault("CLICOLOR_FORCE", "1")
+        process_env.setdefault("TERM", "xterm-256color")
+        process_env.setdefault("COLUMNS", "140")
+
         process = subprocess.Popen(
             [config.executable, "cp", "--multipart", str(source), normalized_destination],
-            env=config.env,
+            env=process_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -134,6 +145,13 @@ class BeamMultipartClient:
             reader.start()
 
         last_emit = 0.0
+        last_metrics: dict[str, Any] = {
+            "native_line": "Preparando transferencia multipart…",
+            "file_progress": 0.0,
+            "file_bytes_sent": 0,
+            "speed_bps": 0,
+            "eta_seconds": 0,
+        }
         captured: list[str] = []
         try:
             while process.poll() is None or any(reader.is_alive() for reader in readers) or not output.empty():
@@ -147,17 +165,13 @@ class BeamMultipartClient:
                     # multipart before its first native progress frame.
                     now = time.perf_counter()
                     if now - last_emit >= 1.0:
-                        on_line(
-                            "Beam multipart activo; esperando métricas de transferencia…",
-                            {
-                                "native_line": "Beam multipart activo; esperando métricas de transferencia…",
-                                "file_progress": 0.0,
-                                "file_bytes_sent": 0,
-                                "speed_bps": 0,
-                                "eta_seconds": 0,
-                                "elapsed_seconds": round(now - started, 1),
-                            },
+                        heartbeat = dict(last_metrics)
+                        heartbeat["elapsed_seconds"] = round(now - started, 1)
+                        heartbeat["native_line"] = str(
+                            last_metrics.get("native_line")
+                            or "Beam multipart activo; esperando métricas de transferencia…"
                         )
+                        on_line(heartbeat["native_line"], heartbeat)
                         last_emit = now
                     continue
                 clean = cls.ANSI.sub("", line).strip()
@@ -165,7 +179,21 @@ class BeamMultipartClient:
                     continue
                 captured.append(clean)
                 metrics = cls._metrics(clean, source.stat().st_size, started)
-                on_line(clean, metrics)
+                # Do not let informational Beam lines erase a previously parsed
+                # progress frame. Only replace numeric transfer values when the
+                # new line actually contains them.
+                has_progress = bool(cls.PERCENT.search(clean) or cls.SIZE.search(clean))
+                has_speed = bool(cls.SPEED.search(clean))
+                if has_progress:
+                    last_metrics.update(metrics)
+                else:
+                    last_metrics["native_line"] = clean
+                    if has_speed:
+                        last_metrics["speed_bps"] = metrics["speed_bps"]
+                        sent = int(last_metrics.get("file_bytes_sent") or 0)
+                        speed = int(last_metrics.get("speed_bps") or 0)
+                        last_metrics["eta_seconds"] = int((source.stat().st_size - sent) / speed) if speed else 0
+                on_line(clean, dict(last_metrics))
                 last_emit = time.perf_counter()
 
             code = process.wait()
