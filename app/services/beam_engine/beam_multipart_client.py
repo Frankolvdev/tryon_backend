@@ -318,13 +318,14 @@ class BeamMultipartClient:
                             timeout=0.5,
                             return_when=FIRST_COMPLETED,
                         )
-                        if not done:
-                            emit(None)
-                            continue
-                        for future in done:
-                            active_futures.pop(future, None)
-                            completed_parts.append(future.result())
+                        if done:
+                            for future in done:
+                                active_futures.pop(future, None)
+                                completed_parts.append(future.result())
 
+                        # La adaptación debe evaluarse por tiempo real, no solamente
+                        # cuando termina una parte. Esto permite aumentar concurrencia
+                        # durante partes grandes que pueden tardar varios minutos.
                         now = time.perf_counter()
                         probe_elapsed = now - last_probe_at
                         if probe_elapsed >= config.adaptive_probe_seconds:
@@ -349,6 +350,8 @@ class BeamMultipartClient:
                             emit(None, force=True)
 
                         fill_slots(pool)
+                        if not done:
+                            emit(None)
                 completed_parts.sort(key=lambda part: int(part.number))
                 ensure_not_cancelled()
                 completed = client.volume.complete_multipart_upload(
