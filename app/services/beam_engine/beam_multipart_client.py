@@ -54,27 +54,52 @@ class BeamMultipartClient:
 
     @staticmethod
     def _transfer_plan(file_size: int, config: BeamSyncConfig) -> tuple[int, int]:
-        """Plan multipart optimizado para modelos grandes.
+        """Calcula un tamaño de parte adaptativo antes de subir cada archivo.
 
-        Reduce el overhead HTTP usando bloques mayores a medida que crece el
-        archivo, sin perder el paralelismo necesario para saturar la conexión.
+        Busca aproximadamente dos partes por worker máximo para que la
+        concurrencia adaptativa tenga suficiente trabajo disponible, evitando
+        a la vez partes excesivamente pequeñas y demasiadas peticiones HTTP.
         """
-        gib = 1024 * _MIB
-        if file_size <= 64 * _MIB:
-            return max(1, file_size), 1
-        if file_size < 2 * gib:
-            adaptive = 128 * _MIB
-        elif file_size < 10 * gib:
-            adaptive = 256 * _MIB
-        elif file_size < 40 * gib:
-            adaptive = 512 * _MIB
-        else:
-            adaptive = 1024 * _MIB
+        if file_size <= 0:
+            return 1, 1
 
-        configured = max(64, int(config.multipart_part_size_mb)) * _MIB
-        chunk_size = min(file_size, max(configured, adaptive))
+        max_workers = max(1, min(int(config.multipart_workers), 12))
+        initial_workers = max(1, min(int(config.adaptive_initial_workers), max_workers))
+        target_parts = max(initial_workers * 2, max_workers * 2)
+
+        min_part_size = 32 * _MIB
+        max_part_size = 512 * _MIB
+        max_parts = 1000
+        allowed_part_sizes = (
+            32 * _MIB,
+            64 * _MIB,
+            128 * _MIB,
+            256 * _MIB,
+            512 * _MIB,
+        )
+
+        # Los archivos pequeños no necesitan multipart artificial.
+        if file_size <= min_part_size:
+            return file_size, 1
+
+        calculated = math.ceil(file_size / target_parts)
+        calculated = max(min_part_size, calculated)
+
+        # Redondea hacia arriba al siguiente tamaño permitido.
+        chunk_size = next(
+            (size for size in allowed_part_sizes if size >= calculated),
+            max_part_size,
+        )
+
+        # Evita superar MAX_PARTS en archivos excepcionalmente grandes.
+        minimum_for_part_limit = math.ceil(file_size / max_parts)
+        if minimum_for_part_limit > chunk_size:
+            alignment = min_part_size
+            chunk_size = math.ceil(minimum_for_part_limit / alignment) * alignment
+
+        chunk_size = min(file_size, chunk_size)
         parts_total = max(1, math.ceil(file_size / chunk_size))
-        workers = max(1, min(int(config.multipart_workers), 12, parts_total))
+        workers = max(1, min(max_workers, parts_total))
         return chunk_size, workers
 
     @classmethod
