@@ -189,12 +189,21 @@ class BeamModelSyncService:
                             if file_speed_bps > 0
                             else ""
                         )
+                        adaptive_workers = max(1, int(details.get("adaptive_concurrency") or 1))
+                        maximum_workers = max(
+                            adaptive_workers,
+                            int(details.get("multipart_workers") or adaptive_workers),
+                        )
+                        workers_text = (
+                            f" — workers {adaptive_workers}/{maximum_workers}"
+                        )
                         message = (
                             f"Subiendo {item.relative_path}"
                             f" — {human_bytes(file_sent)} / {human_bytes(item.size_bytes)}"
                             f" — archivo {index} de {len(items)}"
                             f" — {float(details.get('file_progress') or 0):.2f}%"
                             f"{speed_text}"
+                            f"{workers_text}"
                         )
                         notify(
                             "beam-uploading",
