@@ -17,11 +17,20 @@ class BeamSyncConfig:
     @classmethod
     def load(cls, db: Session) -> "BeamSyncConfig":
         provider, executable, env, _home = BeamFileManagerService._env(db)
-        volume = BeamFileManagerService._volume_name(provider, str(provider.get("volume_name") or ""))
+        volume = BeamFileManagerService._volume_name(
+            provider,
+            str(getattr(provider, "volume_name", "") or ""),
+        )
         return cls(
             volume_name=volume,
             executable=str(executable),
             env=dict(env),
-            timeout_seconds=max(60, int(provider.get("timeout_seconds") or 86400)),
-            retries=3,
+            timeout_seconds=max(
+                60,
+                int(getattr(provider, "timeout_seconds", 86400) or 86400),
+            ),
+            retries=max(
+                1,
+                int(getattr(provider, "retries", 3) or 3),
+            ),
         )
