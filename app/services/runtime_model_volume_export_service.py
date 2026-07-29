@@ -137,42 +137,25 @@ class RuntimeModelVolumeExportService:
         notify: ProgressCallback,
         logical_models: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Exportador Beam V2, aislado de Modal, RunPod y Docker.
-
-        La barra principal representa archivos/bytes físicos ya procesados. El
-        texto conserva también el total de modelos lógicos del manifiesto para
-        evitar mezclar ambos conceptos. "Omitir existentes" consulta una sola
-        vez cada carpeta remota y excluye archivos antes de transferirlos.
-        """
+        """Beam Upload Engine V3, completamente aislado de otros proveedores."""
         from app.services.infrastructure_provider_service import InfrastructureProviderService
-        from app.services.beam_file_manager_service import BeamFileManagerService
+        from app.services.beam_upload_engine_v3_service import BeamUploadEngineV3Service
 
         cfg = InfrastructureProviderService.get_beam(session)
         volume_name = str(cfg.volume_name or "").strip()
         if not volume_name:
             raise ValueError("Configura el nombre del volumen Beam antes de exportar.")
 
-        files = sorted(path for path in models_root.rglob("*") if path.is_file())
-        bytes_total = sum(path.stat().st_size for path in files)
-        prefix = remote_path.replace("\\", "/").strip("/")
-        upload_items: list[tuple[Path, str]] = []
-        for path in files:
-            relative = path.relative_to(models_root).as_posix()
-            destination = "/".join(part for part in (prefix, relative) if part)
-            upload_items.append((path, destination))
-
-        logical_paths: list[str] = []
-        for item in logical_models:
-            if not item.get("found", True):
-                continue
-            target = str(item.get("target_path") or "").replace("\\", "/").strip("/")
-            if target and target not in logical_paths:
-                logical_paths.append(target)
-        logical_total = len(logical_paths)
-        physical_total = len(upload_items)
-        transfer_started = time.perf_counter()
+        physical_files = sorted(path for path in models_root.rglob("*") if path.is_file())
+        physical_total = len(physical_files)
+        bytes_total = sum(path.stat().st_size for path in physical_files)
+        logical_total = len({
+            str(item.get("target_path") or "").replace("\\", "/").strip("/")
+            for item in logical_models
+            if item.get("found", True) and item.get("target_path")
+        })
         latest_percent = 94
-        last_confirmed_speed = 0.0
+        started = time.perf_counter()
 
         def human_bytes(value: int) -> str:
             amount = float(max(0, value))
@@ -183,124 +166,112 @@ class RuntimeModelVolumeExportService:
             return f"{amount:.1f} TB"
 
         notify(
-            "beam-inventory",
+            "beam-v3-inventory",
             94,
-            (
-                f"Beam: preparando {physical_total} archivo{'s' if physical_total != 1 else ''} "
-                f"({logical_total} modelo{'s' if logical_total != 1 else ''} lógicos). "
-                + ("Se omitirán los archivos que ya existan." if not overwrite else "Se sobrescribirán los destinos existentes.")
-            ),
+            f"Beam V3: inventariando {physical_total} archivos físicos ({logical_total} modelos lógicos), "
+            f"{human_bytes(bytes_total)} en total.",
         )
 
         def on_progress(event: dict[str, Any]) -> None:
-            nonlocal latest_percent, last_confirmed_speed
+            nonlocal latest_percent
             phase = str(event.get("phase") or "uploading")
-            current = int(event.get("current") or 0)
+            processed = int(event.get("files_processed") or 0)
             total = max(1, int(event.get("total") or physical_total or 1))
             processed_bytes = int(event.get("bytes_processed") or 0)
-            uploaded_bytes = int(event.get("bytes_uploaded") or 0)
             total_bytes_event = max(1, int(event.get("bytes_total") or bytes_total or 1))
-            skipped = int(event.get("files_skipped") or 0)
+            file_bytes = int(event.get("file_bytes_transferred") or 0)
+            file_size = int(event.get("file_size") or event.get("file_bytes_total") or 0)
+            active_total = processed_bytes + min(file_bytes, file_size)
+            ratio = min(1.0, max(processed / total, active_total / total_bytes_event))
+            latest_percent = max(latest_percent, min(99, 94 + int(5 * ratio)))
+
             remote = str(event.get("remote") or "").replace("\\", "/")
-
-            # Los bytes completados son la medida principal; para archivos vacíos
-            # o inventario se conserva el avance por cantidad de archivos.
-            ratio_bytes = processed_bytes / total_bytes_event
-            ratio_files = current / total
-            ratio = max(ratio_bytes, ratio_files if total_bytes_event <= 1 else 0.0)
-            percent = 94 + int(5 * min(1.0, max(0.0, ratio)))
-            latest_percent = max(latest_percent, min(99, percent))
-
-            elapsed = max(0.001, time.perf_counter() - transfer_started)
-            # Beam CLI no expone progreso de bytes mientras un archivo sigue en
-            # transferencia. ``bytes_uploaded`` aumenta únicamente cuando un
-            # ``beam cp`` termina. Por eso nunca presentamos 0 B/s como si fuera
-            # una medición real: hasta completar el primer archivo la velocidad
-            # todavía no está disponible. Después mostramos una media confirmada
-            # basada solo en bytes efectivamente terminados, nunca en omitidos.
-            if uploaded_bytes > 0:
-                last_confirmed_speed = uploaded_bytes / elapsed
-            filename = remote.rsplit("/", 1)[-1] if remote else ""
-            uploaded_files = int(event.get("files_uploaded") or 0)
+            name = str(event.get("file_name") or (remote.rsplit("/", 1)[-1] if remote else ""))
+            uploaded = int(event.get("files_uploaded") or 0)
+            skipped = int(event.get("files_skipped") or 0)
+            speed = int(event.get("speed_bps") or 0)
+            native = str(event.get("native_line") or "").strip()
 
             if phase == "inventory":
-                message = f"Beam: comprobando archivos existentes en el volumen {volume_name}…"
-            elif phase == "skipping":
                 message = (
-                    f"Beam: {current}/{total} archivos procesados · {skipped} omitidos · "
-                    f"ya existía: {filename}"
+                    f"Beam V3: comprobando el volumen {volume_name}; no se ocultará ningún archivo de la transferencia. "
+                    f"CLI detectada: {event.get('cli_version') or 'desconocida'}"
                 )
+            elif phase == "file-skipped":
+                message = (
+                    f"Beam V3: OMITIDO {processed}/{total} · {name} · {human_bytes(file_size)} · "
+                    f"ya existe en el volumen ({skipped} omitidos)."
+                )
+            elif phase == "file-start":
+                message = (
+                    f"Beam V3: INICIANDO {processed + 1}/{total} · archivo: {name} · "
+                    f"peso: {human_bytes(file_size)} · destino: {remote}"
+                )
+            elif phase == "file-progress":
+                message = (
+                    f"Beam V3: SUBIENDO {processed + 1}/{total} · archivo: {name} · "
+                    f"{human_bytes(file_bytes)} de {human_bytes(file_size)}"
+                )
+                if speed > 0:
+                    message += f" · {human_bytes(speed)}/s"
+                if native:
+                    message += f" · Beam CLI: {native[-300:]}"
+            elif phase == "file-fallback":
+                message = f"Beam V3: compatibilidad CLI para {name}: {event.get('detail', '')}"
+            elif phase == "file-completed":
+                elapsed = max(0.001, time.perf_counter() - started)
+                average = int(int(event.get("bytes_uploaded") or 0) / elapsed)
+                message = (
+                    f"Beam V3: COMPLETADO {processed}/{total} · {name} · {human_bytes(file_size)} · "
+                    f"{uploaded} subidos · {skipped} omitidos"
+                )
+                if average > 0:
+                    message += f" · media global {human_bytes(average)}/s"
             elif phase == "completed":
                 message = (
-                    f"Beam completado: {current}/{total} archivos procesados · "
-                    f"{human_bytes(processed_bytes)} de {human_bytes(total_bytes_event)} · "
-                    f"{uploaded_files} subidos · {skipped} omitidos."
+                    f"Beam V3 completado: {uploaded} archivos subidos, {skipped} omitidos, "
+                    f"{human_bytes(int(event.get('bytes_uploaded') or 0))} transferidos."
                 )
             else:
-                message = (
-                    f"Beam: {current}/{total} archivos · {human_bytes(processed_bytes)} de "
-                    f"{human_bytes(total_bytes_event)}"
-                )
-                if skipped:
-                    message += f" · {skipped} omitidos"
-                if last_confirmed_speed > 0:
-                    message += f" · velocidad media confirmada: {human_bytes(int(last_confirmed_speed))}/s"
-                elif current < total:
-                    message += " · subiendo; velocidad disponible al completar el primer archivo"
-                if filename:
-                    message += f" · último completado: {filename}"
-            notify(f"beam-{phase}", latest_percent, message)
-
-        def on_completed(
-            current: int,
-            total: int,
-            remote: str,
-            uploaded_bytes: int,
-            status: str = "uploaded",
-        ) -> None:
-            # Conservado como callback separado para compatibilidad y trazabilidad.
-            del current, total, remote, uploaded_bytes, status
+                message = f"Beam V3: {phase} · {name}"
+            notify(f"beam-v3-{phase}", latest_percent, message)
 
         try:
-            result = BeamFileManagerService.upload_many(
+            result = BeamUploadEngineV3Service.upload_tree(
                 session,
                 volume=volume_name,
-                files=upload_items,
-                timeout=max(3600, int(cfg.timeout_seconds or 900)),
-                workers=4,
+                models_root=models_root,
+                remote_prefix=remote_path,
                 overwrite=overwrite,
-                on_completed=on_completed,
+                timeout=max(3600, int(cfg.timeout_seconds or 900)),
+                workers=3,
                 on_progress=on_progress,
             )
         except Exception as exc:
-            raise RuntimeError(
-                f"Beam no pudo subir los modelos al volumen {volume_name}: {exc}"
-            ) from exc
+            raise RuntimeError(f"Beam V3 no pudo subir los modelos al volumen {volume_name}: {exc}") from exc
 
-        uploaded_count = int(result.get("files_uploaded", 0))
-        skipped_count = int(result.get("files_skipped", 0))
-        uploaded_bytes = int(result.get("bytes_uploaded", 0))
         notify(
-            "beam-copy",
+            "beam-v3-copy",
             99,
-            (
-                f"Beam completado: {uploaded_count} archivos subidos, {skipped_count} omitidos, "
-                f"{logical_total} modelos lógicos preparados."
-            ),
+            f"Beam V3 finalizado: {result['files_uploaded']} subidos, "
+            f"{result['files_skipped']} omitidos, {logical_total} modelos lógicos preparados.",
         )
         return {
             "volume_name": volume_name,
-            "path": prefix,
-            "target": f"beam://{volume_name}" + (f"/{prefix}" if prefix else ""),
+            "path": str(result.get("path") or ""),
+            "target": f"beam://{volume_name}" + (f"/{result.get('path')}" if result.get("path") else ""),
             "overwrite_requested": overwrite,
             "models_uploaded": logical_total,
-            "files_total": physical_total,
-            "files_uploaded": uploaded_count,
-            "files_skipped": skipped_count,
-            "bytes_total": int(result.get("bytes_total", bytes_total)),
-            "bytes_uploaded": uploaded_bytes,
-            "transfer_mode": "beam-v2-inventory-parallel-root-copy-real-progress",
-            "parallel_workers": int(result.get("workers", 0)),
+            "files_total": int(result.get("files_total") or physical_total),
+            "files_uploaded": int(result.get("files_uploaded") or 0),
+            "files_skipped": int(result.get("files_skipped") or 0),
+            "bytes_total": int(result.get("bytes_total") or bytes_total),
+            "bytes_uploaded": int(result.get("bytes_uploaded") or 0),
+            "bytes_skipped": int(result.get("bytes_skipped") or 0),
+            "transfer_mode": "beam-v3-direct-streaming-with-safe-fallback",
+            "transfer_modes": result.get("transfer_modes") or [],
+            "parallel_workers": int(result.get("workers") or 0),
+            "beam_cli_version": str(result.get("cli_version") or ""),
         }
 
     @staticmethod
