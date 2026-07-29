@@ -68,7 +68,7 @@ class BeamCliEnvironmentService:
             raise RuntimeError(
                 "Beam está importable, pero no existe el ejecutable Beam dentro del "
                 f"venv activo del backend: {executable}. Activa ese venv y ejecuta: "
-                "pip install --force-reinstall beam-client==0.2.201"
+                'pip install --upgrade "beam-client>=0.2.202,<0.3"'
             )
 
     @classmethod

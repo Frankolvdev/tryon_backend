@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import logging
+import re
 
 from app.services.runpod_control_plane_service import runpod_control_plane_service
 
@@ -302,11 +303,37 @@ class InfrastructureProviderService:
         finally:
             shutil.rmtree(home, ignore_errors=True)
 
+    @staticmethod
+    def _beam_volume_names(output: str) -> set[str]:
+        """Extrae nombres completos de ``beam volume list`` sin usar coincidencias parciales."""
+        ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+        separator_re = re.compile(r"^[\s─━═\-]+$")
+        names: set[str] = set()
+        for line in ansi_re.sub("", output or "").splitlines():
+            raw = line.strip()
+            if not raw or separator_re.fullmatch(raw):
+                continue
+            lower = raw.casefold()
+            if lower.startswith(("name ", "=>", "welcome ", "token:")):
+                continue
+            if re.match(r"^\d+\s+(?:item|items|volume|volumes)\b", lower):
+                continue
+            columns = [part.strip() for part in re.split(r"\s{2,}", raw) if part.strip()]
+            if not columns:
+                continue
+            candidate = columns[0].rstrip("/")
+            if candidate and candidate.casefold() not in {"name", "volume", "volumes"}:
+                names.add(candidate)
+        return names
+
     @classmethod
     def ensure_beam_volume(cls, db: Session) -> dict:
         cfg = cls.get_beam(db)
+        volume_name = str(cfg.volume_name or "").strip()
         if not cfg.api_key:
             return {"success": False, "message": "Configura el Token de Beam.", "details": {}}
+        if not volume_name:
+            return {"success": False, "message": "Configura el nombre del volumen Beam.", "details": {}}
         try:
             executable, env, home = cls._prepare_beam_cli(cfg, timeout_seconds=900)
         except Exception as exc:
@@ -316,32 +343,92 @@ class InfrastructureProviderService:
                 "details": {"error": str(exc), "requirements": "requirements-beam.txt"},
             }
         try:
-            listed = subprocess.run(
-                [executable, "volume", "list"],
-                env=env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            output = cls._beam_output(listed)
+            def list_current_volumes():
+                completed = subprocess.run(
+                    [executable, "volume", "list"],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=120,
+                )
+                return completed, cls._beam_output(completed)
+
+            listed, output = list_current_volumes()
             if listed.returncode != 0:
-                return {"success": False, "message": "No fue posible consultar los volúmenes de Beam.", "details": {"output": output[-3000:]}}
-            if cfg.volume_name in output:
-                return {"success": True, "message": "Volumen Beam disponible.", "details": {"volume_name": cfg.volume_name, "output": output[-3000:]}}
+                return {
+                    "success": False,
+                    "message": "No fue posible consultar los volúmenes de Beam.",
+                    "details": {"volume_name": volume_name, "output": output[-3000:]},
+                }
+
+            names = cls._beam_volume_names(output)
+            if volume_name.casefold() in {name.casefold() for name in names}:
+                return {
+                    "success": True,
+                    "message": "El volumen Beam ya existe.",
+                    "details": {
+                        "volume_name": volume_name,
+                        "created": False,
+                        "already_exists": True,
+                        "output": output[-3000:],
+                    },
+                }
+
             created = subprocess.run(
-                [executable, "volume", "create", cfg.volume_name],
+                [executable, "volume", "create", volume_name],
                 env=env,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=180,
             )
             created_output = cls._beam_output(created)
+            lowered = created_output.casefold()
+            already_exists = any(
+                marker in lowered
+                for marker in ("already exists", "already_exist", "volume exists", "ya existe")
+            )
+            if created.returncode != 0 and not already_exists:
+                return {
+                    "success": False,
+                    "message": "No fue posible crear el volumen Beam.",
+                    "details": {"volume_name": volume_name, "output": created_output[-3000:]},
+                }
+
+            # Verificación final: evita afirmar que se creó un volumen que Beam no lista.
+            verified, verified_output = list_current_volumes()
+            verified_names = cls._beam_volume_names(verified_output) if verified.returncode == 0 else set()
+            exists_after = volume_name.casefold() in {name.casefold() for name in verified_names}
+            if not exists_after and not already_exists:
+                return {
+                    "success": False,
+                    "message": "Beam respondió a la creación, pero el volumen no apareció al verificarlo.",
+                    "details": {
+                        "volume_name": volume_name,
+                        "output": created_output[-3000:],
+                        "verification_output": verified_output[-3000:],
+                    },
+                }
+
+            if already_exists:
+                message = "El volumen Beam ya existe."
+                was_created = False
+            else:
+                message = "Volumen Beam creado correctamente."
+                was_created = True
             return {
-                "success": created.returncode == 0,
-                "message": "Volumen Beam creado." if created.returncode == 0 else "No fue posible crear el volumen Beam.",
-                "details": {"volume_name": cfg.volume_name, "output": created_output[-3000:]},
+                "success": True,
+                "message": message,
+                "details": {
+                    "volume_name": volume_name,
+                    "created": was_created,
+                    "already_exists": not was_created,
+                    "output": created_output[-3000:],
+                    "verification_output": verified_output[-3000:],
+                },
             }
         finally:
             shutil.rmtree(home, ignore_errors=True)

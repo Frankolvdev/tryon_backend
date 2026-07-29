@@ -221,20 +221,44 @@ class RuntimeModelVolumeExportService:
                     min(99, percent),
                     f"Subiendo a Beam ({index}/{total_files}): {relative}",
                 )
-                completed = run_beam(
-                    ["cp", str(source), target],
-                    max(900, int(cfg.timeout_seconds)),
-                )
+                # Beam CLI 0.2.x en Windows transforma destinos anidados
+                # beam://volumen/ruta en volumen\ruta y termina buscando un
+                # volumen con ese nombre completo. Copiamos primero a la raíz
+                # con un nombre temporal y después movemos dentro del volumen.
+                import uuid
+                staging_name = f".tryon-export-{uuid.uuid4().hex}{source.suffix}"
+                with tempfile.TemporaryDirectory(prefix="tryon-beam-export-file-") as stage_dir:
+                    staged_source = Path(stage_dir) / staging_name
+                    shutil.copy2(source, staged_source)
+                    completed = run_beam(
+                        ["cp", str(staged_source), f"beam://{volume_name}"],
+                        max(900, int(cfg.timeout_seconds)),
+                    )
                 output = "\n".join(
                     part for part in (completed.stdout, completed.stderr) if part
                 ).strip()
                 if completed.returncode != 0:
                     raise RuntimeError(
-                        "Beam CLI no pudo copiar el modelo "
-                        f"{relative} al volumen {volume_name}: {output[-4000:]}"
+                        "Beam CLI no pudo copiar el modelo temporal a la raíz del volumen "
+                        f"{volume_name}: {output[-4000:]}"
+                    )
+
+                moved = run_beam(
+                    ["mv", f"{volume_name}/{staging_name}", f"{volume_name}/{remote_key}"],
+                    600,
+                )
+                move_output = "\n".join(
+                    part for part in (moved.stdout, moved.stderr) if part
+                ).strip()
+                if moved.returncode != 0:
+                    # Limpieza best-effort del staging remoto.
+                    run_beam(["rm", f"{volume_name}/{staging_name}"], 120)
+                    raise RuntimeError(
+                        "Beam CLI copió el modelo a staging, pero no pudo moverlo a "
+                        f"{remote_key}: {move_output[-4000:]}"
                     )
                 uploaded_bytes += source.stat().st_size
-                last_output = output
+                last_output = move_output or output
 
             target_root = f"beam://{volume_name}" + (f"/{prefix}" if prefix else "")
             return {

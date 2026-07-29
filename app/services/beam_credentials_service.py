@@ -72,9 +72,20 @@ class BeamCredentialsService:
             part.strip() for part in (completed.stdout, completed.stderr) if part and part.strip()
         )
         if completed.returncode != 0:
+            lower = output.casefold()
+            if "update required" in lower or "minimum required version" in lower:
+                raise BeamCredentialError(
+                    "Beam exige una versión más nueva de beam-client. Activa el venv "
+                    "del backend y ejecuta: pip install --upgrade \"beam-client>=0.2.202,<0.3\". "
+                    + output[-3000:]
+                )
+            if any(marker in lower for marker in ("unauthorized", "invalid token", "forbidden", "401", "403")):
+                raise BeamCredentialError(
+                    "Beam CLI rechazó el Token. Verifica que pegaste el Token completo "
+                    "de Beam, no la Primary Key. " + output[-3000:]
+                )
             raise BeamCredentialError(
-                "Beam CLI rechazó el Token. Verifica que pegaste el Token completo "
-                "de Beam, no la Primary Key. " + output[-3000:]
+                "Beam CLI no pudo guardar la configuración del Token: " + output[-4000:]
             )
         return BeamCliAuthResult(executable=executable, env=configured_env, output=output)
 
