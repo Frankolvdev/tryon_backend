@@ -137,9 +137,15 @@ class RuntimeModelVolumeExportService:
         notify: ProgressCallback,
         logical_models: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Beam Upload Engine V3, completamente aislado de otros proveedores."""
+        """Beam Upload Engine V4, aislado de Modal, RunPod y Docker.
+
+        V4 abandona las copias individuales. Prepara un árbol filtrado y ejecuta
+        una única operación ``beam cp <directorio> beam://<volumen>/<ruta>``;
+        Beam CLI 0.2.207 selecciona multipart automáticamente cuando el Gateway
+        dispone del servicio externo de archivos.
+        """
         from app.services.infrastructure_provider_service import InfrastructureProviderService
-        from app.services.beam_upload_engine_v3_service import BeamUploadEngineV3Service
+        from app.services.beam_upload_engine_v4_service import BeamUploadEngineV4Service
 
         cfg = InfrastructureProviderService.get_beam(session)
         volume_name = str(cfg.volume_name or "").strip()
@@ -166,94 +172,102 @@ class RuntimeModelVolumeExportService:
             return f"{amount:.1f} TB"
 
         notify(
-            "beam-v3-inventory",
+            "beam-v4-inventory",
             94,
-            f"Beam V3: inventariando {physical_total} archivos físicos ({logical_total} modelos lógicos), "
-            f"{human_bytes(bytes_total)} en total.",
+            f"Beam V4: preparando una transferencia de directorio para {physical_total} archivos físicos "
+            f"({logical_total} modelos lógicos), {human_bytes(bytes_total)} en total.",
         )
 
         def on_progress(event: dict[str, Any]) -> None:
             nonlocal latest_percent
-            phase = str(event.get("phase") or "uploading")
-            processed = int(event.get("files_processed") or 0)
-            total = max(1, int(event.get("total") or physical_total or 1))
-            processed_bytes = int(event.get("bytes_processed") or 0)
-            total_bytes_event = max(1, int(event.get("bytes_total") or bytes_total or 1))
-            file_bytes = int(event.get("file_bytes_transferred") or 0)
-            file_size = int(event.get("file_size") or event.get("file_bytes_total") or 0)
-            active_total = processed_bytes + min(file_bytes, file_size)
-            ratio = min(1.0, max(processed / total, active_total / total_bytes_event))
+            phase = str(event.get("phase") or "transfer-progress")
+            transferred = int(event.get("bytes_transferred") or event.get("bytes_uploaded") or 0)
+            pending_bytes = max(1, int(event.get("bytes_pending") or bytes_total or 1))
+            ratio = min(1.0, max(0.0, transferred / pending_bytes))
             latest_percent = max(latest_percent, min(99, 94 + int(5 * ratio)))
 
-            remote = str(event.get("remote") or "").replace("\\", "/")
-            name = str(event.get("file_name") or (remote.rsplit("/", 1)[-1] if remote else ""))
+            total = max(1, int(event.get("total") or physical_total or 1))
             uploaded = int(event.get("files_uploaded") or 0)
             skipped = int(event.get("files_skipped") or 0)
+            queued_index = int(event.get("queue_index") or 0)
+            queued_total = int(event.get("queued_total") or 0)
+            completed_index = int(event.get("completed_index") or 0)
+            name = str(event.get("file_name") or "")
+            remote = str(event.get("remote") or "").replace("\\", "/")
+            file_size = int(event.get("file_size") or 0)
             speed = int(event.get("speed_bps") or 0)
             native = str(event.get("native_line") or "").strip()
+            eta = str(event.get("eta") or "").strip()
 
             if phase == "inventory":
                 message = (
-                    f"Beam V3: comprobando el volumen {volume_name}; no se ocultará ningún archivo de la transferencia. "
+                    f"Beam V4: inventariando el volumen {volume_name} para una sola subida de directorio. "
                     f"CLI detectada: {event.get('cli_version') or 'desconocida'}"
                 )
             elif phase == "file-skipped":
                 message = (
-                    f"Beam V3: OMITIDO {processed}/{total} · {name} · {human_bytes(file_size)} · "
-                    f"ya existe en el volumen ({skipped} omitidos)."
+                    f"Beam V4: OMITIDO {skipped}/{total} · {name} · {human_bytes(file_size)} · "
+                    f"ya existe en {remote}."
                 )
-            elif phase == "file-start":
+            elif phase == "file-queued":
                 message = (
-                    f"Beam V3: INICIANDO {processed + 1}/{total} · archivo: {name} · "
-                    f"peso: {human_bytes(file_size)} · destino: {remote}"
+                    f"Beam V4: ARCHIVO PREPARADO {queued_index}/{queued_total} · {name} · "
+                    f"{human_bytes(file_size)} · destino: {remote}"
                 )
-            elif phase == "file-progress":
+            elif phase == "transfer-start":
                 message = (
-                    f"Beam V3: SUBIENDO {processed + 1}/{total} · archivo: {name} · "
-                    f"{human_bytes(file_bytes)} de {human_bytes(file_size)}"
+                    f"Beam V4: iniciando UNA transferencia de directorio con multipart automático · "
+                    f"{event.get('files_pending', 0)} archivos · "
+                    f"{human_bytes(int(event.get('bytes_pending') or 0))} · "
+                    f"destino: {event.get('destination', '')}"
+                )
+            elif phase == "transfer-progress":
+                current = f" · archivo detectado: {name}" if name else ""
+                message = (
+                    f"Beam V4: SUBIENDO DIRECTORIO · {human_bytes(transferred)} de "
+                    f"{human_bytes(int(event.get('bytes_pending') or bytes_total))}{current}"
                 )
                 if speed > 0:
                     message += f" · {human_bytes(speed)}/s"
+                if eta:
+                    message += f" · ETA {eta}"
                 if native:
-                    message += f" · Beam CLI: {native[-300:]}"
-            elif phase == "file-fallback":
-                message = f"Beam V3: compatibilidad CLI para {name}: {event.get('detail', '')}"
+                    message += f" · Beam CLI: {native[-350:]}"
             elif phase == "file-completed":
+                message = (
+                    f"Beam V4: CONFIRMADO {completed_index}/{max(1, total - skipped)} · {name} · "
+                    f"{human_bytes(file_size)} · {uploaded} subidos · {skipped} omitidos"
+                )
+            elif phase == "completed":
                 elapsed = max(0.001, time.perf_counter() - started)
                 average = int(int(event.get("bytes_uploaded") or 0) / elapsed)
                 message = (
-                    f"Beam V3: COMPLETADO {processed}/{total} · {name} · {human_bytes(file_size)} · "
-                    f"{uploaded} subidos · {skipped} omitidos"
+                    f"Beam V4 completado: {uploaded} archivos subidos en una sola operación, "
+                    f"{skipped} omitidos, {human_bytes(int(event.get('bytes_uploaded') or 0))} transferidos"
                 )
                 if average > 0:
                     message += f" · media global {human_bytes(average)}/s"
-            elif phase == "completed":
-                message = (
-                    f"Beam V3 completado: {uploaded} archivos subidos, {skipped} omitidos, "
-                    f"{human_bytes(int(event.get('bytes_uploaded') or 0))} transferidos."
-                )
             else:
-                message = f"Beam V3: {phase} · {name}"
-            notify(f"beam-v3-{phase}", latest_percent, message)
+                message = f"Beam V4: {phase} · {name}"
+            notify(f"beam-v4-{phase}", latest_percent, message)
 
         try:
-            result = BeamUploadEngineV3Service.upload_tree(
+            result = BeamUploadEngineV4Service.upload_tree(
                 session,
                 volume=volume_name,
                 models_root=models_root,
                 remote_prefix=remote_path,
                 overwrite=overwrite,
                 timeout=max(3600, int(cfg.timeout_seconds or 900)),
-                workers=3,
                 on_progress=on_progress,
             )
         except Exception as exc:
-            raise RuntimeError(f"Beam V3 no pudo subir los modelos al volumen {volume_name}: {exc}") from exc
+            raise RuntimeError(f"Beam V4 no pudo subir los modelos al volumen {volume_name}: {exc}") from exc
 
         notify(
-            "beam-v3-copy",
+            "beam-v4-copy",
             99,
-            f"Beam V3 finalizado: {result['files_uploaded']} subidos, "
+            f"Beam V4 finalizado: {result['files_uploaded']} subidos mediante una sola transferencia, "
             f"{result['files_skipped']} omitidos, {logical_total} modelos lógicos preparados.",
         )
         return {
@@ -268,7 +282,7 @@ class RuntimeModelVolumeExportService:
             "bytes_total": int(result.get("bytes_total") or bytes_total),
             "bytes_uploaded": int(result.get("bytes_uploaded") or 0),
             "bytes_skipped": int(result.get("bytes_skipped") or 0),
-            "transfer_mode": "beam-v3-direct-streaming-with-safe-fallback",
+            "transfer_mode": "beam-v4-directory-multipart-auto",
             "transfer_modes": result.get("transfer_modes") or [],
             "parallel_workers": int(result.get("workers") or 0),
             "beam_cli_version": str(result.get("cli_version") or ""),
