@@ -129,13 +129,20 @@ class RuntimeModelVolumeExportService:
         )
 
     @staticmethod
-    def _copy_to_beam(session: Any, models_root: Path, remote_path: str, overwrite: bool, notify: ProgressCallback) -> dict[str, Any]:
-        """Sube los modelos a Beam en paralelo usando únicamente la raíz del volumen.
+    def _copy_to_beam(
+        session: Any,
+        models_root: Path,
+        remote_path: str,
+        overwrite: bool,
+        notify: ProgressCallback,
+        logical_models: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Sube los archivos a Beam manteniendo el mismo conteo de modelos que Modal.
 
-        Modal permanece intacto. Beam conserva el mismo árbol final, pero evita
-        por completo los destinos ``beam://volumen/carpeta`` que fallan en
-        Windows. Cada archivo se copia a ``beam://volumen`` y se mueve después
-        con ``beam mv`` dentro de la misma sesión autenticada.
+        La transferencia rápida y paralela de Beam permanece intacta. La única
+        diferencia es el progreso: se construye desde los mismos registros
+        resueltos que consume Modal, no desde la cantidad de archivos físicos
+        del árbol preparado (que puede incluir archivos auxiliares de SAM3).
         """
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         from app.services.beam_file_manager_service import BeamFileManagerService
@@ -150,32 +157,28 @@ class RuntimeModelVolumeExportService:
         prefix = remote_path.replace("\\", "/").strip("/")
         upload_items: list[tuple[Path, str]] = []
 
-        # Modal contabiliza los hijos directos de ``models_root`` como unidades
-        # de exportación. Una categoría puede contener varios archivos internos
-        # (por ejemplo SAM3), pero visualmente sigue siendo un único modelo/grupo.
-        # Beam conserva la subida paralela por archivo, pero reporta exactamente
-        # las mismas unidades lógicas que Modal para no mostrar 26 cuando el
-        # manifiesto real contiene 9 modelos/categorías.
-        logical_groups: dict[str, dict[str, Any]] = {}
-        remote_to_group: dict[str, str] = {}
         for path in files:
-            relative_path = path.relative_to(models_root)
-            relative = relative_path.as_posix()
+            relative = path.relative_to(models_root).as_posix()
             destination = "/".join(part for part in (prefix, relative) if part)
             upload_items.append((path, destination))
 
-            group_name = relative_path.parts[0] if relative_path.parts else path.name
-            group = logical_groups.setdefault(
-                group_name,
-                {"pending": 0, "bytes": 0, "label": group_name},
-            )
-            group["pending"] += 1
-            group["bytes"] += path.stat().st_size
-            remote_to_group[destination] = group_name
+        # Modal usa la lista de modelos resuelta por _resolve(). Beam debe usar
+        # exactamente esa misma lista para el total y el progreso. No se agrupa
+        # por carpeta y no se cuentan archivos auxiliares copiados recursivamente.
+        logical_paths: list[str] = []
+        logical_labels: dict[str, str] = {}
+        for item in logical_models:
+            if not item.get("found", True):
+                continue
+            target = str(item.get("target_path") or "").replace("\\", "/").strip("/")
+            if not target or target in logical_labels:
+                continue
+            remote_target = "/".join(part for part in (prefix, target) if part)
+            logical_paths.append(remote_target)
+            logical_labels[remote_target] = target
 
-        logical_total = len(logical_groups)
-        completed_groups = 0
-        completed_group_names: set[str] = set()
+        logical_total = len(logical_paths)
+        completed_paths: set[str] = set()
         progress_lock = threading.Lock()
 
         notify(
@@ -186,22 +189,15 @@ class RuntimeModelVolumeExportService:
 
         def on_completed(current: int, total: int, remote: str, uploaded_bytes: int) -> None:
             del current, total, uploaded_bytes
-            nonlocal completed_groups
-            group_name = remote_to_group.get(remote)
-            if not group_name:
-                return
-
+            normalized_remote = str(remote or "").replace("\\", "/").strip("/")
             with progress_lock:
-                group = logical_groups[group_name]
-                group["pending"] = max(0, int(group["pending"]) - 1)
-                if group["pending"] != 0 or group_name in completed_group_names:
+                if normalized_remote not in logical_labels or normalized_remote in completed_paths:
                     return
-                completed_group_names.add(group_name)
-                completed_groups += 1
-                logical_current = completed_groups
+                completed_paths.add(normalized_remote)
+                logical_current = len(completed_paths)
+                label = logical_labels[normalized_remote]
 
             percent = 94 + int(5 * logical_current / max(1, logical_total))
-            label = str(logical_groups[group_name]["label"])
             notify(
                 "beam-copy",
                 min(99, percent),
@@ -222,6 +218,21 @@ class RuntimeModelVolumeExportService:
                 f"Beam no pudo subir los modelos al volumen {volume_name}: {exc}"
             ) from exc
 
+        # Algunos árboles compuestos contienen auxiliares que no representan un
+        # modelo adicional. Al terminar la transferencia, completa únicamente
+        # los modelos del manifiesto que no hayan emitido evento individual.
+        for logical_path in logical_paths:
+            if logical_path in completed_paths:
+                continue
+            completed_paths.add(logical_path)
+            logical_current = len(completed_paths)
+            percent = 94 + int(5 * logical_current / max(1, logical_total))
+            notify(
+                "beam-copy",
+                min(99, percent),
+                f"Subiendo a Beam ({logical_current}/{logical_total}): {logical_labels[logical_path]}",
+            )
+
         notify("beam-copy", 99, f"Beam recibió {logical_total} modelos.")
         return {
             "volume_name": volume_name,
@@ -231,7 +242,7 @@ class RuntimeModelVolumeExportService:
             "models_uploaded": logical_total,
             "files_uploaded": int(result.get("files_uploaded", len(files))),
             "bytes_uploaded": int(result.get("bytes_uploaded", bytes_total)),
-            "transfer_mode": "parallel-root-copy-then-move-modal-logical-progress",
+            "transfer_mode": "parallel-root-copy-then-move-modal-manifest-progress",
             "parallel_workers": int(result.get("workers", 1)),
         }
 
@@ -437,7 +448,14 @@ class RuntimeModelVolumeExportService:
                     details = RuntimeModelVolumeExportService._copy_to_runpod(session, models_root, docker_path, payload.overwrite, notify)
                     manifest["runpod_destination"] = details
                 else:
-                    details = RuntimeModelVolumeExportService._copy_to_beam(session, models_root, docker_path, payload.overwrite, notify)
+                    details = RuntimeModelVolumeExportService._copy_to_beam(
+                        session,
+                        models_root,
+                        docker_path,
+                        payload.overwrite,
+                        notify,
+                        [item for item in records if item.get("found")],
+                    )
                     manifest["beam_destination"] = details
                 manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
             finally:
