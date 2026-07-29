@@ -256,7 +256,7 @@ class BeamFileManagerService:
         return {"volume": selected, "path": clean, "items": items}
 
     @classmethod
-    def _upload_via_root(
+    def _upload_direct(
         cls,
         db: Session,
         *,
@@ -265,29 +265,20 @@ class BeamFileManagerService:
         destination: str,
         timeout: int,
     ) -> None:
+        """Sube directamente al destino final con una sola sesión Beam.
+
+        Beam documenta la copia directa de archivos y directorios hacia rutas
+        ``beam://volumen/ruta``. Evitar el staging local, el ``cp`` a la raíz y
+        el ``mv`` remoto elimina dos copias adicionales y reduce notablemente
+        el tiempo del File Manager.
+        """
         destination_clean = cls._clean(destination)
         if not destination_clean:
             raise BeamFileManagerError("La ruta de destino Beam está vacía.")
-
-        suffix = local_path.suffix
-        staging_name = f".tryon-upload-{uuid.uuid4().hex}{suffix}"
-        with tempfile.TemporaryDirectory(prefix="tryon-beam-stage-") as tmp:
-            staged_local = Path(tmp) / staging_name
-            shutil.copy2(local_path, staged_local)
-            # En Windows solo usamos beam://volumen en cp; las rutas anidadas se
-            # resuelven después con mv para evitar el bug de barras invertidas.
-            cls._run(db, ["cp", str(staged_local), cls._uri(volume)], timeout)
-
-        staging_remote = cls._cli_path(volume, staging_name)
-        destination_remote = cls._cli_path(volume, destination_clean)
-        try:
-            cls._run(db, ["mv", staging_remote, destination_remote], 600)
-        except Exception:
-            try:
-                cls._run(db, ["rm", staging_remote], 120)
-            except Exception:
-                pass
-            raise
+        source = Path(local_path)
+        if not source.is_file() and not source.is_dir():
+            raise BeamFileManagerError(f"No existe el origen local para Beam: {source}")
+        cls._run(db, ["cp", str(source), cls._uri(volume, destination_clean)], timeout)
 
     @classmethod
     def create_directory(cls, db: Session, volume: str, path: str):
@@ -299,7 +290,7 @@ class BeamFileManagerService:
         with tempfile.TemporaryDirectory(prefix="tryon-beam-mkdir-") as tmp:
             marker = Path(tmp) / ".keep"
             marker.write_bytes(b"")
-            cls._upload_via_root(
+            cls._upload_direct(
                 db,
                 volume=selected,
                 local_path=marker,
@@ -313,7 +304,7 @@ class BeamFileManagerService:
         cfg = InfrastructureProviderService.get_beam(db)
         selected = cls._volume_name(cfg, volume)
         destination = cls._clean(path)
-        cls._upload_via_root(
+        cls._upload_direct(
             db,
             volume=selected,
             local_path=Path(local_path),
@@ -385,7 +376,7 @@ class BeamFileManagerService:
             # temporal y reutilizamos el upload blindado para no duplicar/mover el original.
             local = cls.download_to_temp(db, selected, source_clean)
             try:
-                cls._upload_via_root(
+                cls._upload_direct(
                     db,
                     volume=selected,
                     local_path=local,

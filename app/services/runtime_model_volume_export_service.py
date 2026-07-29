@@ -130,12 +130,12 @@ class RuntimeModelVolumeExportService:
 
     @staticmethod
     def _copy_to_beam(session: Any, models_root: Path, remote_path: str, overwrite: bool, notify: ProgressCallback) -> dict[str, Any]:
-        """Sube el staging de modelos a un volumen Beam existente o nuevo.
+        """Sube el árbol limpio de modelos a Beam en una sola transferencia.
 
-        Beam CLI se ejecuta desde el mismo venv del backend. Antes de copiar se
-        comprueba el volumen y se crea cuando todavía no existe. Los archivos se
-        envían uno por uno con rutas remotas POSIX para evitar que Windows
-        convierta el destino ``beam://`` en rutas con barras invertidas.
+        Esta implementación replica el principio usado por Modal: primero se
+        prepara localmente el árbol definitivo y después se envía el directorio
+        completo. Así Beam abre una sola sesión de transferencia, en lugar de
+        ejecutar ``cp`` + ``mv`` por cada archivo.
         """
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         from app.services.beam_cli_environment_service import beam_cli_environment_service
@@ -152,7 +152,14 @@ class RuntimeModelVolumeExportService:
         executable = beam_cli_environment_service.ensure(timeout_seconds=30)
         env = os.environ.copy()
         home = tempfile.mkdtemp(prefix="tryon-beam-export-")
-        env.update({"HOME": home, "USERPROFILE": home})
+        env.update({
+            "HOME": home,
+            "USERPROFILE": home,
+            "COLUMNS": "500",
+            "TERM": "dumb",
+            "NO_COLOR": "1",
+            "FORCE_COLOR": "0",
+        })
 
         def run_beam(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
@@ -175,13 +182,9 @@ class RuntimeModelVolumeExportService:
 
             notify("beam-volume", 92, f"Comprobando el volumen Beam {volume_name}…")
             listed = run_beam(["volume", "list"], 120)
-            list_output = "\n".join(
-                part for part in (listed.stdout, listed.stderr) if part
-            ).strip()
+            list_output = "\n".join(part for part in (listed.stdout, listed.stderr) if part).strip()
             if listed.returncode != 0:
-                raise RuntimeError(
-                    "Beam CLI no pudo listar los volúmenes: " + list_output[-4000:]
-                )
+                raise RuntimeError("Beam CLI no pudo listar los volúmenes: " + list_output[-4000:])
 
             ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
             clean_output = ansi.sub("", list_output)
@@ -192,83 +195,46 @@ class RuntimeModelVolumeExportService:
             if not volume_exists:
                 notify("beam-volume", 93, f"Creando el volumen Beam {volume_name}…")
                 created = run_beam(["volume", "create", volume_name], 180)
-                create_output = "\n".join(
-                    part for part in (created.stdout, created.stderr) if part
-                ).strip()
+                create_output = "\n".join(part for part in (created.stdout, created.stderr) if part).strip()
                 if created.returncode != 0:
-                    # Una creación concurrente puede informar que ya existe.
                     lower = create_output.casefold()
                     if "already exists" not in lower and "ya existe" not in lower:
                         raise RuntimeError(
-                            "Beam CLI no pudo crear el volumen "
-                            f"{volume_name}: {create_output[-4000:]}"
+                            f"Beam CLI no pudo crear el volumen {volume_name}: {create_output[-4000:]}"
                         )
 
-            files = [path for path in models_root.rglob("*") if path.is_file()]
-            total_files = max(1, len(files))
+            files = sorted(path for path in models_root.rglob("*") if path.is_file())
+            files_count = len(files)
+            bytes_total = sum(path.stat().st_size for path in files)
             prefix = remote_path.replace("\\", "/").strip("/")
-            uploaded_bytes = 0
-            last_output = ""
+            target = f"beam://{volume_name}" + (f"/{prefix}" if prefix else "")
 
-            for index, source in enumerate(files, start=1):
-                relative = source.relative_to(models_root).as_posix()
-                remote_parts = [part for part in (prefix, relative) if part]
-                remote_key = "/".join(remote_parts)
-                target = f"beam://{volume_name}/{remote_key}"
-                percent = 94 + int((index / total_files) * 5)
-                notify(
-                    "beam-copy",
-                    min(99, percent),
-                    f"Subiendo a Beam ({index}/{total_files}): {relative}",
+            notify(
+                "beam-copy",
+                94,
+                f"Subiendo a Beam {files_count} archivo{'s' if files_count != 1 else ''} en una sola transferencia…",
+            )
+            completed = run_beam(
+                ["cp", str(models_root), target],
+                max(3600, int(cfg.timeout_seconds)),
+            )
+            output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "Beam CLI no pudo subir el árbol de modelos al volumen "
+                    f"{volume_name}: {output[-5000:]}"
                 )
-                # Beam CLI 0.2.x en Windows transforma destinos anidados
-                # beam://volumen/ruta en volumen\ruta y termina buscando un
-                # volumen con ese nombre completo. Copiamos primero a la raíz
-                # con un nombre temporal y después movemos dentro del volumen.
-                import uuid
-                staging_name = f".tryon-export-{uuid.uuid4().hex}{source.suffix}"
-                with tempfile.TemporaryDirectory(prefix="tryon-beam-export-file-") as stage_dir:
-                    staged_source = Path(stage_dir) / staging_name
-                    shutil.copy2(source, staged_source)
-                    completed = run_beam(
-                        ["cp", str(staged_source), f"beam://{volume_name}"],
-                        max(900, int(cfg.timeout_seconds)),
-                    )
-                output = "\n".join(
-                    part for part in (completed.stdout, completed.stderr) if part
-                ).strip()
-                if completed.returncode != 0:
-                    raise RuntimeError(
-                        "Beam CLI no pudo copiar el modelo temporal a la raíz del volumen "
-                        f"{volume_name}: {output[-4000:]}"
-                    )
 
-                moved = run_beam(
-                    ["mv", f"{volume_name}/{staging_name}", f"{volume_name}/{remote_key}"],
-                    600,
-                )
-                move_output = "\n".join(
-                    part for part in (moved.stdout, moved.stderr) if part
-                ).strip()
-                if moved.returncode != 0:
-                    # Limpieza best-effort del staging remoto.
-                    run_beam(["rm", f"{volume_name}/{staging_name}"], 120)
-                    raise RuntimeError(
-                        "Beam CLI copió el modelo a staging, pero no pudo moverlo a "
-                        f"{remote_key}: {move_output[-4000:]}"
-                    )
-                uploaded_bytes += source.stat().st_size
-                last_output = move_output or output
-
-            target_root = f"beam://{volume_name}" + (f"/{prefix}" if prefix else "")
+            notify("beam-copy", 99, f"Beam recibió {files_count} archivos.")
             return {
                 "volume_name": volume_name,
                 "path": prefix,
-                "target": target_root,
+                "target": target,
                 "overwrite_requested": overwrite,
-                "files_uploaded": len(files),
-                "bytes_uploaded": uploaded_bytes,
-                "output": last_output[-4000:],
+                "files_uploaded": files_count,
+                "bytes_uploaded": bytes_total,
+                "transfer_mode": "single-directory-copy",
+                "output": output[-4000:],
             }
         finally:
             shutil.rmtree(home, ignore_errors=True)
@@ -301,8 +267,9 @@ class RuntimeModelVolumeExportService:
         # leaked models from older workflows into the next upload (the apparent
         # extra audio encoder and repeated Qwen/VAE entries). Build a clean,
         # deterministic tree containing only the current validated models.
-        if destination_type == "runpod" and models_root.exists():
-            notify("preparing", 3, "Limpiando la preparación anterior de RunPod…")
+        if destination_type in {"runpod", "beam"} and models_root.exists():
+            provider_label = "RunPod" if destination_type == "runpod" else "Beam"
+            notify("preparing", 3, f"Limpiando la preparación anterior de {provider_label}…")
             shutil.rmtree(models_root)
         models_root.mkdir(parents=True, exist_ok=True)
 
