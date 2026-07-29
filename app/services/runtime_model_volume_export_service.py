@@ -19,7 +19,7 @@ from app.services.runtime_context_generator_service import RuntimeContextGenerat
 from app.services.docker_file_manager_service import DockerFileManagerService
 from app.services.modal_file_manager_service import ModalFileManagerService
 
-ProgressCallback = Callable[[str, int, str], None]
+ProgressCallback = Callable[..., None]
 
 
 class RuntimeModelVolumeExportService:
@@ -137,16 +137,15 @@ class RuntimeModelVolumeExportService:
         notify: ProgressCallback,
         logical_models: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Punto de integración mínimo; toda la implementación vive en beam_v4/."""
-        from app.services.beam_v4.export_adapter import BeamV4ExportAdapter
+        """Punto de registro mínimo del proveedor Beam independiente."""
+        from app.services.beam_engine.beam_model_sync_service import BeamModelSyncService
 
-        return BeamV4ExportAdapter.export(
+        return BeamModelSyncService.sync(
             session,
-            models_root=models_root,
-            remote_path=remote_path,
-            overwrite=overwrite,
+            manifest_models=logical_models,
+            remote_prefix=remote_path,
+            skip_identical=not overwrite,
             notify=notify,
-            logical_models=logical_models,
         )
 
     @staticmethod

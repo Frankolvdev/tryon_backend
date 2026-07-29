@@ -745,6 +745,25 @@ def preview_runtime_launch(payload: RuntimeLaunchSettings):
     return _runtime_command(payload)
 
 
+
+
+@router.post("/models-volume/jobs/{job_id}/cancel")
+def cancel_models_volume_job(job_id: str):
+    from app.services.beam_engine.beam_progress_service import BeamProgressService
+    try:
+        current = RuntimeContextJobService.public(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Trabajo no encontrado.") from exc
+    if current.get("status") not in {"queued", "running"}:
+        return current
+    BeamProgressService.cancel(job_id)
+    RuntimeContextJobService._update(
+        job_id,
+        phase="cancelling",
+        message="Cancelando sincronización Beam…",
+    )
+    return RuntimeContextJobService.public(job_id)
+
 @router.post("/models-volume/analyze")
 def analyze_models_volume(
     payload: RuntimeModelVolumeAnalyzeRequest,

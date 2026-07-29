@@ -84,13 +84,14 @@ class RuntimeContextJobService:
                 started_at=datetime.now(timezone.utc).isoformat(),
             )
 
-            def progress(phase: str, percent: int, message: str) -> None:
+            def progress(phase: str, percent: int, message: str, details: dict[str, Any] | None = None) -> None:
                 cls._update(
                     job_id,
                     status="running",
                     phase=phase,
                     progress=max(1, min(99, int(percent))),
                     message=message,
+                    details=details,
                 )
 
             db = SessionLocal()
@@ -98,7 +99,13 @@ class RuntimeContextJobService:
                 config = db.get(RuntimeBuilderConfig, config_id)
                 if config is None:
                     raise ValueError("La configuración del Runtime Builder ya no existe.")
-                result = RuntimeModelVolumeExportService.export(config, payload, progress)
+                from app.services.beam_engine.beam_progress_service import BeamProgressService
+                BeamProgressService.bind_job(job_id)
+                try:
+                    result = RuntimeModelVolumeExportService.export(config, payload, progress)
+                finally:
+                    BeamProgressService.unbind_job()
+                    BeamProgressService.clear(job_id)
             finally:
                 db.close()
 
