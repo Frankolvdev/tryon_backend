@@ -284,6 +284,7 @@ class BeamFileManagerService:
         local_path: Path,
         destination: str,
         timeout: int,
+        overwrite: bool = True,
     ) -> None:
         """Sube a la raíz y mueve dentro del volumen usando una sola autenticación.
 
@@ -322,28 +323,28 @@ class BeamFileManagerService:
                 timeout=timeout,
             )
 
-            # Las reexportaciones suelen encontrar el archivo final ya creado.
-            # Beam CLI puede quedarse esperando o fallar al mover sobre un destino
-            # existente aunque el archivo temporal ya se haya subido por completo.
-            # Elimina primero el destino de forma acotada y después realiza el move.
-            # Un "not found" es inocuo: significa que es la primera subida.
-            try:
-                cls._run_in_context(
-                    executable=executable,
-                    env=env,
-                    args=["rm", final_remote],
-                    timeout=180,
-                )
-            except BeamFileManagerError as exc:
-                detail = str(exc).casefold()
-                missing_markers = (
-                    "not found",
-                    "no such file",
-                    "unable to stat path",
-                    "path does not exist",
-                )
-                if not any(marker in detail for marker in missing_markers):
-                    raise
+            # Al sobrescribir, elimina primero el destino para evitar que Beam CLI
+            # quede esperando al mover sobre un archivo ya existente. Cuando se
+            # solicitó omitir existentes, upload_many filtra esos archivos antes
+            # de llegar aquí y no se ejecuta ningún borrado remoto.
+            if overwrite:
+                try:
+                    cls._run_in_context(
+                        executable=executable,
+                        env=env,
+                        args=["rm", final_remote],
+                        timeout=180,
+                    )
+                except BeamFileManagerError as exc:
+                    detail = str(exc).casefold()
+                    missing_markers = (
+                        "not found",
+                        "no such file",
+                        "unable to stat path",
+                        "path does not exist",
+                    )
+                    if not any(marker in detail for marker in missing_markers):
+                        raise
 
             cls._run_in_context(
                 executable=executable,
@@ -397,6 +398,42 @@ class BeamFileManagerService:
             shutil.rmtree(home, ignore_errors=True)
 
     @classmethod
+    def _list_parent_names_in_context(
+        cls,
+        *,
+        executable: str,
+        env: dict[str, str],
+        volume: str,
+        parent: str,
+    ) -> set[str]:
+        """Lista una carpeta remota una sola vez para omitir existentes."""
+        target = cls._cli_path(volume, parent)
+        try:
+            output = cls._run_in_context(
+                executable=executable,
+                env=env,
+                args=["ls", target],
+                timeout=300,
+            )
+        except BeamFileManagerError as exc:
+            detail = str(exc).casefold()
+            if any(marker in detail for marker in (
+                "not found", "no such file", "unable to stat path",
+                "path does not exist",
+            )):
+                return set()
+            raise
+
+        names: set[str] = set()
+        for columns in cls._table_rows(output):
+            if not columns:
+                continue
+            name = columns[0].rstrip("/").strip()
+            if name and name not in {".", "..", ".keep"}:
+                names.add(name)
+        return names
+
+    @classmethod
     def upload_many(
         cls,
         db: Session,
@@ -404,48 +441,118 @@ class BeamFileManagerService:
         volume: str,
         files: list[tuple[Path, str]],
         timeout: int,
-        workers: int = 3,
+        workers: int = 4,
+        overwrite: bool = True,
         on_completed: Any | None = None,
+        on_progress: Any | None = None,
     ) -> dict[str, Any]:
-        """Sube varios archivos en paralelo sin usar destinos ``beam://`` anidados."""
+        """Sube archivos en paralelo con inventario remoto y progreso real.
+
+        El inventario se obtiene una sola vez por carpeta remota. Esto hace que
+        "Omitir existentes" sea real sin ejecutar un ``beam ls`` por archivo.
+        Modal, RunPod, Docker y el File Manager conservan sus flujos existentes.
+        """
         if not files:
-            return {"files_uploaded": 0, "bytes_uploaded": 0, "workers": 0}
+            return {
+                "files_uploaded": 0, "files_skipped": 0,
+                "bytes_uploaded": 0, "bytes_total": 0, "workers": 0,
+            }
 
         cfg, executable, env, home = cls._env(db)
         selected = cls._volume_name(cfg, volume)
         normalized = [(Path(local), cls._clean(remote)) for local, remote in files]
-        max_workers = max(1, min(int(workers or 1), 4, len(normalized)))
+        total_files = len(normalized)
+        total_bytes = sum(local.stat().st_size for local, _ in normalized)
+        max_workers = max(1, min(int(workers or 1), 4, total_files))
         uploaded = 0
+        skipped = 0
+        processed = 0
         uploaded_bytes = 0
+        processed_bytes = 0
         lock = __import__("threading").Lock()
 
-        def task(item: tuple[Path, str]) -> tuple[str, int]:
-            local, remote = item
-            cls._upload_via_root_in_context(
-                executable=executable,
-                env=env,
-                volume=selected,
-                local_path=local,
-                destination=remote,
-                timeout=timeout,
-            )
-            return remote, local.stat().st_size
+        def emit(phase: str, remote: str = "") -> None:
+            if on_progress is None:
+                return
+            on_progress({
+                "phase": phase,
+                "current": processed,
+                "total": total_files,
+                "remote": remote,
+                "bytes_processed": processed_bytes,
+                "bytes_uploaded": uploaded_bytes,
+                "bytes_total": total_bytes,
+                "files_uploaded": uploaded,
+                "files_skipped": skipped,
+                "workers": max_workers,
+            })
 
         try:
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="beam-upload") as pool:
-                futures = [pool.submit(task, item) for item in normalized]
-                for future in as_completed(futures):
-                    remote, size = future.result()
-                    with lock:
-                        uploaded += 1
-                        uploaded_bytes += size
-                        current = uploaded
-                    if on_completed is not None:
-                        on_completed(current, len(normalized), remote, uploaded_bytes)
+            pending = normalized
+            if not overwrite:
+                emit("inventory")
+                parents = sorted({remote.rsplit("/", 1)[0] if "/" in remote else "" for _, remote in normalized})
+                inventories = {
+                    parent: cls._list_parent_names_in_context(
+                        executable=executable, env=env, volume=selected, parent=parent
+                    )
+                    for parent in parents
+                }
+                pending = []
+                for local, remote in normalized:
+                    parent, name = remote.rsplit("/", 1) if "/" in remote else ("", remote)
+                    size = local.stat().st_size
+                    if name in inventories.get(parent, set()):
+                        with lock:
+                            skipped += 1
+                            processed += 1
+                            processed_bytes += size
+                            current = processed
+                            uploaded_now = uploaded_bytes
+                        if on_completed is not None:
+                            on_completed(current, total_files, remote, uploaded_now, "skipped")
+                        emit("skipping", remote)
+                    else:
+                        pending.append((local, remote))
+
+            emit("uploading")
+
+            def task(item: tuple[Path, str]) -> tuple[str, int]:
+                local, remote = item
+                cls._upload_via_root_in_context(
+                    executable=executable,
+                    env=env,
+                    volume=selected,
+                    local_path=local,
+                    destination=remote,
+                    timeout=timeout,
+                    overwrite=overwrite,
+                )
+                return remote, local.stat().st_size
+
+            if pending:
+                with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="beam-upload") as pool:
+                    futures = [pool.submit(task, item) for item in pending]
+                    for future in as_completed(futures):
+                        remote, size = future.result()
+                        with lock:
+                            uploaded += 1
+                            processed += 1
+                            uploaded_bytes += size
+                            processed_bytes += size
+                            current = processed
+                            uploaded_now = uploaded_bytes
+                        if on_completed is not None:
+                            on_completed(current, total_files, remote, uploaded_now, "uploaded")
+                        emit("uploading", remote)
+
+            emit("completed")
             return {
                 "files_uploaded": uploaded,
+                "files_skipped": skipped,
                 "bytes_uploaded": uploaded_bytes,
-                "workers": max_workers,
+                "bytes_total": total_bytes,
+                "workers": max_workers if pending else 0,
             }
         finally:
             shutil.rmtree(home, ignore_errors=True)

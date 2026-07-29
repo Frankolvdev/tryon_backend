@@ -130,19 +130,19 @@ class RuntimeModelVolumeExportService:
 
     @staticmethod
     def _copy_to_beam(
-        session: Any,
+        session,
         models_root: Path,
         remote_path: str,
         overwrite: bool,
         notify: ProgressCallback,
         logical_models: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Sube los archivos a Beam manteniendo el mismo conteo de modelos que Modal.
+        """Exportador Beam V2, aislado de Modal, RunPod y Docker.
 
-        La transferencia rápida y paralela de Beam permanece intacta. La única
-        diferencia es el progreso: se construye desde los mismos registros
-        resueltos que consume Modal, no desde la cantidad de archivos físicos
-        del árbol preparado (que puede incluir archivos auxiliares de SAM3).
+        La barra principal representa archivos/bytes físicos ya procesados. El
+        texto conserva también el total de modelos lógicos del manifiesto para
+        evitar mezclar ambos conceptos. "Omitir existentes" consulta una sola
+        vez cada carpeta remota y excluye archivos antes de transferirlos.
         """
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         from app.services.beam_file_manager_service import BeamFileManagerService
@@ -156,53 +156,95 @@ class RuntimeModelVolumeExportService:
         bytes_total = sum(path.stat().st_size for path in files)
         prefix = remote_path.replace("\\", "/").strip("/")
         upload_items: list[tuple[Path, str]] = []
-
         for path in files:
             relative = path.relative_to(models_root).as_posix()
             destination = "/".join(part for part in (prefix, relative) if part)
             upload_items.append((path, destination))
 
-        # Modal usa la lista de modelos resuelta por _resolve(). Beam debe usar
-        # exactamente esa misma lista para el total y el progreso. No se agrupa
-        # por carpeta y no se cuentan archivos auxiliares copiados recursivamente.
         logical_paths: list[str] = []
-        logical_labels: dict[str, str] = {}
         for item in logical_models:
             if not item.get("found", True):
                 continue
             target = str(item.get("target_path") or "").replace("\\", "/").strip("/")
-            if not target or target in logical_labels:
-                continue
-            remote_target = "/".join(part for part in (prefix, target) if part)
-            logical_paths.append(remote_target)
-            logical_labels[remote_target] = target
-
+            if target and target not in logical_paths:
+                logical_paths.append(target)
         logical_total = len(logical_paths)
-        completed_paths: set[str] = set()
-        progress_lock = threading.Lock()
+        physical_total = len(upload_items)
+        transfer_started = time.perf_counter()
+        latest_percent = 94
+
+        def human_bytes(value: int) -> str:
+            amount = float(max(0, value))
+            for unit in ("B", "KB", "MB", "GB", "TB"):
+                if amount < 1024 or unit == "TB":
+                    return f"{amount:.1f} {unit}" if unit != "B" else f"{int(amount)} B"
+                amount /= 1024
+            return f"{amount:.1f} TB"
 
         notify(
-            "beam-copy",
+            "beam-inventory",
             94,
-            f"Subiendo a Beam {logical_total} modelo{'s' if logical_total != 1 else ''} con transferencias paralelas seguras…",
+            (
+                f"Beam: preparando {physical_total} archivo{'s' if physical_total != 1 else ''} "
+                f"({logical_total} modelo{'s' if logical_total != 1 else ''} lógicos). "
+                + ("Se omitirán los archivos que ya existan." if not overwrite else "Se sobrescribirán los destinos existentes.")
+            ),
         )
 
-        def on_completed(current: int, total: int, remote: str, uploaded_bytes: int) -> None:
-            del current, total, uploaded_bytes
-            normalized_remote = str(remote or "").replace("\\", "/").strip("/")
-            with progress_lock:
-                if normalized_remote not in logical_labels or normalized_remote in completed_paths:
-                    return
-                completed_paths.add(normalized_remote)
-                logical_current = len(completed_paths)
-                label = logical_labels[normalized_remote]
+        def on_progress(event: dict[str, Any]) -> None:
+            nonlocal latest_percent
+            phase = str(event.get("phase") or "uploading")
+            current = int(event.get("current") or 0)
+            total = max(1, int(event.get("total") or physical_total or 1))
+            processed_bytes = int(event.get("bytes_processed") or 0)
+            uploaded_bytes = int(event.get("bytes_uploaded") or 0)
+            total_bytes_event = max(1, int(event.get("bytes_total") or bytes_total or 1))
+            skipped = int(event.get("files_skipped") or 0)
+            remote = str(event.get("remote") or "").replace("\\", "/")
 
-            percent = 94 + int(5 * logical_current / max(1, logical_total))
-            notify(
-                "beam-copy",
-                min(99, percent),
-                f"Subiendo a Beam ({logical_current}/{logical_total}): {label}",
-            )
+            # Los bytes completados son la medida principal; para archivos vacíos
+            # o inventario se conserva el avance por cantidad de archivos.
+            ratio_bytes = processed_bytes / total_bytes_event
+            ratio_files = current / total
+            ratio = max(ratio_bytes, ratio_files if total_bytes_event <= 1 else 0.0)
+            percent = 94 + int(5 * min(1.0, max(0.0, ratio)))
+            latest_percent = max(latest_percent, min(99, percent))
+
+            elapsed = max(0.001, time.perf_counter() - transfer_started)
+            speed = uploaded_bytes / elapsed
+            filename = remote.rsplit("/", 1)[-1] if remote else ""
+            if phase == "inventory":
+                message = f"Beam: comprobando archivos existentes en el volumen {volume_name}…"
+            elif phase == "skipping":
+                message = (
+                    f"Beam: {current}/{total} archivos procesados · {skipped} omitidos · "
+                    f"ya existía: {filename}"
+                )
+            elif phase == "completed":
+                message = (
+                    f"Beam: {current}/{total} archivos procesados · "
+                    f"{human_bytes(processed_bytes)} de {human_bytes(total_bytes_event)} · {skipped} omitidos."
+                )
+            else:
+                message = (
+                    f"Beam: {current}/{total} archivos · {human_bytes(processed_bytes)} de "
+                    f"{human_bytes(total_bytes_event)} · {human_bytes(int(speed))}/s"
+                )
+                if skipped:
+                    message += f" · {skipped} omitidos"
+                if filename:
+                    message += f" · último: {filename}"
+            notify(f"beam-{phase}", latest_percent, message)
+
+        def on_completed(
+            current: int,
+            total: int,
+            remote: str,
+            uploaded_bytes: int,
+            status: str = "uploaded",
+        ) -> None:
+            # Conservado como callback separado para compatibilidad y trazabilidad.
+            del current, total, remote, uploaded_bytes, status
 
         try:
             result = BeamFileManagerService.upload_many(
@@ -210,40 +252,40 @@ class RuntimeModelVolumeExportService:
                 volume=volume_name,
                 files=upload_items,
                 timeout=max(3600, int(cfg.timeout_seconds or 900)),
-                workers=3,
+                workers=4,
+                overwrite=overwrite,
                 on_completed=on_completed,
+                on_progress=on_progress,
             )
         except Exception as exc:
             raise RuntimeError(
                 f"Beam no pudo subir los modelos al volumen {volume_name}: {exc}"
             ) from exc
 
-        # Algunos árboles compuestos contienen auxiliares que no representan un
-        # modelo adicional. Al terminar la transferencia, completa únicamente
-        # los modelos del manifiesto que no hayan emitido evento individual.
-        for logical_path in logical_paths:
-            if logical_path in completed_paths:
-                continue
-            completed_paths.add(logical_path)
-            logical_current = len(completed_paths)
-            percent = 94 + int(5 * logical_current / max(1, logical_total))
-            notify(
-                "beam-copy",
-                min(99, percent),
-                f"Subiendo a Beam ({logical_current}/{logical_total}): {logical_labels[logical_path]}",
-            )
-
-        notify("beam-copy", 99, f"Beam recibió {logical_total} modelos.")
+        uploaded_count = int(result.get("files_uploaded", 0))
+        skipped_count = int(result.get("files_skipped", 0))
+        uploaded_bytes = int(result.get("bytes_uploaded", 0))
+        notify(
+            "beam-copy",
+            99,
+            (
+                f"Beam completado: {uploaded_count} archivos subidos, {skipped_count} omitidos, "
+                f"{logical_total} modelos lógicos preparados."
+            ),
+        )
         return {
             "volume_name": volume_name,
             "path": prefix,
             "target": f"beam://{volume_name}" + (f"/{prefix}" if prefix else ""),
             "overwrite_requested": overwrite,
             "models_uploaded": logical_total,
-            "files_uploaded": int(result.get("files_uploaded", len(files))),
-            "bytes_uploaded": int(result.get("bytes_uploaded", bytes_total)),
-            "transfer_mode": "parallel-root-copy-then-move-modal-manifest-progress",
-            "parallel_workers": int(result.get("workers", 1)),
+            "files_total": physical_total,
+            "files_uploaded": uploaded_count,
+            "files_skipped": skipped_count,
+            "bytes_total": int(result.get("bytes_total", bytes_total)),
+            "bytes_uploaded": uploaded_bytes,
+            "transfer_mode": "beam-v2-inventory-parallel-root-copy-real-progress",
+            "parallel_workers": int(result.get("workers", 0)),
         }
 
     @staticmethod
