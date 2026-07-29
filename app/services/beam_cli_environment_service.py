@@ -72,9 +72,16 @@ class BeamCliEnvironmentService:
 
     @classmethod
     def _external_cli_ready(cls, executable: str) -> bool:
+        """Valida el CLI sin ejecutar comandos interactivos.
+
+        En versiones actuales de Beam, ``beam --help`` puede iniciar el flujo de
+        bienvenida y esperar ``Token:`` cuando todavía no existe un contexto.
+        Por eso la comprobación se limita a verificar el ejecutable; el entorno
+        aislado se valida importando el módulo con su propio Python.
+        """
         try:
-            completed = cls._run([executable, "--help"], timeout=20)
-            return completed.returncode == 0
+            path = Path(executable)
+            return path.is_file() if path.is_absolute() else shutil.which(executable) is not None
         except Exception:
             return False
 
@@ -93,7 +100,7 @@ class BeamCliEnvironmentService:
                 ],
                 timeout=30,
             )
-            return completed.returncode == 0 and cls._external_cli_ready(str(beam_executable))
+            return completed.returncode == 0
         except Exception:
             return False
 

@@ -256,6 +256,7 @@ class InfrastructureProviderService:
         configured = subprocess.run(
             [executable, "configure", "default", "--token", env["BEAM_TOKEN"]],
             env=env,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=60,
@@ -276,11 +277,18 @@ class InfrastructureProviderService:
         except Exception as exc:
             return {
                 "success": False,
-                "message": "No fue posible preparar Beam CLI.",
+                "message": "No fue posible preparar Beam CLI: " + str(exc)[-1200:],
                 "details": {"error": str(exc), "requirements": "requirements-beam.txt"},
             }
         try:
-            listed = subprocess.run([executable, "volume", "list"], env=env, capture_output=True, text=True, timeout=120)
+            listed = subprocess.run(
+                [executable, "volume", "list"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
             output = cls._beam_output(listed)
             if listed.returncode != 0:
                 lowered = output.lower()
@@ -304,17 +312,31 @@ class InfrastructureProviderService:
         except Exception as exc:
             return {
                 "success": False,
-                "message": "No fue posible preparar Beam CLI.",
+                "message": "No fue posible preparar Beam CLI: " + str(exc)[-1200:],
                 "details": {"error": str(exc), "requirements": "requirements-beam.txt"},
             }
         try:
-            listed = subprocess.run([executable, "volume", "list"], env=env, capture_output=True, text=True, timeout=120)
+            listed = subprocess.run(
+                [executable, "volume", "list"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
             output = cls._beam_output(listed)
             if listed.returncode != 0:
                 return {"success": False, "message": "No fue posible consultar los volúmenes de Beam.", "details": {"output": output[-3000:]}}
             if cfg.volume_name in output:
                 return {"success": True, "message": "Volumen Beam disponible.", "details": {"volume_name": cfg.volume_name, "output": output[-3000:]}}
-            created = subprocess.run([executable, "volume", "create", cfg.volume_name], env=env, capture_output=True, text=True, timeout=180)
+            created = subprocess.run(
+                [executable, "volume", "create", cfg.volume_name],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
             created_output = cls._beam_output(created)
             return {
                 "success": created.returncode == 0,
