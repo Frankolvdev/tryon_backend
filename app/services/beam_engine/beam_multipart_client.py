@@ -1,218 +1,288 @@
 from __future__ import annotations
 
-import os
-import queue
-import re
-import subprocess
-import sys
+import posixpath
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, Callable
+
+import requests
 
 from app.services.beam_engine.beam_config import BeamSyncConfig
+from app.services.beam_engine.beam_progress_reader import ProgressReader
 
 LineCallback = Callable[[str, dict[str, Any]], None]
 
 
+@dataclass(frozen=True)
+class _RemoteTarget:
+    volume_name: str
+    volume_path: str
+
+
 class BeamMultipartClient:
-    ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-    PERCENT = re.compile(r"(?P<value>[0-9]{1,3}(?:[.,][0-9]+)?)\s*%")
-    SPEED = re.compile(r"(?P<value>[0-9]+(?:[.,][0-9]+)?)\s*(?P<unit>KiB|MiB|GiB|KB|MB|GB|B)/s", re.I)
-    SIZE = re.compile(
-        r"(?P<done>[0-9]+(?:[.,][0-9]+)?)\s*(?P<done_unit>KiB|MiB|GiB|KB|MB|GB|B)"
-        r"\s*(?:/|of)\s*"
-        r"(?P<total>[0-9]+(?:[.,][0-9]+)?)\s*(?P<total_unit>KiB|MiB|GiB|KB|MB|GB|B)",
-        re.I,
-    )
-    UNITS = {"B": 1, "KB": 1000, "MB": 1000**2, "GB": 1000**3, "KIB": 1024, "MIB": 1024**2, "GIB": 1024**3}
+    """Independent Beam multipart uploader using beta9 RPC + presigned PUTs."""
 
-    @classmethod
-    def patch_windows_sdk(cls) -> list[str]:
-        if os.name != "nt":
-            return []
-        patched: list[str] = []
-        for base in map(Path, sys.path):
-            if not base.exists():
-                continue
-            for path in base.glob("**/beam/**/multipart.py"):
-                try:
-                    text = path.read_text(encoding="utf-8")
-                    updated = text.replace("os.path.join", "posixpath.join").replace("os.path.basename", "posixpath.basename")
-                    if "import posixpath" not in updated:
-                        updated = "import posixpath\n" + updated
-                    if updated != text:
-                        path.write_text(updated, encoding="utf-8")
-                        patched.append(str(path))
-                except OSError:
-                    continue
-        return patched
+    @staticmethod
+    def _remote_target(destination: str) -> _RemoteTarget:
+        normalized = str(destination or "").replace("\\", "/").strip()
+        if not normalized.startswith("beam://"):
+            raise ValueError("El destino Beam debe comenzar con beam://")
+        payload = normalized[len("beam://") :].lstrip("/")
+        volume_name, separator, raw_path = payload.partition("/")
+        volume_name = volume_name.strip()
+        if not volume_name:
+            raise ValueError("El destino Beam no contiene nombre de volumen.")
+        clean_parts = [part for part in raw_path.split("/") if part not in {"", ".", ".."}]
+        volume_path = posixpath.join(*clean_parts) if clean_parts else ""
+        if not separator or not volume_path:
+            raise ValueError("El destino Beam debe incluir la ruta remota del archivo.")
+        return _RemoteTarget(volume_name=volume_name, volume_path=volume_path)
 
-    @classmethod
-    def _to_bytes(cls, value: str, unit: str) -> int:
-        return int(float(value.replace(",", ".")) * cls.UNITS[unit.upper()])
+    @staticmethod
+    def _sdk(config: BeamSyncConfig):
+        try:
+            import beam  # noqa: F401 - activates Beam-specific beta9 defaults
+            from beta9.channel import get_channel
+            from beta9.clients.volume import (
+                AbortMultipartUploadRequest,
+                CompletedPart,
+                CompleteMultipartUploadRequest,
+                CreateMultipartUploadRequest,
+                VolumeServiceStub,
+            )
+            from beta9.config import ConfigContext
+        except Exception as exc:  # pragma: no cover - depends on installed SDK
+            raise RuntimeError(
+                "El SDK beta9 de Beam no está disponible en el venv del backend. "
+                'Ejecuta: pip install --upgrade "beam-client>=0.2.202,<0.3".'
+            ) from exc
 
-    @classmethod
-    def _metrics(cls, line: str, size: int, started: float) -> dict[str, Any]:
-        clean = cls.ANSI.sub("", line).strip()
-        percent_match = cls.PERCENT.search(clean)
-        size_match = cls.SIZE.search(clean)
-        sent = 0
-        percent = 0.0
-        if size_match:
-            sent = min(size, cls._to_bytes(size_match.group("done"), size_match.group("done_unit")))
-            percent = 100.0 * sent / max(1, size)
-        elif percent_match:
-            percent = float(percent_match.group("value").replace(",", "."))
-            sent = int(size * min(100.0, max(0.0, percent)) / 100.0)
-
-        speed_match = cls.SPEED.search(clean)
-        speed = 0
-        if speed_match:
-            speed = cls._to_bytes(speed_match.group("value"), speed_match.group("unit"))
-        elif sent:
-            speed = int(sent / max(0.001, time.perf_counter() - started))
-        eta = int((size - sent) / speed) if speed and sent < size else 0
+        token = str(config.env.get("BEAM_TOKEN") or "").strip()
+        if not token:
+            raise RuntimeError("No se encontró BEAM_TOKEN para autenticar el SDK de Beam.")
+        host = str(config.env.get("GATEWAY_HOST") or "gateway.beam.cloud").strip()
+        port = int(config.env.get("GATEWAY_PORT") or 443)
+        context = ConfigContext(token=token, gateway_host=host, gateway_port=port)
+        channel = get_channel(context)
+        service = VolumeServiceStub(channel)
         return {
-            "native_line": clean,
-            "file_progress": round(min(100.0, max(0.0, percent)), 2),
-            "file_bytes_sent": sent,
-            "speed_bps": speed,
-            "eta_seconds": eta,
+            "channel": channel,
+            "service": service,
+            "create_request": CreateMultipartUploadRequest,
+            "complete_request": CompleteMultipartUploadRequest,
+            "abort_request": AbortMultipartUploadRequest,
+            "completed_part": CompletedPart,
         }
 
     @staticmethod
-    def _reader(stream: TextIO, output: queue.Queue[str]) -> None:
-        """Read Rich/Beam progress frames terminated by CR or LF.
-
-        Beam CLI does not always emit newline-delimited output. Its progress bar
-        is commonly redrawn with carriage returns and may be written to stderr.
-        """
-        try:
-            buffer = ""
-            while True:
-                char = stream.read(1)
-                if char == "":
-                    if buffer.strip():
-                        output.put(buffer)
-                    return
-                if char in {"\r", "\n"}:
-                    if buffer.strip():
-                        output.put(buffer)
-                    buffer = ""
-                else:
-                    buffer += char
-        finally:
-            try:
-                stream.close()
-            except Exception:
-                pass
+    def _response_error(response: Any, fallback: str) -> str:
+        return str(
+            getattr(response, "err_msg", "")
+            or getattr(response, "error_msg", "")
+            or fallback
+        )
 
     @classmethod
-    def upload_file(cls, config: BeamSyncConfig, source: Path, destination: str, on_line: LineCallback) -> None:
-        cls.patch_windows_sdk()
-        normalized_destination = destination.replace("\\", "/")
-        process_env = dict(config.env)
-        # Beam/Rich suppresses dynamic progress when stdout/stderr are pipes.
-        # These variables force terminal rendering while keeping the process
-        # non-interactive and capturable by the backend.
-        process_env.setdefault("PYTHONUNBUFFERED", "1")
-        process_env.setdefault("PYTHONIOENCODING", "utf-8")
-        process_env.setdefault("FORCE_COLOR", "1")
-        process_env.setdefault("CLICOLOR_FORCE", "1")
-        process_env.setdefault("TERM", "xterm-256color")
-        process_env.setdefault("COLUMNS", "140")
+    def upload_file(
+        cls,
+        config: BeamSyncConfig,
+        source: Path,
+        destination: str,
+        on_line: LineCallback,
+    ) -> None:
+        source = Path(source).resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"No existe el archivo a subir: {source}")
+        file_size = source.stat().st_size
+        target = cls._remote_target(destination)
+        sdk = cls._sdk(config)
+        channel = sdk["channel"]
+        service = sdk["service"]
+        upload_id = ""
+        started_at = time.perf_counter()
 
-        process = subprocess.Popen(
-            [config.executable, "cp", "--multipart", str(source), normalized_destination],
-            env=process_env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            errors="replace",
-            bufsize=0,
-        )
-        started = time.perf_counter()
-        output: queue.Queue[str] = queue.Queue()
-        assert process.stdout is not None
-        assert process.stderr is not None
-        readers = [
-            threading.Thread(target=cls._reader, args=(process.stdout, output), daemon=True),
-            threading.Thread(target=cls._reader, args=(process.stderr, output), daemon=True),
-        ]
-        for reader in readers:
-            reader.start()
-
-        last_emit = 0.0
-        last_metrics: dict[str, Any] = {
-            "native_line": "Preparando transferencia multipart…",
-            "file_progress": 0.0,
-            "file_bytes_sent": 0,
-            "speed_bps": 0,
-            "eta_seconds": 0,
-        }
-        captured: list[str] = []
         try:
-            while process.poll() is None or any(reader.is_alive() for reader in readers) or not output.empty():
-                if time.perf_counter() - started > config.timeout_seconds:
-                    process.kill()
-                    raise TimeoutError(f"Beam multipart excedió {config.timeout_seconds} segundos.")
-                try:
-                    line = output.get(timeout=0.2)
-                except queue.Empty:
-                    # Heartbeat: keeps the BackOffice alive while Beam negotiates
-                    # multipart before its first native progress frame.
-                    now = time.perf_counter()
-                    if now - last_emit >= 1.0:
-                        heartbeat = dict(last_metrics)
-                        heartbeat["elapsed_seconds"] = round(now - started, 1)
-                        heartbeat["native_line"] = str(
-                            last_metrics.get("native_line")
-                            or "Beam multipart activo; esperando métricas de transferencia…"
+            created = service.create_multipart_upload(
+                sdk["create_request"](
+                    volume_name=target.volume_name,
+                    volume_path=target.volume_path,
+                    chunk_size=config.multipart_part_size_bytes,
+                    file_size=file_size,
+                )
+            )
+            if not getattr(created, "ok", False):
+                raise RuntimeError(cls._response_error(created, "Beam no pudo iniciar Multipart."))
+            upload_id = str(getattr(created, "upload_id", "") or "")
+            parts = list(getattr(created, "file_upload_parts", None) or [])
+            if not upload_id:
+                raise RuntimeError("Beam inició Multipart sin devolver upload_id.")
+            if file_size > 0 and not parts:
+                raise RuntimeError("Beam inició Multipart sin devolver URLs de partes.")
+
+            state_lock = threading.Lock()
+            emit_lock = threading.Lock()
+            uploaded_by_part: dict[int, int] = {
+                int(getattr(part, "number")): 0 for part in parts
+            }
+            last_emit_at = started_at
+            last_emit_bytes = 0
+            last_sample_at = started_at
+            last_sample_bytes = 0
+            smoothed_speed = 0.0
+
+            def report(part_number: int, bytes_in_part: int, attempt: int, *, force: bool = False) -> None:
+                nonlocal last_emit_at, last_emit_bytes, last_sample_at, last_sample_bytes, smoothed_speed
+                now = time.perf_counter()
+                with state_lock:
+                    uploaded_by_part[part_number] = max(0, int(bytes_in_part))
+                    total_sent = min(file_size, sum(uploaded_by_part.values()))
+                with emit_lock:
+                    delta_time = max(0.001, now - last_sample_at)
+                    delta_bytes = max(0, total_sent - last_sample_bytes)
+                    if delta_bytes > 0:
+                        instant_speed = delta_bytes / delta_time
+                        smoothed_speed = (
+                            instant_speed if smoothed_speed <= 0 else smoothed_speed * 0.75 + instant_speed * 0.25
                         )
-                        on_line(heartbeat["native_line"], heartbeat)
-                        last_emit = now
-                    continue
-                clean = cls.ANSI.sub("", line).strip()
-                if not clean:
-                    continue
-                captured.append(clean)
-                metrics = cls._metrics(clean, source.stat().st_size, started)
-                # Do not let informational Beam lines erase a previously parsed
-                # progress frame. Only replace numeric transfer values when the
-                # new line actually contains them.
-                has_progress = bool(cls.PERCENT.search(clean) or cls.SIZE.search(clean))
-                has_speed = bool(cls.SPEED.search(clean))
-                if has_progress:
-                    last_metrics.update(metrics)
-                else:
-                    last_metrics["native_line"] = clean
-                    if has_speed:
-                        last_metrics["speed_bps"] = metrics["speed_bps"]
-                        sent = int(last_metrics.get("file_bytes_sent") or 0)
-                        speed = int(last_metrics.get("speed_bps") or 0)
-                        last_metrics["eta_seconds"] = int((source.stat().st_size - sent) / speed) if speed else 0
-                on_line(clean, dict(last_metrics))
-                last_emit = time.perf_counter()
+                        last_sample_at = now
+                        last_sample_bytes = total_sent
+                    should_emit = (
+                        force
+                        or now - last_emit_at >= config.progress_interval_seconds
+                        or total_sent - last_emit_bytes >= config.progress_bytes_step
+                        or total_sent >= file_size
+                    )
+                    if not should_emit:
+                        return
+                    speed = int(max(0.0, smoothed_speed))
+                    remaining = max(0, file_size - total_sent)
+                    eta = int(remaining / speed) if speed else 0
+                    metrics = {
+                        "native_line": "Beam Multipart directo",
+                        "file_progress": round(100.0 * total_sent / max(1, file_size), 2),
+                        "file_bytes_sent": total_sent,
+                        "file_bytes_total": file_size,
+                        "file_speed_bps": speed,
+                        "file_eta_seconds": eta,
+                        # Compatibility with the existing progress consumer.
+                        "speed_bps": speed,
+                        "eta_seconds": eta,
+                        "part_number": part_number,
+                        "parts_total": len(parts),
+                        "attempt": attempt,
+                    }
+                    on_line(
+                        f"Multipart parte {part_number}/{len(parts)} · {metrics['file_progress']:.2f}%",
+                        metrics,
+                    )
+                    last_emit_at = now
+                    last_emit_bytes = total_sent
 
-            code = process.wait()
+            def reset_part(part_number: int, attempt: int) -> None:
+                with state_lock:
+                    uploaded_by_part[part_number] = 0
+                report(part_number, 0, attempt, force=True)
+
+            def upload_part(part: Any) -> Any:
+                part_number = int(getattr(part, "number"))
+                start = int(getattr(part, "start"))
+                end = int(getattr(part, "end"))
+                signed_url = str(getattr(part, "url") or "")
+                length = end - start
+                if length < 0 or not signed_url:
+                    raise RuntimeError(f"Beam devolvió una parte inválida: {part_number}")
+                last_error: Exception | None = None
+                for attempt in range(1, config.retries + 1):
+                    reset_part(part_number, attempt)
+                    try:
+                        with source.open("rb") as file:
+                            file.seek(start)
+                            reader = ProgressReader(
+                                file,
+                                length=length,
+                                on_progress=lambda consumed, pn=part_number, a=attempt: report(pn, consumed, a),
+                            )
+                            response = requests.put(
+                                signed_url,
+                                data=reader,
+                                headers={"Content-Length": str(length)},
+                                timeout=(30, config.timeout_seconds),
+                            )
+                            response.raise_for_status()
+                            etag = str(response.headers.get("ETag") or response.headers.get("etag") or "").strip('"')
+                            if not etag:
+                                raise RuntimeError(f"La parte {part_number} terminó sin ETag.")
+                        report(part_number, length, attempt, force=True)
+                        return sdk["completed_part"](number=part_number, etag=etag)
+                    except Exception as exc:
+                        last_error = exc
+                        reset_part(part_number, attempt)
+                        if "cancelada por el usuario" in str(exc).casefold():
+                            raise
+                        if attempt >= config.retries:
+                            break
+                        time.sleep(min(8, 2**attempt))
+                raise RuntimeError(
+                    f"Falló la parte {part_number} después de {config.retries} intentos: {last_error}"
+                ) from last_error
+
+            completed_parts: list[Any] = []
+            futures: list[Future[Any]] = []
+            with ThreadPoolExecutor(max_workers=config.multipart_workers, thread_name_prefix="beam-multipart") as executor:
+                futures = [executor.submit(upload_part, part) for part in parts]
+                try:
+                    for future in as_completed(futures, timeout=config.timeout_seconds):
+                        completed_parts.append(future.result())
+                except BaseException:
+                    for future in futures:
+                        future.cancel()
+                    raise
+
+            completed_parts.sort(key=lambda item: int(getattr(item, "number")))
+            completed = service.complete_multipart_upload(
+                sdk["complete_request"](
+                    upload_id=upload_id,
+                    volume_name=target.volume_name,
+                    volume_path=target.volume_path,
+                    completed_parts=completed_parts,
+                )
+            )
+            if not getattr(completed, "ok", False):
+                raise RuntimeError(cls._response_error(completed, "Beam no pudo completar Multipart."))
+            on_line(
+                "Transferencia multipart directa completada.",
+                {
+                    "native_line": "Transferencia multipart directa completada.",
+                    "file_progress": 100.0,
+                    "file_bytes_sent": file_size,
+                    "file_bytes_total": file_size,
+                    "file_speed_bps": int(file_size / max(0.001, time.perf_counter() - started_at)),
+                    "file_eta_seconds": 0,
+                    "speed_bps": int(file_size / max(0.001, time.perf_counter() - started_at)),
+                    "eta_seconds": 0,
+                    "part_number": len(parts),
+                    "parts_total": len(parts),
+                    "attempt": 1,
+                },
+            )
         except BaseException:
-            if process.poll() is None:
-                process.terminate()
+            if upload_id:
+                try:
+                    service.abort_multipart_upload(
+                        sdk["abort_request"](
+                            upload_id=upload_id,
+                            volume_name=target.volume_name,
+                            volume_path=target.volume_path,
+                        )
+                    )
+                except Exception:
+                    pass
             raise
-        if code != 0:
-            detail = "\n".join(captured[-30:])
-            raise RuntimeError(f"Beam multipart terminó con código {code}. {detail}".strip())
-
-        # Ensure the final state reaches 100% even when Beam clears its Rich bar.
-        on_line(
-            "Transferencia multipart completada.",
-            {
-                "native_line": "Transferencia multipart completada.",
-                "file_progress": 100.0,
-                "file_bytes_sent": source.stat().st_size,
-                "speed_bps": int(source.stat().st_size / max(0.001, time.perf_counter() - started)),
-                "eta_seconds": 0,
-            },
-        )
+        finally:
+            try:
+                channel.close()
+            except Exception:
+                pass
