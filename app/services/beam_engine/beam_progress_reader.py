@@ -2,31 +2,24 @@ from __future__ import annotations
 
 from typing import BinaryIO, Callable
 
-ProgressCallback = Callable[[int], None]
-
 
 class ProgressReader:
-    """Bounded streaming reader for one multipart range.
+    """Vista limitada de una parte del archivo con telemetría durante read()."""
 
-    Requests consumes this object through ``read()``. The callback receives the
-    absolute number of bytes consumed inside this part, allowing progress to be
-    measured while the socket is transmitting instead of after a part finishes.
-    """
-
-    def __init__(self, file: BinaryIO, *, length: int, on_progress: ProgressCallback):
+    def __init__(
+        self,
+        file: BinaryIO,
+        *,
+        length: int,
+        on_progress: Callable[[int], None],
+    ) -> None:
         self._file = file
         self._length = max(0, int(length))
-        self._on_progress = on_progress
         self._bytes_read = 0
+        self._on_progress = on_progress
 
     def __len__(self) -> int:
         return self._length
-
-    def tell(self) -> int:
-        return self._bytes_read
-
-    def readable(self) -> bool:
-        return True
 
     def read(self, size: int = -1) -> bytes:
         remaining = self._length - self._bytes_read
@@ -40,3 +33,6 @@ class ProgressReader:
         self._bytes_read += len(data)
         self._on_progress(self._bytes_read)
         return data
+
+    def tell(self) -> int:
+        return self._bytes_read
