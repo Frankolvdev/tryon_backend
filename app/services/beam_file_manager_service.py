@@ -321,11 +321,38 @@ class BeamFileManagerService:
                 args=["cp", str(staged_local), cls._uri(volume)],
                 timeout=timeout,
             )
+
+            # Las reexportaciones suelen encontrar el archivo final ya creado.
+            # Beam CLI puede quedarse esperando o fallar al mover sobre un destino
+            # existente aunque el archivo temporal ya se haya subido por completo.
+            # Elimina primero el destino de forma acotada y después realiza el move.
+            # Un "not found" es inocuo: significa que es la primera subida.
+            try:
+                cls._run_in_context(
+                    executable=executable,
+                    env=env,
+                    args=["rm", final_remote],
+                    timeout=180,
+                )
+            except BeamFileManagerError as exc:
+                detail = str(exc).casefold()
+                missing_markers = (
+                    "not found",
+                    "no such file",
+                    "unable to stat path",
+                    "path does not exist",
+                )
+                if not any(marker in detail for marker in missing_markers):
+                    raise
+
             cls._run_in_context(
                 executable=executable,
                 env=env,
                 args=["mv", staged_remote, final_remote],
-                timeout=max(600, timeout),
+                # Un movimiento dentro del mismo volumen no debe tardar lo mismo
+                # que transferir varios GB. Acotar este paso evita que el trabajo
+                # quede aparentemente congelado después de completar el upload.
+                timeout=300,
             )
         except Exception:
             try:

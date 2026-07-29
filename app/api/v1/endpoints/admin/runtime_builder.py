@@ -203,17 +203,20 @@ def _delete_profile(profile_id: int, db: Session) -> None:
             db.commit()
 
 
-@router.delete("/profiles/{profile_id}", status_code=204)
+@router.delete("/profiles/{profile_id}", status_code=200)
 def delete_profile(profile_id: int, db: Session = Depends(get_db)):
     _delete_profile(profile_id, db)
-    return None
+    # browserApiRequest espera una respuesta JSON. Un 204 vacío eliminaba el
+    # perfil correctamente, pero el BackOffice lo mostraba como error al intentar
+    # interpretar el cuerpo inexistente.
+    return {"success": True, "deleted_profile_id": profile_id}
 
 
-@router.post("/profiles/{profile_id}/delete", status_code=204)
+@router.post("/profiles/{profile_id}/delete", status_code=200)
 def delete_profile_compat(profile_id: int, db: Session = Depends(get_db)):
     """Compatibility endpoint for proxies/environments that mishandle DELETE routes."""
     _delete_profile(profile_id, db)
-    return None
+    return {"success": True, "deleted_profile_id": profile_id}
 
 
 @router.get("/config", response_model=RuntimeBuilderConfigResponse)
