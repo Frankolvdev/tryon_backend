@@ -4,14 +4,17 @@ import hashlib
 import os
 import shutil
 import subprocess
-import sys
 import threading
 import venv
 from pathlib import Path
 
 
 class BeamCliEnvironmentService:
-    """Provisiona Beam CLI en un entorno aislado del backend principal."""
+    """Provisiona Beam CLI sin bloquear las acciones del proveedor.
+
+    Prioriza una instalación existente y funcional. El entorno aislado solo se
+    crea como fallback y queda fuera del repositorio para no disparar reloads.
+    """
 
     _lock = threading.Lock()
 
@@ -53,20 +56,27 @@ class BeamCliEnvironmentService:
             raise RuntimeError(f"No existe el archivo de dependencias de Beam: {path}")
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
+    @staticmethod
+    def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=max(10, int(timeout)),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"La preparación de Beam CLI excedió {max(10, int(timeout))} segundos."
+            ) from exc
+
     @classmethod
-    def find_existing(cls) -> str | None:
-        override = str(os.environ.get("BEAM_CLI_EXECUTABLE") or "").strip()
-        if override:
-            path = Path(override).expanduser()
-            if path.is_file():
-                return str(path.resolve())
-
-        isolated = cls._beam_executable(cls.environment_path())
-        if isolated.is_file():
-            return str(isolated)
-
-        # Compatibilidad con instalaciones externas administradas por el operador.
-        return shutil.which("beam")
+    def _external_cli_ready(cls, executable: str) -> bool:
+        try:
+            completed = cls._run([executable, "--help"], timeout=20)
+            return completed.returncode == 0
+        except Exception:
+            return False
 
     @classmethod
     def _environment_ready(cls, environment_path: Path) -> bool:
@@ -74,73 +84,130 @@ class BeamCliEnvironmentService:
         python_executable = cls._python_executable(environment_path)
         if not beam_executable.is_file() or not python_executable.is_file():
             return False
-        completed = subprocess.run(
-            [str(python_executable), "-c", "import packaging; import beam.cli.main"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return completed.returncode == 0
+        try:
+            completed = cls._run(
+                [
+                    str(python_executable),
+                    "-c",
+                    "import packaging; import beam.cli.main",
+                ],
+                timeout=30,
+            )
+            return completed.returncode == 0 and cls._external_cli_ready(str(beam_executable))
+        except Exception:
+            return False
 
     @classmethod
-    def ensure(cls, *, timeout_seconds: int = 900) -> str:
-        """Devuelve el CLI Beam, creando/actualizando su venv aislado si hace falta."""
+    def find_existing(cls) -> str | None:
         override = str(os.environ.get("BEAM_CLI_EXECUTABLE") or "").strip()
         if override:
             path = Path(override).expanduser()
-            if not path.is_file():
-                raise RuntimeError(f"BEAM_CLI_EXECUTABLE no existe: {path}")
-            return str(path.resolve())
+            if path.is_file() and cls._external_cli_ready(str(path.resolve())):
+                return str(path.resolve())
 
-        with cls._lock:
-            env_path = cls.environment_path()
-            beam_executable = cls._beam_executable(env_path)
-            python_executable = cls._python_executable(env_path)
-            marker_path = env_path / ".requirements.sha256"
-            expected_digest = cls._requirements_digest()
-            current_digest = marker_path.read_text(encoding="utf-8").strip() if marker_path.is_file() else ""
+        isolated = cls._beam_executable(cls.environment_path())
+        if isolated.is_file() and cls._environment_ready(cls.environment_path()):
+            return str(isolated)
 
-            if current_digest == expected_digest and cls._environment_ready(env_path):
-                return str(beam_executable)
+        external = shutil.which("beam")
+        if external and cls._external_cli_ready(external):
+            return external
+        return None
 
-            env_path.parent.mkdir(parents=True, exist_ok=True)
-            if not python_executable.is_file():
-                venv.EnvBuilder(with_pip=True, clear=False).create(env_path)
+    @classmethod
+    def _install_isolated(cls, env_path: Path, *, timeout_seconds: int) -> str:
+        beam_executable = cls._beam_executable(env_path)
+        python_executable = cls._python_executable(env_path)
+        marker_path = env_path / ".requirements.sha256"
+        expected_digest = cls._requirements_digest()
 
-            bootstrap = subprocess.run(
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        if not python_executable.is_file():
+            venv.EnvBuilder(with_pip=True, clear=False).create(env_path)
+
+        # Reparación rápida del error real observado: Beam importa packaging al
+        # arrancar. No se actualiza pip/setuptools en cada clic, porque eso era
+        # lo que podía dejar la petición bloqueada durante muchos minutos.
+        packaging_check = cls._run(
+            [str(python_executable), "-c", "import packaging"],
+            timeout=20,
+        )
+        if packaging_check.returncode != 0:
+            packaging_install = cls._run(
                 [
-                    str(python_executable), "-m", "pip", "install",
-                    "--disable-pip-version-check", "--no-input", "--upgrade",
-                    "pip", "setuptools", "wheel", "packaging>=23,<27",
+                    str(python_executable),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--no-input",
+                    "packaging>=23,<27",
                 ],
-                capture_output=True,
-                text=True,
-                timeout=max(120, int(timeout_seconds)),
+                timeout=min(max(60, int(timeout_seconds)), 300),
             )
-            if bootstrap.returncode != 0:
-                output = (bootstrap.stdout or "") + "\n" + (bootstrap.stderr or "")
-                raise RuntimeError("No fue posible preparar las dependencias base de Beam CLI. " + output.strip()[-5000:])
+            if packaging_install.returncode != 0:
+                output = ((packaging_install.stdout or "") + "\n" + (packaging_install.stderr or "")).strip()
+                raise RuntimeError(
+                    "No fue posible instalar la dependencia 'packaging' requerida por Beam CLI. "
+                    + output[-5000:]
+                )
 
-            command = [
-                str(python_executable), "-m", "pip", "install",
-                "--disable-pip-version-check", "--no-input", "--upgrade",
-                "-r", str(cls.requirements_path()),
-            ]
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=max(120, int(timeout_seconds)))
+        current_digest = marker_path.read_text(encoding="utf-8").strip() if marker_path.is_file() else ""
+        if current_digest != expected_digest or not cls._environment_ready(env_path):
+            completed = cls._run(
+                [
+                    str(python_executable),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--no-input",
+                    "-r",
+                    str(cls.requirements_path()),
+                ],
+                timeout=min(max(120, int(timeout_seconds)), 600),
+            )
             if completed.returncode != 0:
-                output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+                output = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
                 raise RuntimeError(
                     "No fue posible instalar Beam CLI en su entorno aislado. "
-                    + output.strip()[-5000:]
-                )
-            if not cls._environment_ready(env_path):
-                raise RuntimeError(
-                    "Beam CLI se instaló, pero su entorno quedó incompleto. "
-                    "Falta alguna dependencia requerida por el propio CLI."
+                    + output[-5000:]
                 )
 
-            marker_path.write_text(expected_digest, encoding="utf-8")
-            return str(beam_executable)
+        if not cls._environment_ready(env_path):
+            diagnostic = cls._run(
+                [
+                    str(python_executable),
+                    "-c",
+                    "import packaging; import beam.cli.main; print('ok')",
+                ],
+                timeout=30,
+            )
+            output = ((diagnostic.stdout or "") + "\n" + (diagnostic.stderr or "")).strip()
+            raise RuntimeError(
+                "Beam CLI se instaló, pero no puede iniciar correctamente. "
+                + output[-5000:]
+            )
+
+        marker_path.write_text(expected_digest, encoding="utf-8")
+        return str(beam_executable)
+
+    @classmethod
+    def ensure(cls, *, timeout_seconds: int = 900) -> str:
+        """Devuelve un Beam CLI funcional sin reinstalarlo en cada acción."""
+        existing = cls.find_existing()
+        if existing:
+            return existing
+
+        with cls._lock:
+            # Otra petición pudo terminar la preparación mientras esperábamos.
+            existing = cls.find_existing()
+            if existing:
+                return existing
+            return cls._install_isolated(
+                cls.environment_path(),
+                timeout_seconds=timeout_seconds,
+            )
 
 
 beam_cli_environment_service = BeamCliEnvironmentService()
