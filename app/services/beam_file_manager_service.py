@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -82,62 +83,80 @@ class BeamFileManagerService:
         return cfg, executable, auth.env, home
 
     @classmethod
+    def _run_in_context(
+        cls,
+        *,
+        executable: str,
+        env: dict[str, str],
+        args: list[str],
+        timeout: int = 3600,
+    ) -> str:
+        """Ejecuta Beam reutilizando un entorno ya autenticado.
+
+        Esto evita recrear HOME, reconfigurar el Token y volver a autenticar
+        entre el ``cp`` y el ``mv`` de una misma subida.
+        """
+        transient_markers = (
+            "unable to connect to gateway",
+            "connection lost",
+            "reconnecting",
+            "connection reset",
+            "temporarily unavailable",
+            "deadline exceeded",
+        )
+        attempts = 3 if args and args[0] in {"cp", "ls", "mv", "rm"} else 1
+        last_output = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                completed = subprocess.run(
+                    [executable, *args],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=max(10, int(timeout)),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise BeamFileManagerError(
+                    f"Beam CLI excedió {max(10, int(timeout))} segundos ejecutando: "
+                    + " ".join(args)
+                ) from exc
+
+            output = "\n".join(
+                part.strip()
+                for part in (completed.stdout, completed.stderr)
+                if part and part.strip()
+            )
+            last_output = output
+            if completed.returncode == 0:
+                return output
+
+            lowered = output.casefold()
+            is_transient = any(marker in lowered for marker in transient_markers)
+            if not is_transient or attempt >= attempts:
+                break
+            time.sleep(2 if attempt == 1 else 5)
+
+        lowered = last_output.casefold()
+        if "unable to connect to gateway" in lowered or "connection lost" in lowered:
+            raise BeamFileManagerError(
+                "Beam perdió la conexión con su gateway después de 3 intentos. "
+                "Detalle: " + (last_output or "Beam CLI terminó con error")[-5000:]
+            )
+        raise BeamFileManagerError((last_output or "Beam CLI terminó con error")[-6000:])
+
+    @classmethod
     def _run(cls, db: Session, args: list[str], timeout: int = 3600):
         cfg, executable, env, home = cls._env(db)
         try:
-            transient_markers = (
-                "unable to connect to gateway",
-                "connection lost",
-                "reconnecting",
-                "connection reset",
-                "temporarily unavailable",
-                "deadline exceeded",
+            output = cls._run_in_context(
+                executable=executable,
+                env=env,
+                args=args,
+                timeout=timeout,
             )
-            attempts = 3 if args and args[0] in {"cp", "ls", "mv", "rm"} else 1
-            last_output = ""
-            for attempt in range(1, attempts + 1):
-                try:
-                    completed = subprocess.run(
-                        [executable, *args],
-                        env=env,
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                        errors="replace",
-                        timeout=max(10, int(timeout)),
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    raise BeamFileManagerError(
-                        f"Beam CLI excedió {max(10, int(timeout))} segundos ejecutando: "
-                        + " ".join(args)
-                    ) from exc
-
-                output = "\n".join(
-                    part.strip()
-                    for part in (completed.stdout, completed.stderr)
-                    if part and part.strip()
-                )
-                last_output = output
-                if completed.returncode == 0:
-                    return cfg, output
-
-                lowered = output.casefold()
-                is_transient = any(marker in lowered for marker in transient_markers)
-                if not is_transient or attempt >= attempts:
-                    break
-                time.sleep(2 if attempt == 1 else 5)
-
-            lowered = last_output.casefold()
-            if "unable to connect to gateway" in lowered or "connection lost" in lowered:
-                raise BeamFileManagerError(
-                    "Beam perdió la conexión con su gateway después de 3 intentos. "
-                    "Actualiza beam-client en el mismo venv del backend con: "
-                    "pip install --upgrade beam-client. Detalle: "
-                    + (last_output or "Beam CLI terminó con error")[-5000:]
-                )
-            raise BeamFileManagerError(
-                (last_output or "Beam CLI terminó con error")[-6000:]
-            )
+            return cfg, output
         finally:
             shutil.rmtree(home, ignore_errors=True)
 
@@ -256,6 +275,77 @@ class BeamFileManagerService:
         return {"volume": selected, "path": clean, "items": items}
 
     @classmethod
+    def _upload_via_root_in_context(
+        cls,
+        *,
+        executable: str,
+        env: dict[str, str],
+        volume: str,
+        local_path: Path,
+        destination: str,
+        timeout: int,
+    ) -> None:
+        """Sube a la raíz y mueve dentro del volumen usando una sola autenticación.
+
+        Beam CLI 0.2.x en Windows interpreta incorrectamente destinos anidados
+        ``beam://volumen/carpeta/archivo`` y convierte la ruta en
+        ``volumen\carpeta``. El único destino de ``beam cp`` utilizado aquí es
+        la raíz ``beam://volumen``. La ubicación final se resuelve con ``beam mv``.
+        """
+        destination_clean = cls._clean(destination)
+        if not destination_clean:
+            raise BeamFileManagerError("La ruta de destino Beam está vacía.")
+        source = Path(local_path)
+        if not source.is_file():
+            raise BeamFileManagerError(f"No existe el archivo local para Beam: {source}")
+
+        suffix = "".join(source.suffixes)[-40:]
+        staged_name = f".tryon-upload-{uuid.uuid4().hex}{suffix}"
+        staged_remote = cls._cli_path(volume, staged_name)
+        final_remote = cls._cli_path(volume, destination_clean)
+        staged_local = source.parent / staged_name
+
+        # Beam conserva el basename del archivo local al copiar a la raíz.
+        # Se crea un hardlink temporal cuando es posible para no duplicar GB.
+        created_copy = False
+        try:
+            try:
+                os.link(source, staged_local)
+            except OSError:
+                shutil.copy2(source, staged_local)
+                created_copy = True
+
+            cls._run_in_context(
+                executable=executable,
+                env=env,
+                args=["cp", str(staged_local), cls._uri(volume)],
+                timeout=timeout,
+            )
+            cls._run_in_context(
+                executable=executable,
+                env=env,
+                args=["mv", staged_remote, final_remote],
+                timeout=max(600, timeout),
+            )
+        except Exception:
+            try:
+                cls._run_in_context(
+                    executable=executable,
+                    env=env,
+                    args=["rm", staged_remote],
+                    timeout=300,
+                )
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                staged_local.unlink(missing_ok=True)
+            except Exception:
+                if created_copy:
+                    pass
+
+    @classmethod
     def _upload_direct(
         cls,
         db: Session,
@@ -265,20 +355,73 @@ class BeamFileManagerService:
         destination: str,
         timeout: int,
     ) -> None:
-        """Sube directamente al destino final con una sola sesión Beam.
+        cfg, executable, env, home = cls._env(db)
+        del cfg
+        try:
+            cls._upload_via_root_in_context(
+                executable=executable,
+                env=env,
+                volume=volume,
+                local_path=Path(local_path),
+                destination=destination,
+                timeout=timeout,
+            )
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
 
-        Beam documenta la copia directa de archivos y directorios hacia rutas
-        ``beam://volumen/ruta``. Evitar el staging local, el ``cp`` a la raíz y
-        el ``mv`` remoto elimina dos copias adicionales y reduce notablemente
-        el tiempo del File Manager.
-        """
-        destination_clean = cls._clean(destination)
-        if not destination_clean:
-            raise BeamFileManagerError("La ruta de destino Beam está vacía.")
-        source = Path(local_path)
-        if not source.is_file() and not source.is_dir():
-            raise BeamFileManagerError(f"No existe el origen local para Beam: {source}")
-        cls._run(db, ["cp", str(source), cls._uri(volume, destination_clean)], timeout)
+    @classmethod
+    def upload_many(
+        cls,
+        db: Session,
+        *,
+        volume: str,
+        files: list[tuple[Path, str]],
+        timeout: int,
+        workers: int = 3,
+        on_completed: Any | None = None,
+    ) -> dict[str, Any]:
+        """Sube varios archivos en paralelo sin usar destinos ``beam://`` anidados."""
+        if not files:
+            return {"files_uploaded": 0, "bytes_uploaded": 0, "workers": 0}
+
+        cfg, executable, env, home = cls._env(db)
+        selected = cls._volume_name(cfg, volume)
+        normalized = [(Path(local), cls._clean(remote)) for local, remote in files]
+        max_workers = max(1, min(int(workers or 1), 4, len(normalized)))
+        uploaded = 0
+        uploaded_bytes = 0
+        lock = __import__("threading").Lock()
+
+        def task(item: tuple[Path, str]) -> tuple[str, int]:
+            local, remote = item
+            cls._upload_via_root_in_context(
+                executable=executable,
+                env=env,
+                volume=selected,
+                local_path=local,
+                destination=remote,
+                timeout=timeout,
+            )
+            return remote, local.stat().st_size
+
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="beam-upload") as pool:
+                futures = [pool.submit(task, item) for item in normalized]
+                for future in as_completed(futures):
+                    remote, size = future.result()
+                    with lock:
+                        uploaded += 1
+                        uploaded_bytes += size
+                        current = uploaded
+                    if on_completed is not None:
+                        on_completed(current, len(normalized), remote, uploaded_bytes)
+            return {
+                "files_uploaded": uploaded,
+                "bytes_uploaded": uploaded_bytes,
+                "workers": max_workers,
+            }
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
 
     @classmethod
     def create_directory(cls, db: Session, volume: str, path: str):

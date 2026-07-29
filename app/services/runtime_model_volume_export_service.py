@@ -130,114 +130,70 @@ class RuntimeModelVolumeExportService:
 
     @staticmethod
     def _copy_to_beam(session: Any, models_root: Path, remote_path: str, overwrite: bool, notify: ProgressCallback) -> dict[str, Any]:
-        """Sube el árbol limpio de modelos a Beam en una sola transferencia.
+        """Sube los modelos a Beam en paralelo usando únicamente la raíz del volumen.
 
-        Esta implementación replica el principio usado por Modal: primero se
-        prepara localmente el árbol definitivo y después se envía el directorio
-        completo. Así Beam abre una sola sesión de transferencia, en lugar de
-        ejecutar ``cp`` + ``mv`` por cada archivo.
+        Modal permanece intacto. Beam conserva el mismo árbol final, pero evita
+        por completo los destinos ``beam://volumen/carpeta`` que fallan en
+        Windows. Cada archivo se copia a ``beam://volumen`` y se mueve después
+        con ``beam mv`` dentro de la misma sesión autenticada.
         """
         from app.services.infrastructure_provider_service import InfrastructureProviderService
-        from app.services.beam_cli_environment_service import beam_cli_environment_service
-        from app.services.beam_credentials_service import beam_credentials_service
-        import re
-        import tempfile
+        from app.services.beam_file_manager_service import BeamFileManagerService
 
         cfg = InfrastructureProviderService.get_beam(session)
-        beam_credentials_service.require_token(cfg)
         volume_name = str(cfg.volume_name or "").strip()
         if not volume_name:
             raise ValueError("Configura el nombre del volumen Beam antes de exportar.")
 
-        executable = beam_cli_environment_service.ensure(timeout_seconds=30)
-        env = os.environ.copy()
-        home = tempfile.mkdtemp(prefix="tryon-beam-export-")
-        env.update({
-            "HOME": home,
-            "USERPROFILE": home,
-            "COLUMNS": "500",
-            "TERM": "dumb",
-            "NO_COLOR": "1",
-            "FORCE_COLOR": "0",
-        })
+        files = sorted(path for path in models_root.rglob("*") if path.is_file())
+        files_count = len(files)
+        bytes_total = sum(path.stat().st_size for path in files)
+        prefix = remote_path.replace("\\", "/").strip("/")
+        upload_items: list[tuple[Path, str]] = []
+        for path in files:
+            relative = path.relative_to(models_root).as_posix()
+            destination = "/".join(part for part in (prefix, relative) if part)
+            upload_items.append((path, destination))
 
-        def run_beam(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                [executable, *args],
-                env=env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=max(10, int(timeout)),
+        notify(
+            "beam-copy",
+            94,
+            f"Subiendo a Beam {files_count} archivo{'s' if files_count != 1 else ''} con transferencias paralelas seguras…",
+        )
+
+        def on_completed(current: int, total: int, remote: str, uploaded_bytes: int) -> None:
+            percent = 94 + int(5 * current / max(1, total))
+            notify(
+                "beam-copy",
+                min(99, percent),
+                f"Subiendo a Beam ({current}/{total}): {remote}",
             )
 
         try:
-            auth = beam_credentials_service.configure_cli(
-                executable=executable,
-                config=cfg,
-                env=env,
-                timeout_seconds=30,
+            result = BeamFileManagerService.upload_many(
+                session,
+                volume=volume_name,
+                files=upload_items,
+                timeout=max(3600, int(cfg.timeout_seconds or 900)),
+                workers=3,
+                on_completed=on_completed,
             )
-            env = auth.env
+        except Exception as exc:
+            raise RuntimeError(
+                f"Beam no pudo subir los modelos al volumen {volume_name}: {exc}"
+            ) from exc
 
-            notify("beam-volume", 92, f"Comprobando el volumen Beam {volume_name}…")
-            listed = run_beam(["volume", "list"], 120)
-            list_output = "\n".join(part for part in (listed.stdout, listed.stderr) if part).strip()
-            if listed.returncode != 0:
-                raise RuntimeError("Beam CLI no pudo listar los volúmenes: " + list_output[-4000:])
-
-            ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-            clean_output = ansi.sub("", list_output)
-            volume_exists = any(
-                line.strip().split() and line.strip().split()[0] == volume_name
-                for line in clean_output.splitlines()
-            )
-            if not volume_exists:
-                notify("beam-volume", 93, f"Creando el volumen Beam {volume_name}…")
-                created = run_beam(["volume", "create", volume_name], 180)
-                create_output = "\n".join(part for part in (created.stdout, created.stderr) if part).strip()
-                if created.returncode != 0:
-                    lower = create_output.casefold()
-                    if "already exists" not in lower and "ya existe" not in lower:
-                        raise RuntimeError(
-                            f"Beam CLI no pudo crear el volumen {volume_name}: {create_output[-4000:]}"
-                        )
-
-            files = sorted(path for path in models_root.rglob("*") if path.is_file())
-            files_count = len(files)
-            bytes_total = sum(path.stat().st_size for path in files)
-            prefix = remote_path.replace("\\", "/").strip("/")
-            target = f"beam://{volume_name}" + (f"/{prefix}" if prefix else "")
-
-            notify(
-                "beam-copy",
-                94,
-                f"Subiendo a Beam {files_count} archivo{'s' if files_count != 1 else ''} en una sola transferencia…",
-            )
-            completed = run_beam(
-                ["cp", str(models_root), target],
-                max(3600, int(cfg.timeout_seconds)),
-            )
-            output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
-            if completed.returncode != 0:
-                raise RuntimeError(
-                    "Beam CLI no pudo subir el árbol de modelos al volumen "
-                    f"{volume_name}: {output[-5000:]}"
-                )
-
-            notify("beam-copy", 99, f"Beam recibió {files_count} archivos.")
-            return {
-                "volume_name": volume_name,
-                "path": prefix,
-                "target": target,
-                "overwrite_requested": overwrite,
-                "files_uploaded": files_count,
-                "bytes_uploaded": bytes_total,
-                "transfer_mode": "single-directory-copy",
-                "output": output[-4000:],
-            }
-        finally:
-            shutil.rmtree(home, ignore_errors=True)
+        notify("beam-copy", 99, f"Beam recibió {files_count} archivos.")
+        return {
+            "volume_name": volume_name,
+            "path": prefix,
+            "target": f"beam://{volume_name}" + (f"/{prefix}" if prefix else ""),
+            "overwrite_requested": overwrite,
+            "files_uploaded": int(result.get("files_uploaded", files_count)),
+            "bytes_uploaded": int(result.get("bytes_uploaded", bytes_total)),
+            "transfer_mode": "parallel-root-copy-then-move",
+            "parallel_workers": int(result.get("workers", 1)),
+        }
 
     @staticmethod
     def export(
