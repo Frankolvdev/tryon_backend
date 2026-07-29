@@ -85,6 +85,9 @@ class RuntimeContextJobService:
             )
 
             def progress(phase: str, percent: int, message: str, details: dict[str, Any] | None = None) -> None:
+                from app.services.beam_engine.beam_progress_service import BeamProgressService
+                if BeamProgressService.is_cancelled(job_id):
+                    return
                 cls._update(
                     job_id,
                     status="running",
@@ -109,6 +112,17 @@ class RuntimeContextJobService:
             finally:
                 db.close()
 
+            from app.services.beam_engine.beam_progress_service import BeamProgressService
+            if BeamProgressService.is_cancelled(job_id):
+                cls._update(
+                    job_id,
+                    status="cancelled",
+                    phase="cancelled",
+                    message="Sincronización Beam cancelada.",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                )
+                return
+
             cls._update(
                 job_id,
                 status="completed",
@@ -119,15 +133,23 @@ class RuntimeContextJobService:
                 finished_at=datetime.now(timezone.utc).isoformat(),
             )
         except Exception as exc:  # noqa: BLE001
+            from app.services.beam_engine.beam_multipart_client import BeamUploadCancelled
+            from app.services.beam_engine.beam_progress_service import BeamProgressService
+            cancelled = isinstance(exc, BeamUploadCancelled) or BeamProgressService.is_cancelled(job_id)
             cls._update(
                 job_id,
-                status="failed",
-                phase="failed",
-                message="La exportación de modelos no pudo completarse.",
-                error=str(exc),
+                status="cancelled" if cancelled else "failed",
+                phase="cancelled" if cancelled else "failed",
+                message=(
+                    "Sincronización Beam cancelada."
+                    if cancelled
+                    else "La exportación de modelos no pudo completarse."
+                ),
+                error=None if cancelled else str(exc),
                 finished_at=datetime.now(timezone.utc).isoformat(),
             )
-            traceback.print_exc()
+            if not cancelled:
+                traceback.print_exc()
 
     @classmethod
     def run(cls, job_id: str) -> None:

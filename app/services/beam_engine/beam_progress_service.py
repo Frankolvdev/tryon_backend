@@ -27,12 +27,12 @@ class BeamProgressService:
             cls._cancelled.add(job_id)
 
     @classmethod
-    def is_cancelled(cls) -> bool:
-        job_id = cls.current_job_id()
-        if not job_id:
+    def is_cancelled(cls, job_id: str | None = None) -> bool:
+        resolved_job_id = job_id or cls.current_job_id()
+        if not resolved_job_id:
             return False
         with cls._lock:
-            return job_id in cls._cancelled
+            return resolved_job_id in cls._cancelled
 
     @classmethod
     def clear(cls, job_id: str) -> None:

@@ -14,6 +14,12 @@ from app.services.beam_engine.beam_config import BeamSyncConfig
 from app.services.beam_engine.beam_progress_reader import ProgressReader
 
 ProgressCallback = Callable[[str, dict[str, Any]], None]
+CancelCheck = Callable[[], bool]
+
+
+class BeamUploadCancelled(RuntimeError):
+    """Cancelación solicitada por el usuario durante Multipart Beam."""
+
 _MIB = 1024 * 1024
 
 
@@ -76,8 +82,16 @@ class BeamMultipartClient:
         source: Path,
         destination: str,
         on_progress: ProgressCallback,
+        cancel_check: CancelCheck | None = None,
     ) -> dict[str, Any]:
         sdk = cls._sdk()
+        cancel_check = cancel_check or (lambda: False)
+
+        def ensure_not_cancelled() -> None:
+            if cancel_check():
+                raise BeamUploadCancelled("Sincronización Beam cancelada por el usuario.")
+
+        ensure_not_cancelled()
         source = source.resolve()
         if not source.is_file():
             raise FileNotFoundError(str(source))
@@ -128,6 +142,7 @@ class BeamMultipartClient:
             return session
 
         with sdk["ServiceClient"](context) as client:
+            ensure_not_cancelled()
             initial = client.volume.create_multipart_upload(
                 sdk["CreateMultipartUploadRequest"](
                     volume_name=config.volume_name,
@@ -200,12 +215,14 @@ class BeamMultipartClient:
 
             def upload_part(part: Any) -> Any:
                 nonlocal network_bytes
+                ensure_not_cancelled()
                 number = int(part.number)
                 start = int(part.start)
                 end = int(part.end)
                 length = max(0, end - start)
                 last_error: Exception | None = None
                 for attempt in range(1, config.retries + 1):
+                    ensure_not_cancelled()
                     with state_lock:
                         attempts_by_part[number] = attempt
                         uploaded_by_part[number] = 0
@@ -218,6 +235,7 @@ class BeamMultipartClient:
 
                             def part_progress(bytes_in_part: int) -> None:
                                 nonlocal network_bytes
+                                ensure_not_cancelled()
                                 current = min(length, int(bytes_in_part))
                                 with state_lock:
                                     previous = last_attempt_read.get(number, 0)
@@ -249,6 +267,10 @@ class BeamMultipartClient:
                             active_numbers.discard(number)
                         emit(number, force=True)
                         return sdk["CompletedPart"](number=number, etag=etag)
+                    except BeamUploadCancelled:
+                        with state_lock:
+                            active_numbers.discard(number)
+                        raise
                     except Exception as exc:
                         last_error = exc
                         with state_lock:
@@ -273,6 +295,7 @@ class BeamMultipartClient:
                     for future in as_completed(futures):
                         completed_parts.append(future.result())
                 completed_parts.sort(key=lambda part: int(part.number))
+                ensure_not_cancelled()
                 completed = client.volume.complete_multipart_upload(
                     sdk["CompleteMultipartUploadRequest"](
                         upload_id=upload_id,

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.services.beam_engine.beam_config import BeamSyncConfig
 from app.services.beam_engine.beam_models import BeamModelFile, BeamSyncSummary
-from app.services.beam_engine.beam_multipart_client import BeamMultipartClient
+from app.services.beam_engine.beam_multipart_client import BeamMultipartClient, BeamUploadCancelled
 from app.services.beam_engine.beam_progress_service import BeamProgressService
 from app.services.beam_engine.beam_volume_service import BeamVolumeService
 
@@ -61,6 +61,19 @@ class BeamModelSyncService:
         completed_bytes = 0
         uploaded_bytes = 0
         started = time.perf_counter()
+        job_id = BeamProgressService.current_job_id()
+
+        def is_cancelled() -> bool:
+            return BeamProgressService.is_cancelled(job_id)
+
+        def human_bytes(value: int) -> str:
+            amount = float(max(0, value))
+            for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+                if amount < 1024.0 or unit == "TiB":
+                    decimals = 0 if unit in {"B", "KiB"} else 1
+                    return f"{amount:.{decimals}f} {unit}"
+                amount /= 1024.0
+            return f"{amount:.1f} TiB"
 
         notify(
             "beam-preparing",
@@ -75,7 +88,7 @@ class BeamModelSyncService:
         )
 
         for index, item in enumerate(items, 1):
-            if BeamProgressService.is_cancelled():
+            if is_cancelled():
                 raise RuntimeError("Sincronización Beam cancelada por el usuario.")
 
             remote_path = "/".join(
@@ -145,7 +158,7 @@ class BeamModelSyncService:
             for file_attempt in range(1, config.retries + 1):
                 try:
                     def progress(_event: str, metrics: dict[str, Any]) -> None:
-                        if BeamProgressService.is_cancelled():
+                        if is_cancelled():
                             raise RuntimeError("Sincronización Beam cancelada por el usuario.")
                         file_sent = min(item.size_bytes, int(metrics.get("file_bytes_sent") or 0))
                         current_completed = completed_bytes + file_sent
@@ -170,11 +183,11 @@ class BeamModelSyncService:
                             "global_speed_bps": int(global_speed),
                             "global_eta_seconds": global_eta,
                         }
-                        chunk_mb = int(details.get("chunk_size_bytes") or 0) / (1024 * 1024)
                         message = (
-                            f"Subiendo {item.relative_path} — archivo {index} de {len(items)}"
+                            f"Subiendo {item.relative_path}"
+                            f" — {human_bytes(file_sent)} / {human_bytes(item.size_bytes)}"
+                            f" — archivo {index} de {len(items)}"
                             f" — {float(details.get('file_progress') or 0):.2f}%"
-                            f" — {chunk_mb:.0f} MiB/parte"
                         )
                         notify(
                             "beam-uploading",
@@ -183,13 +196,21 @@ class BeamModelSyncService:
                             details,
                         )
 
-                    BeamMultipartClient.upload_file(config, item.source, destination, progress)
+                    BeamMultipartClient.upload_file(
+                        config,
+                        item.source,
+                        destination,
+                        progress,
+                        cancel_check=is_cancelled,
+                    )
                     summary.ok += 1
                     summary.bytes_sent += item.size_bytes
                     completed_bytes += item.size_bytes
                     uploaded_bytes += item.size_bytes
                     error = None
                     break
+                except BeamUploadCancelled:
+                    raise
                 except Exception as exc:
                     error = exc
                     if file_attempt < config.retries:
