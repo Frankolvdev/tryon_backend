@@ -17,7 +17,10 @@ class BeamSyncConfig:
     retries: int = 3
     # Valores base. El cliente los adapta por archivo para evitar cientos de partes.
     multipart_part_size_mb: int = 256
-    multipart_workers: int = 8
+    multipart_workers: int = 12
+    adaptive_initial_workers: int = 3
+    adaptive_step_workers: int = 1
+    adaptive_probe_seconds: float = 5.0
     read_buffer_size_bytes: int = 4 * 1024 * 1024
     progress_interval_seconds: float = 0.25
     progress_bytes_step: int = 2 * 1024 * 1024

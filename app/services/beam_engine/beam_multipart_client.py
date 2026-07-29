@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Callable
 
@@ -72,7 +72,7 @@ class BeamMultipartClient:
         configured = max(64, int(config.multipart_part_size_mb)) * _MIB
         chunk_size = min(file_size, max(configured, adaptive))
         parts_total = max(1, math.ceil(file_size / chunk_size))
-        workers = max(1, min(int(config.multipart_workers), 8, parts_total))
+        workers = max(1, min(int(config.multipart_workers), 12, parts_total))
         return chunk_size, workers
 
     @classmethod
@@ -116,6 +116,8 @@ class BeamMultipartClient:
         completed_numbers: set[int] = set()
         active_numbers: set[int] = set()
         attempts_by_part: dict[int, int] = {}
+        retry_events = 0
+        adaptive_limit = max(1, min(config.adaptive_initial_workers, workers_requested))
         last_attempt_read: dict[int, int] = {}
         last_emit_at = started_at
         last_emit_logical = 0
@@ -209,12 +211,13 @@ class BeamMultipartClient:
                         "attempt": attempts_by_part.get(active_part or 0, 1),
                         "chunk_size_bytes": chunk_size,
                         "multipart_workers": workers,
+                        "adaptive_concurrency": adaptive_limit,
                         "transfer_mode": "beam-beta9-direct-multipart",
                     }
                 on_progress("multipart-progress", metrics)
 
             def upload_part(part: Any) -> Any:
-                nonlocal network_bytes
+                nonlocal network_bytes, retry_events
                 ensure_not_cancelled()
                 number = int(part.number)
                 start = int(part.start)
@@ -274,6 +277,8 @@ class BeamMultipartClient:
                     except Exception as exc:
                         last_error = exc
                         with state_lock:
+                            retry_events += 1
+                        with state_lock:
                             uploaded_by_part[number] = 0
                             active_numbers.discard(number)
                         emit(number, force=True)
@@ -287,13 +292,63 @@ class BeamMultipartClient:
             try:
                 completed_parts = []
                 emit(None, force=True)
+                pending_parts = iter(parts)
+                active_futures: dict[Any, Any] = {}
+                last_probe_at = time.perf_counter()
+                last_probe_bytes = 0
+                last_probe_retries = 0
+
+                def fill_slots(pool: ThreadPoolExecutor) -> None:
+                    while len(active_futures) < adaptive_limit:
+                        try:
+                            next_part = next(pending_parts)
+                        except StopIteration:
+                            break
+                        active_futures[pool.submit(upload_part, next_part)] = next_part
+
                 with ThreadPoolExecutor(
                     max_workers=workers,
                     thread_name_prefix="beam-multipart",
                 ) as pool:
-                    futures = [pool.submit(upload_part, part) for part in parts]
-                    for future in as_completed(futures):
-                        completed_parts.append(future.result())
+                    fill_slots(pool)
+                    while active_futures:
+                        ensure_not_cancelled()
+                        done, _ = wait(
+                            tuple(active_futures),
+                            timeout=0.5,
+                            return_when=FIRST_COMPLETED,
+                        )
+                        if not done:
+                            emit(None)
+                            continue
+                        for future in done:
+                            active_futures.pop(future, None)
+                            completed_parts.append(future.result())
+
+                        now = time.perf_counter()
+                        probe_elapsed = now - last_probe_at
+                        if probe_elapsed >= config.adaptive_probe_seconds:
+                            with state_lock:
+                                probe_bytes = network_bytes
+                                probe_retries = retry_events
+                            delta_bytes = max(0, probe_bytes - last_probe_bytes)
+                            delta_retries = max(0, probe_retries - last_probe_retries)
+                            probe_speed = delta_bytes / max(0.001, probe_elapsed)
+
+                            if delta_retries > 0 and adaptive_limit > 1:
+                                adaptive_limit = max(1, adaptive_limit - 1)
+                            elif probe_speed > 0 and adaptive_limit < workers:
+                                adaptive_limit = min(
+                                    workers,
+                                    adaptive_limit + max(1, config.adaptive_step_workers),
+                                )
+
+                            last_probe_at = now
+                            last_probe_bytes = probe_bytes
+                            last_probe_retries = probe_retries
+                            emit(None, force=True)
+
+                        fill_slots(pool)
                 completed_parts.sort(key=lambda part: int(part.number))
                 ensure_not_cancelled()
                 completed = client.volume.complete_multipart_upload(

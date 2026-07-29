@@ -183,11 +183,18 @@ class BeamModelSyncService:
                             "global_speed_bps": int(global_speed),
                             "global_eta_seconds": global_eta,
                         }
+                        file_speed_bps = int(details.get("file_speed_bps") or 0)
+                        speed_text = (
+                            f" — {human_bytes(file_speed_bps)}/s"
+                            if file_speed_bps > 0
+                            else ""
+                        )
                         message = (
                             f"Subiendo {item.relative_path}"
                             f" — {human_bytes(file_sent)} / {human_bytes(item.size_bytes)}"
                             f" — archivo {index} de {len(items)}"
                             f" — {float(details.get('file_progress') or 0):.2f}%"
+                            f"{speed_text}"
                         )
                         notify(
                             "beam-uploading",
