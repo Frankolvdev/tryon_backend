@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -21,6 +22,7 @@ class BeamUploadCancelled(RuntimeError):
     """Cancelación solicitada por el usuario durante Multipart Beam."""
 
 _MIB = 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class BeamMultipartClient:
@@ -164,6 +166,16 @@ class BeamMultipartClient:
             if not parts:
                 raise RuntimeError("Beam inició Multipart sin devolver partes prefirmadas.")
             workers = max(1, min(workers_requested, parts_total))
+            logger.info(
+                "[Beam Adaptive] Inicio | archivo=%s | tamaño=%d bytes | partes=%d | "
+                "workers_iniciales=%d | workers_máximos=%d | probe=%.1fs",
+                source.name,
+                file_size,
+                parts_total,
+                adaptive_limit,
+                workers,
+                float(config.adaptive_probe_seconds),
+            )
 
             def emit(active_part: int | None, *, force: bool = False) -> None:
                 nonlocal last_emit_at, last_emit_logical, last_emit_network
@@ -318,14 +330,13 @@ class BeamMultipartClient:
                             timeout=0.5,
                             return_when=FIRST_COMPLETED,
                         )
-                        if done:
-                            for future in done:
-                                active_futures.pop(future, None)
-                                completed_parts.append(future.result())
+                        if not done:
+                            emit(None)
+                            continue
+                        for future in done:
+                            active_futures.pop(future, None)
+                            completed_parts.append(future.result())
 
-                        # La adaptación debe evaluarse por tiempo real, no solamente
-                        # cuando termina una parte. Esto permite aumentar concurrencia
-                        # durante partes grandes que pueden tardar varios minutos.
                         now = time.perf_counter()
                         probe_elapsed = now - last_probe_at
                         if probe_elapsed >= config.adaptive_probe_seconds:
@@ -336,13 +347,41 @@ class BeamMultipartClient:
                             delta_retries = max(0, probe_retries - last_probe_retries)
                             probe_speed = delta_bytes / max(0.001, probe_elapsed)
 
+                            previous_limit = adaptive_limit
+                            decision = "mantener"
+                            reason = "sin cambio útil"
                             if delta_retries > 0 and adaptive_limit > 1:
                                 adaptive_limit = max(1, adaptive_limit - 1)
+                                decision = "reducir"
+                                reason = f"{delta_retries} reintento(s) detectado(s)"
                             elif probe_speed > 0 and adaptive_limit < workers:
                                 adaptive_limit = min(
                                     workers,
                                     adaptive_limit + max(1, config.adaptive_step_workers),
                                 )
+                                decision = "aumentar"
+                                reason = "transferencia activa sin reintentos"
+                            elif adaptive_limit >= workers:
+                                reason = "límite máximo alcanzado"
+                            elif probe_speed <= 0:
+                                reason = "sin transferencia medible"
+
+                            logger.info(
+                                "[Beam Adaptive] Probe | archivo=%s | intervalo=%.2fs | "
+                                "velocidad=%.2f MiB/s | reintentos=%d | workers=%d->%d | "
+                                "decisión=%s | motivo=%s | activas=%d | completadas=%d/%d",
+                                source.name,
+                                probe_elapsed,
+                                probe_speed / _MIB,
+                                delta_retries,
+                                previous_limit,
+                                adaptive_limit,
+                                decision,
+                                reason,
+                                len(active_futures),
+                                len(completed_parts),
+                                parts_total,
+                            )
 
                             last_probe_at = now
                             last_probe_bytes = probe_bytes
@@ -350,8 +389,6 @@ class BeamMultipartClient:
                             emit(None, force=True)
 
                         fill_slots(pool)
-                        if not done:
-                            emit(None)
                 completed_parts.sort(key=lambda part: int(part.number))
                 ensure_not_cancelled()
                 completed = client.volume.complete_multipart_upload(
@@ -372,6 +409,16 @@ class BeamMultipartClient:
                     completed_numbers.update(int(part.number) for part in parts)
                     active_numbers.clear()
                 emit(None, force=True)
+                elapsed_total = max(0.001, time.perf_counter() - started_at)
+                logger.info(
+                    "[Beam Adaptive] Final | archivo=%s | workers_finales=%d | "
+                    "velocidad_media=%.2f MiB/s | tiempo=%.2fs | reintentos=%d",
+                    source.name,
+                    adaptive_limit,
+                    (network_bytes / elapsed_total) / _MIB,
+                    elapsed_total,
+                    retry_events,
+                )
                 return {
                     "upload_id": upload_id,
                     "parts_total": parts_total,
