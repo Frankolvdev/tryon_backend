@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,10 +13,11 @@ from app.services.beam_engine.beam_config import BeamSyncConfig
 from app.services.beam_engine.beam_progress_reader import ProgressReader
 
 ProgressCallback = Callable[[str, dict[str, Any]], None]
+_MIB = 1024 * 1024
 
 
 class BeamMultipartClient:
-    """Cliente Multipart directo del SDK beta9/Beam; no ejecuta Beam CLI."""
+    """Multipart directo mediante beta9 VolumeService y URLs prefirmadas."""
 
     @staticmethod
     def _sdk():
@@ -30,8 +32,7 @@ class BeamMultipartClient:
             from beta9.config import ConfigContext
         except ImportError as exc:
             raise RuntimeError(
-                "El SDK beta9 no está instalado en el mismo entorno Python del backend. "
-                "Instala el paquete Beam/beta9 en este entorno; no se usará Beam CLI."
+                "El SDK beta9 no está instalado en el mismo entorno Python del backend."
             ) from exc
         return {
             "ServiceClient": ServiceClient,
@@ -41,6 +42,26 @@ class BeamMultipartClient:
             "AbortMultipartUploadRequest": AbortMultipartUploadRequest,
             "CompletedPart": CompletedPart,
         }
+
+    @staticmethod
+    def _transfer_plan(file_size: int, config: BeamSyncConfig) -> tuple[int, int]:
+        """Evita cientos de partes y mantiene suficiente paralelismo.
+
+        Busca aproximadamente 24-40 partes para modelos grandes, con partes entre
+        64 y 512 MiB. Para un modelo de ~15 GiB produce ~30 partes, no 245.
+        """
+        if file_size <= 64 * _MIB:
+            return max(1, file_size), 1
+        target_parts = 32
+        raw = math.ceil(file_size / target_parts)
+        step = 64 * _MIB
+        adaptive = math.ceil(raw / step) * step
+        configured = max(64, int(config.multipart_part_size_mb)) * _MIB
+        chunk_size = min(512 * _MIB, max(configured, adaptive))
+        chunk_size = min(file_size, chunk_size)
+        parts_total = max(1, math.ceil(file_size / chunk_size))
+        workers = max(1, min(int(config.multipart_workers), 8, parts_total))
+        return chunk_size, workers
 
     @classmethod
     def upload_file(
@@ -61,7 +82,7 @@ class BeamMultipartClient:
             raise ValueError(f"Destino Beam inválido: {destination}")
         volume_path = remote[len(prefix):].lstrip("/")
         file_size = source.stat().st_size
-        requested_chunk = max(5, config.multipart_part_size_mb) * 1024 * 1024
+        chunk_size, workers_requested = cls._transfer_plan(file_size, config)
 
         context = sdk["ConfigContext"](
             token=config.api_key,
@@ -72,8 +93,15 @@ class BeamMultipartClient:
         started_at = time.perf_counter()
         state_lock = threading.Lock()
         uploaded_by_part: dict[int, int] = {}
+        completed_numbers: set[int] = set()
+        active_numbers: set[int] = set()
+        attempts_by_part: dict[int, int] = {}
+        last_attempt_read: dict[int, int] = {}
         last_emit_at = started_at
-        last_emit_bytes = 0
+        last_emit_logical = 0
+        last_emit_network = 0
+        displayed_bytes = 0
+        network_bytes = 0
         smoothed_speed = 0.0
         upload_id = ""
 
@@ -82,7 +110,7 @@ class BeamMultipartClient:
                 sdk["CreateMultipartUploadRequest"](
                     volume_name=config.volume_name,
                     volume_path=volume_path,
-                    chunk_size=requested_chunk,
+                    chunk_size=chunk_size,
                     file_size=file_size,
                 )
             )
@@ -96,39 +124,60 @@ class BeamMultipartClient:
             parts_total = len(parts)
             if not parts:
                 raise RuntimeError("Beam inició Multipart sin devolver partes prefirmadas.")
+            workers = max(1, min(workers_requested, parts_total))
 
-            def emit(part_number: int, attempt: int, *, force: bool = False) -> None:
-                nonlocal last_emit_at, last_emit_bytes, smoothed_speed
+            def emit(active_part: int | None, *, force: bool = False) -> None:
+                nonlocal last_emit_at, last_emit_logical, last_emit_network
+                nonlocal displayed_bytes, smoothed_speed
                 now = time.perf_counter()
                 with state_lock:
-                    total_sent = min(file_size, sum(uploaded_by_part.values()))
-                    delta_bytes = total_sent - last_emit_bytes
+                    raw_logical = min(file_size, sum(uploaded_by_part.values()))
+                    # La UI nunca retrocede aunque una parte sea reiniciada por retry.
+                    displayed_bytes = max(displayed_bytes, raw_logical)
+                    delta_logical = displayed_bytes - last_emit_logical
+                    delta_network = network_bytes - last_emit_network
                     delta_time = now - last_emit_at
-                    if not force and delta_time < config.progress_interval_seconds and delta_bytes < config.progress_bytes_step:
+                    if (
+                        not force
+                        and delta_time < config.progress_interval_seconds
+                        and delta_logical < config.progress_bytes_step
+                    ):
                         return
-                    instant = delta_bytes / max(0.001, delta_time) if delta_bytes >= 0 else 0.0
-                    smoothed_speed = instant if smoothed_speed <= 0 else smoothed_speed * 0.75 + instant * 0.25
+                    instant = max(0, delta_network) / max(0.001, delta_time)
+                    smoothed_speed = (
+                        instant
+                        if smoothed_speed <= 0
+                        else smoothed_speed * 0.75 + instant * 0.25
+                    )
                     last_emit_at = now
-                    last_emit_bytes = total_sent
-                    elapsed = max(0.001, now - started_at)
-                    average_speed = total_sent / elapsed
-                    speed = int(smoothed_speed or average_speed)
-                    remaining = max(0, file_size - total_sent)
-                    eta = int(remaining / speed) if speed > 0 else None
+                    last_emit_logical = displayed_bytes
+                    last_emit_network = network_bytes
+                    remaining = max(0, file_size - displayed_bytes)
+                    eta = int(remaining / smoothed_speed) if smoothed_speed > 0 else None
+                    active_sorted = sorted(active_numbers)
                     metrics = {
-                        "file_progress": round(100.0 * total_sent / max(1, file_size), 2),
-                        "file_bytes_sent": total_sent,
+                        "file_progress": round(100.0 * displayed_bytes / max(1, file_size), 2),
+                        "file_bytes_sent": displayed_bytes,
                         "file_bytes_total": file_size,
-                        "file_speed_bps": speed,
+                        "network_bytes_sent": network_bytes,
+                        "file_speed_bps": int(smoothed_speed),
                         "file_eta_seconds": eta,
-                        "part_number": part_number,
+                        # Compatibilidad: part_number ahora es avance confirmado monotónico.
+                        "part_number": len(completed_numbers),
+                        "parts_completed": len(completed_numbers),
                         "parts_total": parts_total,
-                        "attempt": attempt,
+                        "parts_active": len(active_sorted),
+                        "active_part_numbers": active_sorted,
+                        "active_part_number": active_part,
+                        "attempt": attempts_by_part.get(active_part or 0, 1),
+                        "chunk_size_bytes": chunk_size,
+                        "multipart_workers": workers,
                         "transfer_mode": "beam-beta9-direct-multipart",
                     }
                 on_progress("multipart-progress", metrics)
 
             def upload_part(part: Any) -> Any:
+                nonlocal network_bytes
                 number = int(part.number)
                 start = int(part.start)
                 end = int(part.end)
@@ -136,18 +185,30 @@ class BeamMultipartClient:
                 last_error: Exception | None = None
                 for attempt in range(1, config.retries + 1):
                     with state_lock:
+                        attempts_by_part[number] = attempt
                         uploaded_by_part[number] = 0
-                    emit(number, attempt, force=True)
+                        last_attempt_read[number] = 0
+                        active_numbers.add(number)
+                    emit(number, force=True)
                     try:
                         with source.open("rb") as handle:
                             handle.seek(start)
 
                             def part_progress(bytes_in_part: int) -> None:
+                                nonlocal network_bytes
+                                current = min(length, int(bytes_in_part))
                                 with state_lock:
-                                    uploaded_by_part[number] = min(length, int(bytes_in_part))
-                                emit(number, attempt)
+                                    previous = last_attempt_read.get(number, 0)
+                                    network_bytes += max(0, current - previous)
+                                    last_attempt_read[number] = current
+                                    uploaded_by_part[number] = current
+                                emit(number)
 
-                            reader = ProgressReader(handle, length=length, on_progress=part_progress)
+                            reader = ProgressReader(
+                                handle,
+                                length=length,
+                                on_progress=part_progress,
+                            )
                             response = requests.put(
                                 str(part.url),
                                 data=reader,
@@ -157,26 +218,35 @@ class BeamMultipartClient:
                             response.raise_for_status()
                             etag = str(response.headers.get("ETag") or "").strip('"')
                             if not etag:
-                                raise RuntimeError(f"Beam no devolvió ETag para la parte {number}.")
+                                raise RuntimeError(
+                                    f"Beam no devolvió ETag para la parte {number}."
+                                )
                         with state_lock:
                             uploaded_by_part[number] = length
-                        emit(number, attempt, force=True)
+                            completed_numbers.add(number)
+                            active_numbers.discard(number)
+                        emit(number, force=True)
                         return sdk["CompletedPart"](number=number, etag=etag)
                     except Exception as exc:
                         last_error = exc
                         with state_lock:
                             uploaded_by_part[number] = 0
-                        emit(number, attempt, force=True)
+                            active_numbers.discard(number)
+                        emit(number, force=True)
                         if attempt < config.retries:
                             time.sleep(min(8, 2 ** attempt))
                 raise RuntimeError(
-                    f"Falló la parte {number}/{parts_total} después de {config.retries} intentos: {last_error}"
+                    f"Falló la parte {number}/{parts_total} después de "
+                    f"{config.retries} intentos: {last_error}"
                 )
 
             try:
                 completed_parts = []
-                workers = max(1, min(config.multipart_workers, parts_total))
-                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="beam-multipart") as pool:
+                emit(None, force=True)
+                with ThreadPoolExecutor(
+                    max_workers=workers,
+                    thread_name_prefix="beam-multipart",
+                ) as pool:
                     futures = [pool.submit(upload_part, part) for part in parts]
                     for future in as_completed(futures):
                         completed_parts.append(future.result())
@@ -195,13 +265,18 @@ class BeamMultipartClient:
                         + str(getattr(completed, "err_msg", "respuesta inválida"))
                     )
                 with state_lock:
-                    for part in parts:
-                        uploaded_by_part[int(part.number)] = max(0, int(part.end) - int(part.start))
-                emit(parts_total, 1, force=True)
+                    displayed_bytes = file_size
+                    completed_numbers.update(int(part.number) for part in parts)
+                    active_numbers.clear()
+                emit(None, force=True)
                 return {
                     "upload_id": upload_id,
                     "parts_total": parts_total,
+                    "parts_completed": parts_total,
                     "bytes_sent": file_size,
+                    "network_bytes_sent": network_bytes,
+                    "chunk_size_bytes": chunk_size,
+                    "multipart_workers": workers,
                     "transfer_mode": "beam-beta9-direct-multipart",
                 }
             except BaseException:

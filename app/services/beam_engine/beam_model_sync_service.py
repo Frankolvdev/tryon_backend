@@ -105,7 +105,12 @@ class BeamModelSyncService:
                 },
             )
 
-            if skip_identical and BeamVolumeService.is_identical(config, remote_path, item.size_bytes):
+            identical_metadata = (
+                BeamVolumeService.identical_metadata(config, remote_path, item.size_bytes)
+                if skip_identical
+                else None
+            )
+            if identical_metadata is not None:
                 completed_bytes += item.size_bytes
                 summary.skipped += 1
                 global_progress = round(100 * completed_bytes / max(1, total_bytes), 2)
@@ -116,6 +121,9 @@ class BeamModelSyncService:
                     {
                         "status": "SKIPPED",
                         "skip_reason": "same-size-remote-file",
+                        "remote_metadata": identical_metadata,
+                        "remote_size_bytes": int(identical_metadata.get("size_bytes") or 0),
+                        "remote_metadata_source": identical_metadata.get("source"),
                         "file_name": item.source.name,
                         "relative_path": item.relative_path,
                         "remote_path": remote_path,
@@ -162,12 +170,17 @@ class BeamModelSyncService:
                             "global_speed_bps": int(global_speed),
                             "global_eta_seconds": global_eta,
                         }
-                        part_number = int(details.get("part_number") or 0)
+                        parts_completed = int(details.get("parts_completed") or 0)
                         parts_total = int(details.get("parts_total") or 0)
+                        parts_active = int(details.get("parts_active") or 0)
+                        workers = int(details.get("multipart_workers") or 0)
+                        chunk_mb = int(details.get("chunk_size_bytes") or 0) / (1024 * 1024)
                         message = (
                             f"Subiendo {item.relative_path} — archivo {index} de {len(items)}"
-                            f" — parte {part_number} de {parts_total}"
                             f" — {float(details.get('file_progress') or 0):.2f}%"
+                            f" — partes completadas {parts_completed} de {parts_total}"
+                            f" — activas {parts_active}"
+                            f" — {workers} workers · {chunk_mb:.0f} MiB/parte"
                         )
                         notify(
                             "beam-uploading",

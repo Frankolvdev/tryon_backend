@@ -15,8 +15,9 @@ class BeamSyncConfig:
     gateway_port: int = 443
     timeout_seconds: int = 86400
     retries: int = 3
-    multipart_part_size_mb: int = 64
-    multipart_workers: int = 4
+    # Valores base. El cliente los adapta por archivo para evitar cientos de partes.
+    multipart_part_size_mb: int = 256
+    multipart_workers: int = 8
     progress_interval_seconds: float = 0.25
     progress_bytes_step: int = 2 * 1024 * 1024
 
