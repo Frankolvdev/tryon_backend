@@ -146,27 +146,66 @@ class RuntimeModelVolumeExportService:
             raise ValueError("Configura el nombre del volumen Beam antes de exportar.")
 
         files = sorted(path for path in models_root.rglob("*") if path.is_file())
-        files_count = len(files)
         bytes_total = sum(path.stat().st_size for path in files)
         prefix = remote_path.replace("\\", "/").strip("/")
         upload_items: list[tuple[Path, str]] = []
+
+        # Modal contabiliza los hijos directos de ``models_root`` como unidades
+        # de exportación. Una categoría puede contener varios archivos internos
+        # (por ejemplo SAM3), pero visualmente sigue siendo un único modelo/grupo.
+        # Beam conserva la subida paralela por archivo, pero reporta exactamente
+        # las mismas unidades lógicas que Modal para no mostrar 26 cuando el
+        # manifiesto real contiene 9 modelos/categorías.
+        logical_groups: dict[str, dict[str, Any]] = {}
+        remote_to_group: dict[str, str] = {}
         for path in files:
-            relative = path.relative_to(models_root).as_posix()
+            relative_path = path.relative_to(models_root)
+            relative = relative_path.as_posix()
             destination = "/".join(part for part in (prefix, relative) if part)
             upload_items.append((path, destination))
+
+            group_name = relative_path.parts[0] if relative_path.parts else path.name
+            group = logical_groups.setdefault(
+                group_name,
+                {"pending": 0, "bytes": 0, "label": group_name},
+            )
+            group["pending"] += 1
+            group["bytes"] += path.stat().st_size
+            remote_to_group[destination] = group_name
+
+        logical_total = len(logical_groups)
+        completed_groups = 0
+        completed_group_names: set[str] = set()
+        progress_lock = threading.Lock()
 
         notify(
             "beam-copy",
             94,
-            f"Subiendo a Beam {files_count} archivo{'s' if files_count != 1 else ''} con transferencias paralelas seguras…",
+            f"Subiendo a Beam {logical_total} modelo{'s' if logical_total != 1 else ''} con transferencias paralelas seguras…",
         )
 
         def on_completed(current: int, total: int, remote: str, uploaded_bytes: int) -> None:
-            percent = 94 + int(5 * current / max(1, total))
+            del current, total, uploaded_bytes
+            nonlocal completed_groups
+            group_name = remote_to_group.get(remote)
+            if not group_name:
+                return
+
+            with progress_lock:
+                group = logical_groups[group_name]
+                group["pending"] = max(0, int(group["pending"]) - 1)
+                if group["pending"] != 0 or group_name in completed_group_names:
+                    return
+                completed_group_names.add(group_name)
+                completed_groups += 1
+                logical_current = completed_groups
+
+            percent = 94 + int(5 * logical_current / max(1, logical_total))
+            label = str(logical_groups[group_name]["label"])
             notify(
                 "beam-copy",
                 min(99, percent),
-                f"Subiendo a Beam ({current}/{total}): {remote}",
+                f"Subiendo a Beam ({logical_current}/{logical_total}): {label}",
             )
 
         try:
@@ -183,15 +222,16 @@ class RuntimeModelVolumeExportService:
                 f"Beam no pudo subir los modelos al volumen {volume_name}: {exc}"
             ) from exc
 
-        notify("beam-copy", 99, f"Beam recibió {files_count} archivos.")
+        notify("beam-copy", 99, f"Beam recibió {logical_total} modelos.")
         return {
             "volume_name": volume_name,
             "path": prefix,
             "target": f"beam://{volume_name}" + (f"/{prefix}" if prefix else ""),
             "overwrite_requested": overwrite,
-            "files_uploaded": int(result.get("files_uploaded", files_count)),
+            "models_uploaded": logical_total,
+            "files_uploaded": int(result.get("files_uploaded", len(files))),
             "bytes_uploaded": int(result.get("bytes_uploaded", bytes_total)),
-            "transfer_mode": "parallel-root-copy-then-move",
+            "transfer_mode": "parallel-root-copy-then-move-modal-logical-progress",
             "parallel_workers": int(result.get("workers", 1)),
         }
 
