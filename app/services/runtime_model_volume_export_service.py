@@ -172,6 +172,7 @@ class RuntimeModelVolumeExportService:
         physical_total = len(upload_items)
         transfer_started = time.perf_counter()
         latest_percent = 94
+        last_confirmed_speed = 0.0
 
         def human_bytes(value: int) -> str:
             amount = float(max(0, value))
@@ -192,7 +193,7 @@ class RuntimeModelVolumeExportService:
         )
 
         def on_progress(event: dict[str, Any]) -> None:
-            nonlocal latest_percent
+            nonlocal latest_percent, last_confirmed_speed
             phase = str(event.get("phase") or "uploading")
             current = int(event.get("current") or 0)
             total = max(1, int(event.get("total") or physical_total or 1))
@@ -211,8 +212,17 @@ class RuntimeModelVolumeExportService:
             latest_percent = max(latest_percent, min(99, percent))
 
             elapsed = max(0.001, time.perf_counter() - transfer_started)
-            speed = uploaded_bytes / elapsed
+            # Beam CLI no expone progreso de bytes mientras un archivo sigue en
+            # transferencia. ``bytes_uploaded`` aumenta únicamente cuando un
+            # ``beam cp`` termina. Por eso nunca presentamos 0 B/s como si fuera
+            # una medición real: hasta completar el primer archivo la velocidad
+            # todavía no está disponible. Después mostramos una media confirmada
+            # basada solo en bytes efectivamente terminados, nunca en omitidos.
+            if uploaded_bytes > 0:
+                last_confirmed_speed = uploaded_bytes / elapsed
             filename = remote.rsplit("/", 1)[-1] if remote else ""
+            uploaded_files = int(event.get("files_uploaded") or 0)
+
             if phase == "inventory":
                 message = f"Beam: comprobando archivos existentes en el volumen {volume_name}…"
             elif phase == "skipping":
@@ -222,18 +232,23 @@ class RuntimeModelVolumeExportService:
                 )
             elif phase == "completed":
                 message = (
-                    f"Beam: {current}/{total} archivos procesados · "
-                    f"{human_bytes(processed_bytes)} de {human_bytes(total_bytes_event)} · {skipped} omitidos."
+                    f"Beam completado: {current}/{total} archivos procesados · "
+                    f"{human_bytes(processed_bytes)} de {human_bytes(total_bytes_event)} · "
+                    f"{uploaded_files} subidos · {skipped} omitidos."
                 )
             else:
                 message = (
                     f"Beam: {current}/{total} archivos · {human_bytes(processed_bytes)} de "
-                    f"{human_bytes(total_bytes_event)} · {human_bytes(int(speed))}/s"
+                    f"{human_bytes(total_bytes_event)}"
                 )
                 if skipped:
                     message += f" · {skipped} omitidos"
+                if last_confirmed_speed > 0:
+                    message += f" · velocidad media confirmada: {human_bytes(int(last_confirmed_speed))}/s"
+                elif current < total:
+                    message += " · subiendo; velocidad disponible al completar el primer archivo"
                 if filename:
-                    message += f" · último: {filename}"
+                    message += f" · último completado: {filename}"
             notify(f"beam-{phase}", latest_percent, message)
 
         def on_completed(
