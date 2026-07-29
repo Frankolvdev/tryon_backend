@@ -18,6 +18,7 @@ class BeamSyncConfig:
     # Valores base. El cliente los adapta por archivo para evitar cientos de partes.
     multipart_part_size_mb: int = 256
     multipart_workers: int = 8
+    read_buffer_size_bytes: int = 4 * 1024 * 1024
     progress_interval_seconds: float = 0.25
     progress_bytes_step: int = 2 * 1024 * 1024
 

@@ -170,17 +170,11 @@ class BeamModelSyncService:
                             "global_speed_bps": int(global_speed),
                             "global_eta_seconds": global_eta,
                         }
-                        parts_completed = int(details.get("parts_completed") or 0)
-                        parts_total = int(details.get("parts_total") or 0)
-                        parts_active = int(details.get("parts_active") or 0)
-                        workers = int(details.get("multipart_workers") or 0)
                         chunk_mb = int(details.get("chunk_size_bytes") or 0) / (1024 * 1024)
                         message = (
                             f"Subiendo {item.relative_path} — archivo {index} de {len(items)}"
                             f" — {float(details.get('file_progress') or 0):.2f}%"
-                            f" — partes completadas {parts_completed} de {parts_total}"
-                            f" — activas {parts_active}"
-                            f" — {workers} workers · {chunk_mb:.0f} MiB/parte"
+                            f" — {chunk_mb:.0f} MiB/parte"
                         )
                         notify(
                             "beam-uploading",

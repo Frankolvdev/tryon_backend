@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from app.services.beam_engine.beam_config import BeamSyncConfig
 from app.services.beam_engine.beam_progress_reader import ProgressReader
@@ -45,20 +46,25 @@ class BeamMultipartClient:
 
     @staticmethod
     def _transfer_plan(file_size: int, config: BeamSyncConfig) -> tuple[int, int]:
-        """Evita cientos de partes y mantiene suficiente paralelismo.
+        """Plan multipart optimizado para modelos grandes.
 
-        Busca aproximadamente 24-40 partes para modelos grandes, con partes entre
-        64 y 512 MiB. Para un modelo de ~15 GiB produce ~30 partes, no 245.
+        Reduce el overhead HTTP usando bloques mayores a medida que crece el
+        archivo, sin perder el paralelismo necesario para saturar la conexión.
         """
+        gib = 1024 * _MIB
         if file_size <= 64 * _MIB:
             return max(1, file_size), 1
-        target_parts = 32
-        raw = math.ceil(file_size / target_parts)
-        step = 64 * _MIB
-        adaptive = math.ceil(raw / step) * step
+        if file_size < 2 * gib:
+            adaptive = 128 * _MIB
+        elif file_size < 10 * gib:
+            adaptive = 256 * _MIB
+        elif file_size < 40 * gib:
+            adaptive = 512 * _MIB
+        else:
+            adaptive = 1024 * _MIB
+
         configured = max(64, int(config.multipart_part_size_mb)) * _MIB
-        chunk_size = min(512 * _MIB, max(configured, adaptive))
-        chunk_size = min(file_size, chunk_size)
+        chunk_size = min(file_size, max(configured, adaptive))
         parts_total = max(1, math.ceil(file_size / chunk_size))
         workers = max(1, min(int(config.multipart_workers), 8, parts_total))
         return chunk_size, workers
@@ -104,6 +110,22 @@ class BeamMultipartClient:
         network_bytes = 0
         smoothed_speed = 0.0
         upload_id = ""
+        session_local = threading.local()
+
+        def get_session() -> requests.Session:
+            session = getattr(session_local, "session", None)
+            if session is None:
+                session = requests.Session()
+                adapter = HTTPAdapter(
+                    pool_connections=workers_requested,
+                    pool_maxsize=workers_requested,
+                    max_retries=0,
+                    pool_block=True,
+                )
+                session.mount("https://", adapter)
+                session.mount("http://", adapter)
+                session_local.session = session
+            return session
 
         with sdk["ServiceClient"](context) as client:
             initial = client.volume.create_multipart_upload(
@@ -191,7 +213,7 @@ class BeamMultipartClient:
                         active_numbers.add(number)
                     emit(number, force=True)
                     try:
-                        with source.open("rb") as handle:
+                        with source.open("rb", buffering=config.read_buffer_size_bytes) as handle:
                             handle.seek(start)
 
                             def part_progress(bytes_in_part: int) -> None:
@@ -209,7 +231,7 @@ class BeamMultipartClient:
                                 length=length,
                                 on_progress=part_progress,
                             )
-                            response = requests.put(
+                            response = get_session().put(
                                 str(part.url),
                                 data=reader,
                                 headers={"Content-Length": str(length)},
