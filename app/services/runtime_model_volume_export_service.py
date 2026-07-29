@@ -130,32 +130,124 @@ class RuntimeModelVolumeExportService:
 
     @staticmethod
     def _copy_to_beam(session: Any, models_root: Path, remote_path: str, overwrite: bool, notify: ProgressCallback) -> dict[str, Any]:
+        """Sube el staging de modelos a un volumen Beam existente o nuevo.
+
+        Beam CLI se ejecuta desde el mismo venv del backend. Antes de copiar se
+        comprueba el volumen y se crea cuando todavía no existe. Los archivos se
+        envían uno por uno con rutas remotas POSIX para evitar que Windows
+        convierta el destino ``beam://`` en rutas con barras invertidas.
+        """
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         from app.services.beam_cli_environment_service import beam_cli_environment_service
+        from app.services.beam_credentials_service import beam_credentials_service
+        import re
+        import tempfile
 
         cfg = InfrastructureProviderService.get_beam(session)
-        from app.services.beam_credentials_service import beam_credentials_service
         beam_credentials_service.require_token(cfg)
         volume_name = str(cfg.volume_name or "").strip()
         if not volume_name:
             raise ValueError("Configura el nombre del volumen Beam antes de exportar.")
-        executable = beam_cli_environment_service.ensure(timeout_seconds=900)
-        import tempfile
+
+        executable = beam_cli_environment_service.ensure(timeout_seconds=30)
         env = os.environ.copy()
         home = tempfile.mkdtemp(prefix="tryon-beam-export-")
         env.update({"HOME": home, "USERPROFILE": home})
-        auth = beam_credentials_service.configure_cli(
-            executable=executable, config=cfg, env=env, timeout_seconds=30
-        )
-        env = auth.env
-        target = f"beam://{volume_name}" + (f"/{remote_path.strip('/')}" if remote_path.strip('/') else "")
-        notify("beam-copy", 94, f"Subiendo modelos al volumen Beam {volume_name}…")
-        command = [executable, "cp", str(models_root), target]
-        completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=max(900, int(cfg.timeout_seconds)))
-        output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
-        if completed.returncode != 0:
-            raise RuntimeError(f"Beam CLI no pudo copiar los modelos: {output[-4000:]}")
-        return {"volume_name": volume_name, "path": remote_path, "target": target, "overwrite_requested": overwrite, "output": output[-4000:]}
+
+        def run_beam(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [executable, *args],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=max(10, int(timeout)),
+            )
+
+        try:
+            auth = beam_credentials_service.configure_cli(
+                executable=executable,
+                config=cfg,
+                env=env,
+                timeout_seconds=30,
+            )
+            env = auth.env
+
+            notify("beam-volume", 92, f"Comprobando el volumen Beam {volume_name}…")
+            listed = run_beam(["volume", "list"], 120)
+            list_output = "\n".join(
+                part for part in (listed.stdout, listed.stderr) if part
+            ).strip()
+            if listed.returncode != 0:
+                raise RuntimeError(
+                    "Beam CLI no pudo listar los volúmenes: " + list_output[-4000:]
+                )
+
+            ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+            clean_output = ansi.sub("", list_output)
+            volume_exists = any(
+                line.strip().split() and line.strip().split()[0] == volume_name
+                for line in clean_output.splitlines()
+            )
+            if not volume_exists:
+                notify("beam-volume", 93, f"Creando el volumen Beam {volume_name}…")
+                created = run_beam(["volume", "create", volume_name], 180)
+                create_output = "\n".join(
+                    part for part in (created.stdout, created.stderr) if part
+                ).strip()
+                if created.returncode != 0:
+                    # Una creación concurrente puede informar que ya existe.
+                    lower = create_output.casefold()
+                    if "already exists" not in lower and "ya existe" not in lower:
+                        raise RuntimeError(
+                            "Beam CLI no pudo crear el volumen "
+                            f"{volume_name}: {create_output[-4000:]}"
+                        )
+
+            files = [path for path in models_root.rglob("*") if path.is_file()]
+            total_files = max(1, len(files))
+            prefix = remote_path.replace("\\", "/").strip("/")
+            uploaded_bytes = 0
+            last_output = ""
+
+            for index, source in enumerate(files, start=1):
+                relative = source.relative_to(models_root).as_posix()
+                remote_parts = [part for part in (prefix, relative) if part]
+                remote_key = "/".join(remote_parts)
+                target = f"beam://{volume_name}/{remote_key}"
+                percent = 94 + int((index / total_files) * 5)
+                notify(
+                    "beam-copy",
+                    min(99, percent),
+                    f"Subiendo a Beam ({index}/{total_files}): {relative}",
+                )
+                completed = run_beam(
+                    ["cp", str(source), target],
+                    max(900, int(cfg.timeout_seconds)),
+                )
+                output = "\n".join(
+                    part for part in (completed.stdout, completed.stderr) if part
+                ).strip()
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        "Beam CLI no pudo copiar el modelo "
+                        f"{relative} al volumen {volume_name}: {output[-4000:]}"
+                    )
+                uploaded_bytes += source.stat().st_size
+                last_output = output
+
+            target_root = f"beam://{volume_name}" + (f"/{prefix}" if prefix else "")
+            return {
+                "volume_name": volume_name,
+                "path": prefix,
+                "target": target_root,
+                "overwrite_requested": overwrite,
+                "files_uploaded": len(files),
+                "bytes_uploaded": uploaded_bytes,
+                "output": last_output[-4000:],
+            }
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
 
     @staticmethod
     def export(

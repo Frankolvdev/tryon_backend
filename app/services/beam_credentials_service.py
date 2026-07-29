@@ -63,6 +63,7 @@ class BeamCredentialsService:
         completed = subprocess.run(
             [executable, "configure", "default", "--token", token],
             env=configured_env,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=max(10, int(timeout_seconds)),
