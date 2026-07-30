@@ -587,61 +587,63 @@ class RuntimeBuildExecutionService:
 
     @staticmethod
     def _beam_deployment(db, build, deployment):
+        """Deploy Beam natively from the generated Dockerfile.
+
+        This adapter is intentionally self-contained. It does not publish to an
+        external registry and does not share code paths with Modal or RunPod.
+        """
         from app.services.infrastructure_provider_service import InfrastructureProviderService
-        cfg=InfrastructureProviderService.get_beam(db)
+
+        cfg = InfrastructureProviderService.get_beam(db)
         if not cfg.enabled:
             raise ValueError("Activa Beam antes del deploy.")
+
         from app.services.beam_credentials_service import beam_credentials_service
         beam_credentials_service.require_token(cfg)
+
         from app.services.beam_cli_environment_service import beam_cli_environment_service
         try:
-            executable = beam_cli_environment_service.ensure(timeout_seconds=max(900, cfg.timeout_seconds))
+            executable = beam_cli_environment_service.ensure(
+                timeout_seconds=max(900, cfg.timeout_seconds)
+            )
         except Exception as exc:
             raise ValueError(
                 "No fue posible preparar el entorno aislado de Beam CLI: " + str(exc)
             ) from exc
-        RuntimeBuildExecutionService._update_deployment(
-            db, build, deployment,
-            phase="publishing-image", progress=25,
-            message="Publicando imagen.",
-            log=f"[beam:2/6] Publicando {build.image_tag}.",
-        )
-        if not build.published:
-            pushed = subprocess.run(
-                ["docker", "push", build.image_tag],
-                capture_output=True, text=True,
-            )
-            RuntimeBuildExecutionService._update_deployment(
-                db, build, deployment,
-                log=(pushed.stdout or "") + (pushed.stderr or ""),
-            )
-            if pushed.returncode != 0:
-                output = ((pushed.stderr or "") + "\n" + (pushed.stdout or "")).strip()
-                if "denied" in output.lower() or "unauthorized" in output.lower():
-                    raise RuntimeError(
-                        "El registro rechazó la publicación de la imagen para Beam. "
-                        "Verifica que Docker tenga una sesión válida y permisos de escritura para: "
-                        + build.image_tag
-                    )
-                raise RuntimeError(
-                    "docker push terminó con error durante el deploy de Beam: "
-                    + (output[-1200:] or "error desconocido")
-                )
-            build.published = True
-            db.add(build)
-            db.commit()
-        app_file=Path(__file__).resolve().parents[2]/"beam_worker"/"app.py"
-        import tempfile
-        home=tempfile.mkdtemp(prefix="tryon-beam-")
-        deployment_name = str(cfg.deployment_name or "tryon-generation-runtime").strip()
+
+        context = Path(build.context_path or "").expanduser().resolve()
+        try:
+            RuntimeBuildExecutionService._validate_context(context)
+        except ValueError as exc:
+            raise ValueError(
+                "El contexto del runtime no es válido para desplegar en Beam: " + str(exc)
+            ) from exc
+
+        dockerfile = context / "Dockerfile"
+        source_app = Path(__file__).resolve().parents[2] / "beam_worker" / "app.py"
+        if not source_app.is_file():
+            raise ValueError("No se encontró el adaptador exclusivo beam_worker/app.py.")
+
+        # Beam imports the application from the working directory. Keep a provider-
+        # specific copy inside the generated context so Dockerfile and COPY/ADD paths
+        # are resolved exactly against the same root used by the runtime build.
+        app_file = context / ".tryon_beam_app.py"
+        shutil.copy2(source_app, app_file)
+
+        deployment_name = str(
+            cfg.deployment_name or "tryon-generation-runtime"
+        ).strip()
         volume_name = str(cfg.volume_name or "tryon-models").strip()
-        # The Beam volume mount is an internal runtime detail, not a user-facing
-        # resource knob. Keep it stable even for legacy rows with an empty value.
         volume_mount_path = "/models"
-        env=os.environ.copy(); env.update({
+
+        import tempfile
+        home = tempfile.mkdtemp(prefix="tryon-beam-")
+        env = os.environ.copy()
+        env.update({
             "HOME": home,
             "USERPROFILE": home,
-            "TRYON_BEAM_IMAGE_URI": build.image_tag,
+            "TRYON_BEAM_DOCKERFILE": str(dockerfile),
+            "TRYON_BEAM_CONTEXT_DIR": str(context),
             "TRYON_BEAM_DEPLOYMENT_NAME": deployment_name,
             "TRYON_BEAM_VOLUME_NAME": volume_name,
             "TRYON_BEAM_VOLUME_PATH": volume_mount_path,
@@ -658,19 +660,92 @@ class RuntimeBuildExecutionService:
             "TRYON_BEAM_AUTHORIZED": str(cfg.authorized).lower(),
             "TRYON_BEAM_CHECKPOINT": str(cfg.checkpoint_enabled).lower(),
         })
+
         auth = beam_credentials_service.configure_cli(
-            executable=executable, config=cfg, env=env, timeout_seconds=30
+            executable=executable,
+            config=cfg,
+            env=env,
+            timeout_seconds=30,
         )
         env = auth.env
-        RuntimeBuildExecutionService._update_deployment(db,build,deployment,phase="deploying",progress=65,message="Desplegando Beam Task Queue.",log="[beam:4/6] Ejecutando beam deploy.")
-        completed=subprocess.run([executable,"deploy",f"{app_file}:handler","--name",deployment_name],env=env,capture_output=True,text=True,timeout=max(600,cfg.timeout_seconds))
-        output=(completed.stdout or completed.stderr or "").strip()
-        if completed.returncode!=0: raise ValueError("Beam deploy falló: "+output[-4000:])
+
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            phase="preparing-runtime", progress=25,
+            message="Preparando contexto nativo de Beam.",
+            log=f"[beam:2/6] Contexto validado: {context}",
+            app_name=deployment_name,
+            volume_name=volume_name,
+        )
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            phase="building-image", progress=45,
+            message="Beam está construyendo la imagen desde Dockerfile.",
+            log="[beam:3/6] Construcción administrada por Beam; no se usa GHCR ni docker push.",
+        )
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            phase="deploying", progress=65,
+            message="Desplegando Beam Task Queue.",
+            log="[beam:4/6] Ejecutando beam deploy desde el contexto del runtime.",
+        )
+
+        try:
+            completed = subprocess.run(
+                [
+                    executable,
+                    "deploy",
+                    f"{app_file.name}:handler",
+                    "--name",
+                    deployment_name,
+                ],
+                cwd=str(context),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=max(1800, cfg.timeout_seconds),
+            )
+        finally:
+            try:
+                app_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            shutil.rmtree(home, ignore_errors=True)
+
+        output = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
+        if output:
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                log=output[-12000:],
+            )
+        if completed.returncode != 0:
+            raise ValueError("Beam deploy falló: " + (output[-4000:] or "error desconocido"))
+
         import re
-        urls=re.findall(r"https://[^\s'\"]+",output); endpoint=next((u.rstrip('.,') for u in urls if 'beam.cloud' in u),cfg.endpoint)
-        if endpoint and endpoint!=cfg.endpoint:
-            cfg.endpoint=endpoint; InfrastructureProviderService.save_beam(db,cfg)
-        RuntimeBuildExecutionService._update_deployment(db,build,deployment,status="completed",phase="completed",progress=100,message="Beam desplegado.",log="[beam:6/6] Deployment Beam completado.",endpoint=endpoint,finished_at=utc_now().isoformat())
+        urls = re.findall(r"https://[^\s'\"]+", output)
+        endpoint = next(
+            (url.rstrip(".,") for url in urls if "beam.cloud" in url),
+            cfg.endpoint,
+        )
+        if endpoint and endpoint != cfg.endpoint:
+            cfg.endpoint = endpoint
+            InfrastructureProviderService.save_beam(db, cfg)
+
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            phase="verifying-deployment", progress=92,
+            message="Verificando despliegue Beam.",
+            log="[beam:5/6] Beam confirmó la construcción y publicación administradas.",
+            endpoint=endpoint,
+        )
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            status="deployed", phase="completed", progress=100,
+            message="Despliegue Beam completado.",
+            log="[beam:6/6] Deployment Beam completado sin registro externo.",
+            endpoint=endpoint,
+            finished_at=utc_now().isoformat(),
+        )
 
     @staticmethod
     def run_deployment(build_id, deployment_id):

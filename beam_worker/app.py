@@ -4,10 +4,7 @@ import os
 import sys
 from typing import Any
 
-from beam import Image, QueueDepthAutoscaler, Volume, task_queue
-
-sys.path.insert(0, "/app/runtime/runpod_worker")
-from generation_runtime import GenerationRuntime
+from beam import Image, QueueDepthAutoscaler, Volume, env, task_queue
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -17,26 +14,36 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-IMAGE_URI = os.environ.get("TRYON_BEAM_IMAGE_URI", "").strip()
+DOCKERFILE = os.environ.get("TRYON_BEAM_DOCKERFILE", "./Dockerfile").strip()
+CONTEXT_DIR = os.environ.get("TRYON_BEAM_CONTEXT_DIR", ".").strip()
 VOLUME_NAME = os.environ.get("TRYON_BEAM_VOLUME_NAME", "tryon-models").strip()
 VOLUME_PATH = os.environ.get("TRYON_BEAM_VOLUME_PATH", "/models").strip()
-DEPLOYMENT_NAME = os.environ.get("TRYON_BEAM_DEPLOYMENT_NAME", "tryon-generation-runtime").strip()
+DEPLOYMENT_NAME = os.environ.get(
+    "TRYON_BEAM_DEPLOYMENT_NAME", "tryon-generation-runtime"
+).strip()
 
-if not IMAGE_URI:
-    raise RuntimeError("TRYON_BEAM_IMAGE_URI is required for the Beam deployment.")
+if not DOCKERFILE:
+    raise RuntimeError("TRYON_BEAM_DOCKERFILE is required for the Beam deployment.")
 
-image = Image.from_registry(IMAGE_URI)
+# Beam builds and stores this image internally. No Docker registry, docker login,
+# docker tag, or docker push is involved in this provider-specific path.
+image = Image().from_dockerfile(DOCKERFILE, CONTEXT_DIR)
 volumes = [Volume(name=VOLUME_NAME, mount_path=VOLUME_PATH)] if VOLUME_NAME else []
 
 
-def start_runtime() -> dict[str, Any]:
-    """Beam equivalent of Modal container startup.
+def _generation_runtime_class():
+    # The generated Dockerfile contains this runtime under /app/runtime. Delay the
+    # import until Beam executes remotely so the local deployment CLI only needs
+    # to parse the application definition.
+    sys.path.insert(0, "/app/runtime/runpod_worker")
+    from generation_runtime import GenerationRuntime
 
-    This executes once when a container starts. When checkpoints are enabled,
-    Beam captures the container after this function finishes, so the runtime is
-    restored already initialized on subsequent cold starts.
-    """
-    return {"runtime": GenerationRuntime()}
+    return GenerationRuntime
+
+
+def start_runtime() -> dict[str, Any]:
+    generation_runtime = _generation_runtime_class()
+    return {"runtime": generation_runtime()}
 
 
 @task_queue(
@@ -64,10 +71,10 @@ def handler(context: Any, **payload: Any) -> dict[str, Any]:
     if isinstance(context, dict):
         runtime = context.get("runtime")
     if runtime is None:
-        # Defensive fallback for SDK/runtime versions that wrap on_start data.
         on_start_value = getattr(context, "on_start_value", None)
         if isinstance(on_start_value, dict):
             runtime = on_start_value.get("runtime")
     if runtime is None:
-        runtime = GenerationRuntime()
+        generation_runtime = _generation_runtime_class()
+        runtime = generation_runtime()
     return runtime.execute(payload)
