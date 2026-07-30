@@ -690,21 +690,38 @@ class RuntimeBuildExecutionService:
             log="[beam:4/6] Ejecutando beam deploy desde el contexto del runtime.",
         )
 
+        output_lines = []
+        returncode = None
         try:
-            completed = subprocess.run(
+            proc = subprocess.Popen(
                 [
                     executable,
                     "deploy",
-                    f"{app_file.name}:handler",
+                    f"{app_file.stem}:handler",
                     "--name",
                     deployment_name,
                 ],
                 cwd=str(context),
                 env=env,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=max(1800, cfg.timeout_seconds),
+                bufsize=1,
             )
+            progress = 65
+            for raw_line in proc.stdout or []:
+                line = raw_line.rstrip()
+                if not line:
+                    continue
+                output_lines.append(line)
+                progress = min(89, progress + 1)
+                RuntimeBuildExecutionService._update_deployment(
+                    db, build, deployment,
+                    progress=progress,
+                    message="Beam está construyendo y publicando el deployment.",
+                    log=f"[beam] {line}",
+                )
+            returncode = proc.wait()
         finally:
             try:
                 app_file.unlink(missing_ok=True)
@@ -712,19 +729,14 @@ class RuntimeBuildExecutionService:
                 pass
             shutil.rmtree(home, ignore_errors=True)
 
-        output = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
-        if output:
-            RuntimeBuildExecutionService._update_deployment(
-                db, build, deployment,
-                log=output[-12000:],
-            )
-        if completed.returncode != 0:
+        output = "\n".join(output_lines).strip()
+        if returncode != 0:
             raise ValueError("Beam deploy falló: " + (output[-4000:] or "error desconocido"))
 
         import re
         urls = re.findall(r"https://[^\s'\"]+", output)
         endpoint = next(
-            (url.rstrip(".,") for url in urls if "beam.cloud" in url),
+            (url.rstrip(".,?;:") for url in urls if "beam.cloud" in url),
             cfg.endpoint,
         )
         if endpoint and endpoint != cfg.endpoint:
@@ -735,7 +747,7 @@ class RuntimeBuildExecutionService:
             db, build, deployment,
             phase="verifying-deployment", progress=92,
             message="Verificando despliegue Beam.",
-            log="[beam:5/6] Beam confirmó la construcción y publicación administradas.",
+            log=f"[beam:5/6] Beam confirmó la construcción y publicación administradas. Endpoint: {endpoint or 'no detectado automáticamente'}",
             endpoint=endpoint,
         )
         RuntimeBuildExecutionService._update_deployment(
