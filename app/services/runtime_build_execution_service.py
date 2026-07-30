@@ -690,7 +690,39 @@ class RuntimeBuildExecutionService:
             log="[beam:4/6] Ejecutando beam deploy desde el contexto del runtime.",
         )
 
-        output_lines = []
+        # Beam synchronizes every file in the working directory unless it is
+        # excluded through .beamignore. The exported runtime may contain a full
+        # Windows Blender bundle embedded by a custom node; that bundle cannot run
+        # inside Beam's Linux containers and can add tens of thousands of files.
+        beamignore = context / ".beamignore"
+        beamignore_rules = [
+            "**/.git/*",
+            "**/.github/*",
+            "**/__pycache__/*",
+            "**/*.pyc",
+            "**/*.pyo",
+            "**/tests/*",
+            "custom_nodes/blender-in-comfyui/blender/blender-*-windows-x64/*",
+        ]
+        existing_rules = []
+        if beamignore.is_file():
+            existing_rules = beamignore.read_text(encoding="utf-8").splitlines()
+        merged_rules = list(existing_rules)
+        for rule in beamignore_rules:
+            if rule not in merged_rules:
+                merged_rules.append(rule)
+        beamignore.write_text("\n".join(merged_rules).rstrip() + "\n", encoding="utf-8")
+
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            message="Contexto Beam optimizado antes de sincronizar.",
+            log="[beam] .beamignore aplicado: Blender Windows, cachés, tests y metadatos de desarrollo excluidos.",
+        )
+
+        from collections import deque
+        import time
+
+        output_tail = deque(maxlen=5000)
         returncode = None
         try:
             proc = subprocess.Popen(
@@ -709,11 +741,36 @@ class RuntimeBuildExecutionService:
                 bufsize=1,
             )
             progress = 65
+            added_files = 0
+            pending_added_marker = False
+            last_flush = time.monotonic()
             for raw_line in proc.stdout or []:
                 line = raw_line.rstrip()
                 if not line:
                     continue
-                output_lines.append(line)
+                output_tail.append(line)
+
+                # Beam prints "Added" and the corresponding path on separate
+                # lines. Counting those entries avoids a database commit and a
+                # complete BackOffice re-render for every synchronized file.
+                if line == "Added":
+                    pending_added_marker = True
+                    continue
+                if pending_added_marker:
+                    pending_added_marker = False
+                    added_files += 1
+                    now = time.monotonic()
+                    if added_files % 250 == 0 or now - last_flush >= 3.0:
+                        progress = min(79, 65 + min(14, added_files // 250))
+                        RuntimeBuildExecutionService._update_deployment(
+                            db, build, deployment,
+                            progress=progress,
+                            message=f"Beam está sincronizando el contexto ({added_files:,} archivos procesados).",
+                            log=f"[beam] Sincronización en progreso: {added_files:,} archivos procesados.",
+                        )
+                        last_flush = now
+                    continue
+
                 progress = min(89, progress + 1)
                 RuntimeBuildExecutionService._update_deployment(
                     db, build, deployment,
@@ -729,7 +786,7 @@ class RuntimeBuildExecutionService:
                 pass
             shutil.rmtree(home, ignore_errors=True)
 
-        output = "\n".join(output_lines).strip()
+        output = "\n".join(output_tail).strip()
         if returncode != 0:
             raise ValueError("Beam deploy falló: " + (output[-4000:] or "error desconocido"))
 
