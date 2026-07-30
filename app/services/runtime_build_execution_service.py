@@ -223,7 +223,7 @@ class RuntimeBuildExecutionService:
                 "key": "beam",
                 "label": "Beam",
                 "enabled": bool(beam.enabled),
-                "configured": bool(beam.token),
+                "configured": bool(beam.api_key),
             },
         ]
 
