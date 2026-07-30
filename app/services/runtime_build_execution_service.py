@@ -205,6 +205,7 @@ class RuntimeBuildExecutionService:
         from app.services.infrastructure_provider_service import InfrastructureProviderService
         modal = InfrastructureProviderService.get_modal(db)
         runpod = InfrastructureProviderService.get_runpod(db)
+        beam = InfrastructureProviderService.get_beam(db)
         return [
             {
                 "key": "modal",
@@ -217,6 +218,12 @@ class RuntimeBuildExecutionService:
                 "label": "RunPod Serverless",
                 "enabled": bool(runpod.enabled),
                 "configured": bool(runpod.api_key),
+            },
+            {
+                "key": "beam",
+                "label": "Beam",
+                "enabled": bool(beam.enabled),
+                "configured": bool(beam.api_key),
             },
         ]
 
@@ -635,7 +642,7 @@ class RuntimeBuildExecutionService:
         urls=re.findall(r"https://[^\s'\"]+",output); endpoint=next((u.rstrip('.,') for u in urls if 'beam.cloud' in u),cfg.endpoint)
         if endpoint and endpoint!=cfg.endpoint:
             cfg.endpoint=endpoint; InfrastructureProviderService.save_beam(db,cfg)
-        RuntimeBuildExecutionService._update_deployment(db,build,deployment,status="completed",phase="completed",progress=100,message="Beam desplegado.",log="[beam:6/6] Deployment Beam completado.",endpoint=endpoint,finished_at=utc_now().isoformat())
+        RuntimeBuildExecutionService._update_deployment(db,build,deployment,status="deployed",phase="completed",progress=100,message="Beam desplegado.",log="[beam:6/6] Deployment Beam completado.",endpoint=endpoint,finished_at=utc_now().isoformat())
 
     @staticmethod
     def run_deployment(build_id, deployment_id):
