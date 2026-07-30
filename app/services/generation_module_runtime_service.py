@@ -761,7 +761,16 @@ class GenerationModuleRuntimeService:
     def _run_beam_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
         with self._lock:
             current = self._items[execution_id].model_copy(deep=True)
-        timeout=max(60,sum(int((step.get("configuration") or {}).get("timeout_seconds") or 300) for step in module.get("steps",[]) if step.get("is_enabled")))
+        config = infrastructure_provider_service.get_beam(db)
+        timeout = max(
+            60,
+            int(config.timeout_seconds or 900),
+            sum(
+                int((step.get("configuration") or {}).get("timeout_seconds") or 300)
+                for step in module.get("steps", [])
+                if step.get("is_enabled")
+            ),
+        )
         provider=RuntimeProviderRegistry.get(GenerationExecutionEngine.BEAM)
         payload={"runtime_contract":"tryon.generation-runtime/v1","provider":{"key":provider.key,"remote":provider.remote},"execution_id":str(execution_id),"module":copy.deepcopy(module),"context":self._serialize_remote_value(db,current.context)}
         submitted=beam_serverless_adapter_service.submit_job(db,input_data=payload,endpoint=(module.get("endpoint") or None))
