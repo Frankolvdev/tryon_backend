@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable
 
 import requests
+from fastapi.encoders import jsonable_encoder
 from requests.adapters import HTTPAdapter
 from sqlalchemy.orm import Session
 
@@ -97,7 +98,7 @@ class BeamServerlessAdapterService:
         response = self._session().post(
             target,
             headers=self._headers(cfg.api_key),
-            json=input_data,
+            json=jsonable_encoder(input_data),
             timeout=min(cfg.timeout_seconds, 120),
         )
         response.raise_for_status()
