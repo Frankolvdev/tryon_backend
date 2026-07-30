@@ -429,6 +429,21 @@ def create_deployment(
 
 
 
+@router.post("/builds/{build_id}/deployments/{deployment_id}/cancel")
+def cancel_deployment(
+    build_id: int,
+    deployment_id: str,
+    db: Session = Depends(get_db),
+):
+    item = db.get(RuntimeBuilderBuild, build_id)
+    if not item:
+        raise HTTPException(404, "Build no encontrado.")
+    try:
+        return RuntimeBuildExecutionService.cancel_deployment(db, item, deployment_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.post("/builds/bulk-cancel", response_model=RuntimeBuildBulkResponse)
 def bulk_cancel_builds(payload: RuntimeBuildBulkRequest, db: Session = Depends(get_db)):
     active_statuses = {"building", "pending", "validating", "publishing"}

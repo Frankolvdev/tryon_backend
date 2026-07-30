@@ -725,6 +725,18 @@ class RuntimeBuildExecutionService:
         output_tail = deque(maxlen=5000)
         returncode = None
         try:
+            popen_kwargs = {
+                "cwd": str(context),
+                "env": env,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+                "bufsize": 1,
+            }
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                popen_kwargs["start_new_session"] = True
             proc = subprocess.Popen(
                 [
                     executable,
@@ -733,12 +745,13 @@ class RuntimeBuildExecutionService:
                     "--name",
                     deployment_name,
                 ],
-                cwd=str(context),
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+                **popen_kwargs,
+            )
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                message="Proceso Beam iniciado.",
+                log=f"[beam] Proceso local iniciado con PID {proc.pid}.",
+                process_pid=proc.pid,
             )
             progress = 65
             added_files = 0
@@ -779,6 +792,14 @@ class RuntimeBuildExecutionService:
                     log=f"[beam] {line}",
                 )
             returncode = proc.wait()
+            db.expire_all()
+            latest_build = db.get(RuntimeBuilderBuild, build.id)
+            latest_deployment = (
+                RuntimeBuildExecutionService.get_deployment(latest_build, deployment["id"])
+                if latest_build else None
+            )
+            if latest_deployment and latest_deployment.get("status") == "cancelled":
+                return
         finally:
             try:
                 app_file.unlink(missing_ok=True)
@@ -815,6 +836,45 @@ class RuntimeBuildExecutionService:
             endpoint=endpoint,
             finished_at=utc_now().isoformat(),
         )
+
+    @staticmethod
+    def cancel_deployment(db, build, deployment_id):
+        deployment = RuntimeBuildExecutionService.get_deployment(build, deployment_id)
+        if not deployment:
+            raise ValueError("Despliegue no encontrado.")
+        if deployment.get("status") not in {"queued", "running"}:
+            return deployment
+        if deployment.get("provider") != "beam":
+            raise ValueError("Esta cancelación de proceso local está disponible únicamente para Beam.")
+
+        pid = deployment.get("process_pid")
+        termination_note = "No había un proceso Beam local activo."
+        if pid:
+            try:
+                if os.name == "nt":
+                    result = subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True, text=True, timeout=20,
+                    )
+                    if result.returncode == 0:
+                        termination_note = f"Proceso Beam PID {pid} y sus procesos hijos terminados."
+                    else:
+                        termination_note = f"El proceso Beam PID {pid} ya no estaba activo."
+                else:
+                    import signal
+                    os.killpg(int(pid), signal.SIGTERM)
+                    termination_note = f"Grupo de proceso Beam PID {pid} terminado."
+            except (OSError, ValueError, subprocess.SubprocessError):
+                termination_note = f"El proceso Beam PID {pid} ya no estaba activo."
+
+        return RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            status="cancelled", phase="cancelled",
+            message="Despliegue Beam cancelado.",
+            log=f"[beam:cancel] {termination_note}",
+            error=None, process_pid=None,
+            finished_at=utc_now().isoformat(),
+        ) or deployment
 
     @staticmethod
     def run_deployment(build_id, deployment_id):
@@ -913,11 +973,12 @@ class RuntimeBuildExecutionService:
             build = db.get(RuntimeBuilderBuild, build_id)
             if build:
                 deployment = RuntimeBuildExecutionService.get_deployment(build, deployment_id)
-                if deployment:
+                if deployment and deployment.get("status") != "cancelled":
                     deployment["finished_at"] = utc_now().isoformat()
                     RuntimeBuildExecutionService._update_deployment(
                         db, build, deployment, status="failed", phase="failed",
                         message="El despliegue falló.", log=f"[deploy:error] {exc}", error=str(exc),
+                        process_pid=None,
                     )
         finally:
             db.close()
