@@ -223,7 +223,7 @@ class RuntimeBuildExecutionService:
                 "key": "beam",
                 "label": "Beam",
                 "enabled": bool(beam.enabled),
-                "configured": bool(beam.api_key),
+                "configured": bool(beam.token),
             },
         ]
 
@@ -600,8 +600,36 @@ class RuntimeBuildExecutionService:
             raise ValueError(
                 "No fue posible preparar el entorno aislado de Beam CLI: " + str(exc)
             ) from exc
-        RuntimeBuildExecutionService._update_deployment(db,build,deployment,phase="publishing-image",progress=25,message="Publicando imagen.",log=f"[beam:2/6] Publicando {build.image_tag}.")
-        RuntimeBuildExecutionService._docker_push(build.image_tag, build, deployment, db)
+        RuntimeBuildExecutionService._update_deployment(
+            db, build, deployment,
+            phase="publishing-image", progress=25,
+            message="Publicando imagen.",
+            log=f"[beam:2/6] Publicando {build.image_tag}.",
+        )
+        if not build.published:
+            pushed = subprocess.run(
+                ["docker", "push", build.image_tag],
+                capture_output=True, text=True,
+            )
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                log=(pushed.stdout or "") + (pushed.stderr or ""),
+            )
+            if pushed.returncode != 0:
+                output = ((pushed.stderr or "") + "\n" + (pushed.stdout or "")).strip()
+                if "denied" in output.lower() or "unauthorized" in output.lower():
+                    raise RuntimeError(
+                        "El registro rechazó la publicación de la imagen para Beam. "
+                        "Verifica que Docker tenga una sesión válida y permisos de escritura para: "
+                        + build.image_tag
+                    )
+                raise RuntimeError(
+                    "docker push terminó con error durante el deploy de Beam: "
+                    + (output[-1200:] or "error desconocido")
+                )
+            build.published = True
+            db.add(build)
+            db.commit()
         app_file=Path(__file__).resolve().parents[2]/"beam_worker"/"app.py"
         import tempfile
         home=tempfile.mkdtemp(prefix="tryon-beam-")
@@ -642,7 +670,7 @@ class RuntimeBuildExecutionService:
         urls=re.findall(r"https://[^\s'\"]+",output); endpoint=next((u.rstrip('.,') for u in urls if 'beam.cloud' in u),cfg.endpoint)
         if endpoint and endpoint!=cfg.endpoint:
             cfg.endpoint=endpoint; InfrastructureProviderService.save_beam(db,cfg)
-        RuntimeBuildExecutionService._update_deployment(db,build,deployment,status="deployed",phase="completed",progress=100,message="Beam desplegado.",log="[beam:6/6] Deployment Beam completado.",endpoint=endpoint,finished_at=utc_now().isoformat())
+        RuntimeBuildExecutionService._update_deployment(db,build,deployment,status="completed",phase="completed",progress=100,message="Beam desplegado.",log="[beam:6/6] Deployment Beam completado.",endpoint=endpoint,finished_at=utc_now().isoformat())
 
     @staticmethod
     def run_deployment(build_id, deployment_id):
