@@ -54,7 +54,7 @@ class Settings(BaseSettings):
 
     GENERATION_MAX_ACTIVE_EXECUTIONS_PER_USER: int = 3
     GENERATION_MAX_HISTORY_PAGE_SIZE: int = 100
-    GENERATION_USER_ALLOWED_ENGINES: str = "simulated,local_docker,runpod_serverless,modal"
+    GENERATION_USER_ALLOWED_ENGINES: str = "simulated,local_docker,runpod_serverless,modal,beam"
 
     # Unified AI job orchestration. Local ComfyUI must stay serialized on a single GPU.
     GENERATION_LOCAL_WORKERS: int = 1
