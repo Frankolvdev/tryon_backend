@@ -585,13 +585,111 @@ class RuntimeBuildExecutionService:
             template_id=template_id,
         )
 
+
+    @staticmethod
+    def _prepare_beam_deploy_context(source_context):
+        """Create a provider-local Beam context without changing the runtime export.
+
+        The complete functional runtime structure is preserved so Dockerfile COPY/ADD
+        instructions continue to work. Only development metadata, caches, examples,
+        video datasets and Windows-only Blender bundles are pruned. Modal and RunPod
+        never use this helper.
+        """
+        import tempfile
+
+        source_context = Path(source_context).resolve()
+        deploy_root = Path(tempfile.mkdtemp(prefix="tryon-beam-context-"))
+        deploy_context = deploy_root / "runtime"
+        excluded = {
+            "directories": 0,
+            "files": 0,
+        }
+
+        always_excluded_dirs = {
+            ".git", ".github", ".pytest_cache", ".mypy_cache",
+            ".ruff_cache", "__pycache__", "tests", "test",
+            "docs", "examples", "example", "demo", "demos",
+        }
+        excluded_suffixes = {".pyc", ".pyo"}
+
+        def ignore(directory, names):
+            directory_path = Path(directory)
+            relative = directory_path.relative_to(source_context)
+            relative_parts = tuple(part.lower() for part in relative.parts)
+            ignored = []
+            for name in names:
+                lower = name.lower()
+                candidate_parts = relative_parts + (lower,)
+                candidate = directory_path / name
+
+                exclude = False
+                if candidate.is_dir():
+                    if lower in always_excluded_dirs:
+                        exclude = True
+                    elif lower.startswith("blender-") and "windows-x64" in lower:
+                        exclude = True
+                    elif len(candidate_parts) >= 2 and candidate_parts[-2:] in {
+                        ("assets", "videos"),
+                        ("assets", "video"),
+                        ("assets", "demos"),
+                        ("assets", "demo"),
+                        ("assets", "examples"),
+                        ("assets", "example"),
+                    }:
+                        exclude = True
+                    if exclude:
+                        excluded["directories"] += 1
+                else:
+                    if candidate.suffix.lower() in excluded_suffixes:
+                        exclude = True
+                    if exclude:
+                        excluded["files"] += 1
+
+                if exclude:
+                    ignored.append(name)
+            return ignored
+
+        try:
+            shutil.copytree(
+                source_context,
+                deploy_context,
+                ignore=ignore,
+                symlinks=True,
+            )
+        except Exception:
+            shutil.rmtree(deploy_root, ignore_errors=True)
+            raise
+
+        beamignore = deploy_context / ".beamignore"
+        beamignore.write_text(
+            "\n".join([
+                "**/.git/**",
+                "**/.github/**",
+                "**/__pycache__/**",
+                "**/*.pyc",
+                "**/*.pyo",
+                "**/tests/**",
+                "**/test/**",
+                "**/docs/**",
+                "**/examples/**",
+                "**/example/**",
+                "**/demo/**",
+                "**/demos/**",
+                "**/assets/videos/**",
+                "**/assets/video/**",
+                "**/assets/demos/**",
+                "**/assets/demo/**",
+                "**/assets/examples/**",
+                "**/assets/example/**",
+                "**/blender-*-windows-x64/**",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        return deploy_root, deploy_context, excluded
+
     @staticmethod
     def _beam_deployment(db, build, deployment):
-        """Deploy Beam natively from the generated Dockerfile.
-
-        This adapter is intentionally self-contained. It does not publish to an
-        external registry and does not share code paths with Modal or RunPod.
-        """
+        """Deploy Beam from a compact provider-specific Docker context."""
         from app.services.infrastructure_provider_service import InfrastructureProviderService
 
         cfg = InfrastructureProviderService.get_beam(db)
@@ -611,120 +709,99 @@ class RuntimeBuildExecutionService:
                 "No fue posible preparar el entorno aislado de Beam CLI: " + str(exc)
             ) from exc
 
-        context = Path(build.context_path or "").expanduser().resolve()
+        source_context = Path(build.context_path or "").expanduser().resolve()
         try:
-            RuntimeBuildExecutionService._validate_context(context)
+            RuntimeBuildExecutionService._validate_context(source_context)
         except ValueError as exc:
             raise ValueError(
                 "El contexto del runtime no es válido para desplegar en Beam: " + str(exc)
             ) from exc
 
-        dockerfile = context / "Dockerfile"
         source_app = Path(__file__).resolve().parents[2] / "beam_worker" / "app.py"
         if not source_app.is_file():
             raise ValueError("No se encontró el adaptador exclusivo beam_worker/app.py.")
 
-        # Beam imports the application from the working directory. Keep a provider-
-        # specific copy inside the generated context so Dockerfile and COPY/ADD paths
-        # are resolved exactly against the same root used by the runtime build.
-        app_file = context / "tryon_beam_app.py"
-        shutil.copy2(source_app, app_file)
-
-        deployment_name = str(
-            cfg.deployment_name or "tryon-generation-runtime"
-        ).strip()
-        volume_name = str(cfg.volume_name or "tryon-models").strip()
-        volume_mount_path = "/models"
-
-        import tempfile
-        home = tempfile.mkdtemp(prefix="tryon-beam-")
-        env = os.environ.copy()
-        env.update({
-            "HOME": home,
-            "USERPROFILE": home,
-            "TRYON_BEAM_DOCKERFILE": str(dockerfile),
-            "TRYON_BEAM_CONTEXT_DIR": str(context),
-            "TRYON_BEAM_DEPLOYMENT_NAME": deployment_name,
-            "TRYON_BEAM_VOLUME_NAME": volume_name,
-            "TRYON_BEAM_VOLUME_PATH": volume_mount_path,
-            "TRYON_BEAM_GPU": str(cfg.gpu or "L40S"),
-            "TRYON_BEAM_WORKERS": str(cfg.workers),
-            "TRYON_BEAM_MIN_CONTAINERS": str(cfg.min_containers),
-            "TRYON_BEAM_MAX_CONTAINERS": str(cfg.max_containers),
-            "TRYON_BEAM_TASKS_PER_CONTAINER": str(cfg.tasks_per_container),
-            "TRYON_BEAM_KEEP_WARM_SECONDS": str(cfg.keep_warm_seconds),
-            "TRYON_BEAM_MAX_PENDING_TASKS": str(cfg.max_pending_tasks),
-            "TRYON_BEAM_TIMEOUT": str(cfg.timeout_seconds),
-            "TRYON_BEAM_RETRIES": str(cfg.retries),
-            "TRYON_BEAM_CALLBACK_URL": str(cfg.callback_url or ""),
-            "TRYON_BEAM_AUTHORIZED": str(cfg.authorized).lower(),
-            "TRYON_BEAM_CHECKPOINT": str(cfg.checkpoint_enabled).lower(),
-        })
-
-        auth = beam_credentials_service.configure_cli(
-            executable=executable,
-            config=cfg,
-            env=env,
-            timeout_seconds=30,
-        )
-        env = auth.env
-
         RuntimeBuildExecutionService._update_deployment(
             db, build, deployment,
-            phase="preparing-runtime", progress=25,
-            message="Preparando contexto nativo de Beam.",
-            log=f"[beam:2/6] Contexto validado: {context}",
-            app_name=deployment_name,
-            volume_name=volume_name,
-        )
-        RuntimeBuildExecutionService._update_deployment(
-            db, build, deployment,
-            phase="building-image", progress=45,
-            message="Beam está construyendo la imagen desde Dockerfile.",
-            log="[beam:3/6] Construcción administrada por Beam; no se usa GHCR ni docker push.",
-        )
-        RuntimeBuildExecutionService._update_deployment(
-            db, build, deployment,
-            phase="deploying", progress=65,
-            message="Desplegando Beam Task Queue.",
-            log="[beam:4/6] Ejecutando beam deploy desde el contexto del runtime.",
+            phase="preparing-runtime", progress=20,
+            message="Generando contexto mínimo de Beam.",
+            log=f"[beam:2/6] Runtime fuente validado: {source_context}",
         )
 
-        # Beam synchronizes every file in the working directory unless it is
-        # excluded through .beamignore. The exported runtime may contain a full
-        # Windows Blender bundle embedded by a custom node; that bundle cannot run
-        # inside Beam's Linux containers and can add tens of thousands of files.
-        beamignore = context / ".beamignore"
-        beamignore_rules = [
-            "**/.git/*",
-            "**/.github/*",
-            "**/__pycache__/*",
-            "**/*.pyc",
-            "**/*.pyo",
-            "**/tests/*",
-            "custom_nodes/blender-in-comfyui/blender/blender-*-windows-x64/*",
-        ]
-        existing_rules = []
-        if beamignore.is_file():
-            existing_rules = beamignore.read_text(encoding="utf-8").splitlines()
-        merged_rules = list(existing_rules)
-        for rule in beamignore_rules:
-            if rule not in merged_rules:
-                merged_rules.append(rule)
-        beamignore.write_text("\n".join(merged_rules).rstrip() + "\n", encoding="utf-8")
-
-        RuntimeBuildExecutionService._update_deployment(
-            db, build, deployment,
-            message="Contexto Beam optimizado antes de sincronizar.",
-            log="[beam] .beamignore aplicado: Blender Windows, cachés, tests y metadatos de desarrollo excluidos.",
-        )
-
-        from collections import deque
-        import time
-
-        output_tail = deque(maxlen=5000)
-        returncode = None
+        deploy_root = None
+        home = None
         try:
+            deploy_root, context, excluded = RuntimeBuildExecutionService._prepare_beam_deploy_context(
+                source_context
+            )
+            dockerfile = context / "Dockerfile"
+            app_file = context / "tryon_beam_app.py"
+            shutil.copy2(source_app, app_file)
+
+            deployment_name = str(
+                cfg.deployment_name or "tryon-generation-runtime"
+            ).strip()
+            volume_name = str(cfg.volume_name or "tryon-models").strip()
+            volume_mount_path = str(getattr(cfg, "volume_mount_path", None) or "/models").strip()
+
+            import tempfile
+            home = tempfile.mkdtemp(prefix="tryon-beam-home-")
+            env = os.environ.copy()
+            env.update({
+                "HOME": home,
+                "USERPROFILE": home,
+                "TRYON_BEAM_DOCKERFILE": str(dockerfile),
+                "TRYON_BEAM_CONTEXT_DIR": str(context),
+                "TRYON_BEAM_DEPLOYMENT_NAME": deployment_name,
+                "TRYON_BEAM_VOLUME_NAME": volume_name,
+                "TRYON_BEAM_VOLUME_PATH": volume_mount_path,
+                "TRYON_BEAM_GPU": str(cfg.gpu or "L40S"),
+                "TRYON_BEAM_WORKERS": str(cfg.workers),
+                "TRYON_BEAM_MIN_CONTAINERS": str(cfg.min_containers),
+                "TRYON_BEAM_MAX_CONTAINERS": str(cfg.max_containers),
+                "TRYON_BEAM_TASKS_PER_CONTAINER": str(cfg.tasks_per_container),
+                "TRYON_BEAM_KEEP_WARM_SECONDS": str(cfg.keep_warm_seconds),
+                "TRYON_BEAM_MAX_PENDING_TASKS": str(cfg.max_pending_tasks),
+                "TRYON_BEAM_TIMEOUT": str(cfg.timeout_seconds),
+                "TRYON_BEAM_RETRIES": str(cfg.retries),
+                "TRYON_BEAM_CALLBACK_URL": str(cfg.callback_url or ""),
+                "TRYON_BEAM_AUTHORIZED": str(cfg.authorized).lower(),
+                "TRYON_BEAM_CHECKPOINT": str(cfg.checkpoint_enabled).lower(),
+            })
+
+            auth = beam_credentials_service.configure_cli(
+                executable=executable,
+                config=cfg,
+                env=env,
+                timeout_seconds=30,
+            )
+            env = auth.env
+
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                phase="building-image", progress=45,
+                message="Contexto Beam mínimo listo; construyendo imagen Docker.",
+                log=(
+                    "[beam] Contexto mínimo creado conservando la estructura funcional del runtime. "
+                    f"Se excluyeron {excluded['directories']} directorios y "
+                    f"{excluded['files']} archivos prescindibles."
+                ),
+                app_name=deployment_name,
+                volume_name=volume_name,
+                beam_context_path=str(context),
+            )
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                phase="deploying", progress=65,
+                message="Desplegando Beam Task Queue.",
+                log="[beam:4/6] Ejecutando beam deploy desde el contexto mínimo, no desde el export completo.",
+            )
+
+            from collections import deque
+            import time
+
+            output_tail = deque(maxlen=5000)
+            returncode = None
             popen_kwargs = {
                 "cwd": str(context),
                 "env": env,
@@ -762,10 +839,6 @@ class RuntimeBuildExecutionService:
                 if not line:
                     continue
                 output_tail.append(line)
-
-                # Beam prints "Added" and the corresponding path on separate
-                # lines. Counting those entries avoids a database commit and a
-                # complete BackOffice re-render for every synchronized file.
                 if line == "Added":
                     pending_added_marker = True
                     continue
@@ -778,8 +851,8 @@ class RuntimeBuildExecutionService:
                         RuntimeBuildExecutionService._update_deployment(
                             db, build, deployment,
                             progress=progress,
-                            message=f"Beam está sincronizando el contexto ({added_files:,} archivos procesados).",
-                            log=f"[beam] Sincronización en progreso: {added_files:,} archivos procesados.",
+                            message=f"Beam está sincronizando el contexto mínimo ({added_files:,} archivos).",
+                            log=f"[beam] Sincronización del contexto mínimo: {added_files:,} archivos.",
                         )
                         last_flush = now
                     continue
@@ -800,42 +873,42 @@ class RuntimeBuildExecutionService:
             )
             if latest_deployment and latest_deployment.get("status") == "cancelled":
                 return
+
+            output = "\n".join(output_tail).strip()
+            if returncode != 0:
+                raise ValueError("Beam deploy falló: " + (output[-4000:] or "error desconocido"))
+
+            import re
+            urls = re.findall(r"https://[^\s'\"]+", output)
+            endpoint = next(
+                (url.rstrip(".,?;:") for url in urls if "beam.cloud" in url),
+                cfg.endpoint,
+            )
+            if endpoint and endpoint != cfg.endpoint:
+                cfg.endpoint = endpoint
+                InfrastructureProviderService.save_beam(db, cfg)
+
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                phase="verifying-deployment", progress=92,
+                message="Verificando despliegue Beam.",
+                log=f"[beam:5/6] Beam confirmó la construcción y publicación. Endpoint: {endpoint or 'no detectado automáticamente'}",
+                endpoint=endpoint,
+            )
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                status="deployed", phase="completed", progress=100,
+                message="Despliegue Beam completado.",
+                log="[beam:6/6] Deployment Beam completado desde contexto mínimo.",
+                endpoint=endpoint,
+                process_pid=None,
+                finished_at=utc_now().isoformat(),
+            )
         finally:
-            try:
-                app_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-            shutil.rmtree(home, ignore_errors=True)
-
-        output = "\n".join(output_tail).strip()
-        if returncode != 0:
-            raise ValueError("Beam deploy falló: " + (output[-4000:] or "error desconocido"))
-
-        import re
-        urls = re.findall(r"https://[^\s'\"]+", output)
-        endpoint = next(
-            (url.rstrip(".,?;:") for url in urls if "beam.cloud" in url),
-            cfg.endpoint,
-        )
-        if endpoint and endpoint != cfg.endpoint:
-            cfg.endpoint = endpoint
-            InfrastructureProviderService.save_beam(db, cfg)
-
-        RuntimeBuildExecutionService._update_deployment(
-            db, build, deployment,
-            phase="verifying-deployment", progress=92,
-            message="Verificando despliegue Beam.",
-            log=f"[beam:5/6] Beam confirmó la construcción y publicación administradas. Endpoint: {endpoint or 'no detectado automáticamente'}",
-            endpoint=endpoint,
-        )
-        RuntimeBuildExecutionService._update_deployment(
-            db, build, deployment,
-            status="deployed", phase="completed", progress=100,
-            message="Despliegue Beam completado.",
-            log="[beam:6/6] Deployment Beam completado sin registro externo.",
-            endpoint=endpoint,
-            finished_at=utc_now().isoformat(),
-        )
+            if home:
+                shutil.rmtree(home, ignore_errors=True)
+            if deploy_root:
+                shutil.rmtree(deploy_root, ignore_errors=True)
 
     @staticmethod
     def cancel_deployment(db, build, deployment_id):
