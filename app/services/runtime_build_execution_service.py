@@ -627,7 +627,7 @@ class RuntimeBuildExecutionService:
         # Beam imports the application from the working directory. Keep a provider-
         # specific copy inside the generated context so Dockerfile and COPY/ADD paths
         # are resolved exactly against the same root used by the runtime build.
-        app_file = context / ".tryon_beam_app.py"
+        app_file = context / "tryon_beam_app.py"
         shutil.copy2(source_app, app_file)
 
         deployment_name = str(
