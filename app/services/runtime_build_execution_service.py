@@ -697,7 +697,7 @@ class RuntimeBuildExecutionService:
                 [
                     executable,
                     "deploy",
-                    f"{app_file.stem}:handler",
+                    f"{app_file.name}:handler",
                     "--name",
                     deployment_name,
                 ],
