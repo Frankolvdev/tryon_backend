@@ -742,15 +742,74 @@ class RuntimeBuildExecutionService:
             # runner imports betterproto before our handler/on_start executes.
             # Harden only Beam's temporary Docker context so Modal, RunPod and
             # the persisted runtime export remain byte-for-byte untouched.
-            dockerfile.write_text(
-                dockerfile.read_text(encoding="utf-8").rstrip()
-                + "\n\n# Beam-only runner dependencies and fail-fast validation.\n"
-                + "RUN /opt/conda/bin/python -m pip install --no-cache-dir "
-                  "'betterproto>=2.0.0b6,<3'\n"
-                + "RUN /opt/conda/bin/python -c \"import betterproto; "
-                  "print('Beam runner dependencies OK')\"\n",
-                encoding="utf-8",
+            docker_text = dockerfile.read_text(encoding="utf-8").rstrip()
+
+            # Beam aborts an individual image-build instruction after roughly
+            # five minutes. The exported runtime installs all ComfyUI
+            # requirements in one RUN, which can exceed that limit even when
+            # the installation itself is healthy. Split only that Beam copy
+            # into cacheable batches; the persisted runtime, Modal and RunPod
+            # remain untouched.
+            monolithic_comfy_install = (
+                "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > "
+                "/tmp/runtime-constraints.txt && sed -Ei "
+                "'s/^transformers.*$/transformers>=4.50.3,<5/I; "
+                "/^(torch|torchvision|torchaudio|xformers|triton|"
+                "onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' "
+                "/app/ComfyUI/requirements.txt && python -m pip install "
+                "--constraint /tmp/runtime-constraints.txt "
+                "-r /app/ComfyUI/requirements.txt"
             )
+            split_comfy_install = "\n".join([
+                "# Beam-only: split ComfyUI dependencies into cacheable batches.",
+                "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && "
+                "sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; "
+                "/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)"
+                "([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt",
+                "RUN /opt/conda/bin/python - <<'PY'\n"
+                "from pathlib import Path\n"
+                "src = Path('/app/ComfyUI/requirements.txt')\n"
+                "items = [line for line in src.read_text().splitlines() "
+                "if line.strip() and not line.lstrip().startswith('#')]\n"
+                "groups = [items[i::4] for i in range(4)]\n"
+                "for index, group in enumerate(groups, 1):\n"
+                "    Path(f'/tmp/comfy-requirements-{index}.txt').write_text("
+                "'\\n'.join(group) + ('\\n' if group else ''))\n"
+                "PY",
+                "RUN if [ -s /tmp/comfy-requirements-1.txt ]; then "
+                "/opt/conda/bin/python -m pip install --constraint "
+                "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-1.txt; fi",
+                "RUN if [ -s /tmp/comfy-requirements-2.txt ]; then "
+                "/opt/conda/bin/python -m pip install --constraint "
+                "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-2.txt; fi",
+                "RUN if [ -s /tmp/comfy-requirements-3.txt ]; then "
+                "/opt/conda/bin/python -m pip install --constraint "
+                "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-3.txt; fi",
+                "RUN if [ -s /tmp/comfy-requirements-4.txt ]; then "
+                "/opt/conda/bin/python -m pip install --constraint "
+                "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-4.txt; fi",
+                "RUN /opt/conda/bin/python -m pip check",
+            ])
+            if monolithic_comfy_install not in docker_text:
+                raise ValueError(
+                    "No se encontró la instalación monolítica de requisitos de "
+                    "ComfyUI en el Dockerfile temporal de Beam; se aborta para "
+                    "no alterar una estructura desconocida."
+                )
+            docker_text = docker_text.replace(
+                monolithic_comfy_install, split_comfy_install, 1
+            )
+
+            # Beam injects its task-queue runner into the custom image and that
+            # runner imports betterproto before our handler/on_start executes.
+            docker_text += (
+                "\n\n# Beam-only runner dependencies and fail-fast validation.\n"
+                "RUN /opt/conda/bin/python -m pip install --no-cache-dir "
+                "'betterproto>=2.0.0b6,<3'\n"
+                "RUN /opt/conda/bin/python -c \"import betterproto; "
+                "print('Beam runner dependencies OK')\"\n"
+            )
+            dockerfile.write_text(docker_text, encoding="utf-8")
 
             deployment_name = str(
                 cfg.deployment_name or "tryon-generation-runtime"
