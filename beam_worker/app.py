@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
-from beam import Image, QueueDepthAutoscaler, Volume, env, task_queue
+from beam import Image, Output, QueueDepthAutoscaler, Volume, env, task_queue
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -164,4 +167,27 @@ def handler(
     # with Beam's reserved ``context`` argument. Keep legacy kwargs support for
     # already queued tasks that do not contain a business field named context.
     payload = tryon_payload if isinstance(tryon_payload, dict) else legacy_payload
-    return runtime.execute(payload)
+    result = runtime.execute(payload)
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            f"Beam Generation Runtime returned {type(result).__name__}; expected a JSON object."
+        )
+
+    # Beam Task Queues expose persisted Output files through the task-status API;
+    # a normal Python return value is not included in the ``outputs`` array.
+    result_path = Path(tempfile.gettempdir()) / f"tryon-beam-result-{uuid.uuid4().hex}.json"
+    try:
+        result_path.write_text(
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        Output(path=str(result_path)).save()
+        print(f"[beam-runtime] Resultado publicado: {result_path.name}", flush=True)
+    finally:
+        try:
+            result_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    # The persisted JSON artifact is the authoritative asynchronous response.
+    return {"output_artifact": result_path.name}

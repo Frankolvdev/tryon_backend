@@ -39,14 +39,55 @@ class BeamServerlessAdapterService:
             raise AppException("Beam endpoint must be an absolute HTTP or HTTPS URL.")
         return target
 
-    @staticmethod
-    def _task_output(task: dict[str, Any]) -> Any:
+    def _task_output(
+        self,
+        task: dict[str, Any],
+        *,
+        api_key: str,
+        session: requests.Session | None = None,
+    ) -> Any:
         outputs = task.get("outputs")
-        if isinstance(outputs, list) and len(outputs) == 1:
-            return outputs[0]
-        if outputs is not None:
-            return outputs
-        return task.get("output") or {}
+        if isinstance(outputs, list):
+            json_artifacts = [
+                item
+                for item in outputs
+                if isinstance(item, dict)
+                and str(item.get("name") or "").lower().endswith(".json")
+                and str(item.get("url") or "").strip()
+            ]
+            if json_artifacts:
+                artifact = json_artifacts[-1]
+                active_session = session or self._session()
+                response = active_session.get(
+                    str(artifact["url"]),
+                    headers={"Authorization": f"Bearer {beam_credentials_service.normalize_token(api_key)}"},
+                    timeout=60,
+                )
+                if response.status_code in {401, 403}:
+                    # Beam output URLs can be pre-signed and reject an Authorization header.
+                    response = active_session.get(str(artifact["url"]), timeout=60)
+                response.raise_for_status()
+                try:
+                    payload = response.json()
+                except ValueError as error:
+                    raise AppException(
+                        f"Beam result artifact {artifact.get('name')} did not contain valid JSON."
+                    ) from error
+                if not isinstance(payload, dict):
+                    raise AppException(
+                        f"Beam result artifact {artifact.get('name')} did not contain a JSON object."
+                    )
+                return payload
+            if len(outputs) == 1 and isinstance(outputs[0], dict):
+                direct = outputs[0]
+                if "runtime_contract" in direct or "status" in direct:
+                    return direct
+            if outputs:
+                return outputs
+        direct_output = task.get("output")
+        if direct_output is not None:
+            return direct_output
+        return {}
 
     def _new_session(self) -> requests.Session:
         session = requests.Session()
@@ -196,7 +237,7 @@ class BeamServerlessAdapterService:
                     {"provider_status": status},
                 )
             if status == "COMPLETE":
-                outputs = self._task_output(task)
+                outputs = self._task_output(task, api_key=cfg.api_key, session=active_session)
                 return {
                     "provider": "beam",
                     "provider_job_id": provider_job_id,
@@ -226,7 +267,7 @@ class BeamServerlessAdapterService:
         if status in {"PENDING", "RUNNING", "RETRY", "QUEUED"}:
             return False, None
         if status == "COMPLETE":
-            output = self._task_output(task)
+            output = self._task_output(task, api_key=cfg.api_key)
             if not isinstance(output, dict):
                 raise AppException("Beam task returned an invalid pipeline result.")
             return True, output
