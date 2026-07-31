@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, threading, uuid
+import json, os, re, shlex, shutil, subprocess, threading, uuid
 from pathlib import Path
 from app.common.time import utc_now
 from app.db.database import SessionLocal
@@ -799,6 +799,88 @@ class RuntimeBuildExecutionService:
             docker_text = docker_text.replace(
                 monolithic_comfy_install, split_comfy_install, 1
             )
+
+            # The exported runtime also installs every custom-node requirements
+            # file inside one shell loop. Beam treats that complete loop as one
+            # image-build instruction, so a slow package (notably SAM 2 from
+            # comfyui-impact-pack) can terminate the whole layer. Replace only
+            # Beam's temporary copy with one cacheable RUN per custom node.
+            custom_requirements_root = context / "ComfyUI" / "custom_nodes"
+            custom_requirements = sorted(custom_requirements_root.rglob("requirements.txt"))
+            if not custom_requirements:
+                raise ValueError(
+                    "No se encontraron requirements.txt de custom nodes en el "
+                    "contexto temporal de Beam."
+                )
+
+            custom_install_pattern = re.compile(
+                r"^RUN find /app/ComfyUI/custom_nodes -type f -name requirements\.txt "
+                r"-print \| sort \| while IFS= read -r req; do .*?; done$",
+                re.MULTILINE,
+            )
+            custom_install_lines = [
+                "# Beam-only: install each custom-node requirements file in its own cached layer."
+            ]
+            sam2_requirements = []
+            for requirement_file in custom_requirements:
+                relative = requirement_file.relative_to(context).as_posix()
+                container_path = f"/app/{relative.removeprefix('ComfyUI/')}"
+                # context/ComfyUI/... maps to /app/ComfyUI/... in the image.
+                container_path = f"/app/ComfyUI/{requirement_file.relative_to(context / 'ComfyUI').as_posix()}"
+                requirement_text = requirement_file.read_text(encoding="utf-8", errors="ignore")
+                sam2_lines = [
+                    line.strip()
+                    for line in requirement_text.splitlines()
+                    if "github.com/facebookresearch/sam2" in line and line.strip()
+                ]
+                safe_path = shlex.quote(container_path)
+                label = shlex.quote(container_path)
+                if sam2_lines:
+                    filtered_path = f"/tmp/{requirement_file.parent.name}-requirements-no-sam2.txt"
+                    custom_install_lines.append(
+                        "RUN echo '[runtime] Installing' " + label + " && "
+                        "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
+                        "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" " + safe_path + " && "
+                        "grep -v 'github.com/facebookresearch/sam2' " + safe_path + " > "
+                        + shlex.quote(filtered_path) + " && "
+                        "if [ -s " + shlex.quote(filtered_path) + " ]; then "
+                        "/opt/conda/bin/python -m pip install --constraint "
+                        "/tmp/runtime-constraints.txt -r " + shlex.quote(filtered_path) + "; fi"
+                    )
+                    sam2_requirements.extend(sam2_lines)
+                else:
+                    custom_install_lines.append(
+                        "RUN echo '[runtime] Installing' " + label + " && "
+                        "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
+                        "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" " + safe_path + " && "
+                        "/opt/conda/bin/python -m pip install --constraint "
+                        "/tmp/runtime-constraints.txt -r " + safe_path
+                    )
+
+            # SAM 2's official installer supports disabling its optional CUDA
+            # extension. This avoids an isolated build environment attempting
+            # to compile CUDA during Beam image creation while preserving SAM 2
+            # inference; only optional mask post-processing is skipped.
+            for sam2_requirement in dict.fromkeys(sam2_requirements):
+                custom_install_lines.append(
+                    "RUN SAM2_BUILD_CUDA=0 /opt/conda/bin/python -m pip install "
+                    "--no-build-isolation --constraint /tmp/runtime-constraints.txt "
+                    + shlex.quote(sam2_requirement)
+                )
+            custom_install_lines.append(
+                "RUN /opt/conda/bin/python -c \"import sam2; "
+                "print('Beam SAM2 dependency OK')\""
+            )
+            split_custom_install = "\n".join(custom_install_lines)
+            docker_text, custom_install_count = custom_install_pattern.subn(
+                split_custom_install, docker_text, count=1
+            )
+            if custom_install_count != 1:
+                raise ValueError(
+                    "No se encontró la instalación monolítica de requisitos de "
+                    "custom nodes en el Dockerfile temporal de Beam; se aborta "
+                    "para no alterar una estructura desconocida."
+                )
 
             # Beam injects its task-queue runner into the custom image and that
             # runner imports betterproto before our handler/on_start executes.
