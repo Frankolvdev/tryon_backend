@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from beam import Image, QueueDepthAutoscaler, Volume, env, task_queue
@@ -31,6 +32,82 @@ image = Image().from_dockerfile(DOCKERFILE, CONTEXT_DIR)
 volumes = [Volume(name=VOLUME_NAME, mount_path=VOLUME_PATH)] if VOLUME_NAME else []
 
 
+def _write_extra_model_paths() -> None:
+    """Register the Beam Volume using the same logical model map as Modal."""
+    comfy_root = Path("/app/ComfyUI")
+    comfy_root.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(
+        [
+            "tryon_beam_volume:",
+            f"  base_path: {VOLUME_PATH}",
+            "  checkpoints: checkpoints",
+            "  clip: text_encoders",
+            "  clip_vision: clip_vision",
+            "  configs: configs",
+            "  controlnet: controlnet",
+            "  diffusion_models: |",
+            "    diffusion_models",
+            "    unet",
+            "  embeddings: embeddings",
+            "  gligen: gligen",
+            "  hypernetworks: hypernetworks",
+            "  loras: loras",
+            "  photomaker: photomaker",
+            "  style_models: style_models",
+            "  text_encoders: text_encoders",
+            "  upscale_models: upscale_models",
+            "  vae: vae",
+            "  vae_approx: vae_approx",
+            "  sam3: sam3",
+            "",
+        ]
+    )
+    target = comfy_root / "extra_model_paths.yaml"
+    target.write_text(content, encoding="utf-8")
+    print(f"[beam-runtime] Rutas de modelos registradas: {target} -> {VOLUME_PATH}", flush=True)
+
+
+def _ensure_sam3_volume_link() -> None:
+    """Expose the complete SAM3 tree where TBG-SAM3 scans it directly."""
+    source = Path(VOLUME_PATH) / "sam3"
+    target = Path("/app/ComfyUI/models/sam3")
+    if not source.is_dir():
+        print(f"[beam-runtime] SAM3 no enlazado: no existe {source}.", flush=True)
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        try:
+            if target.resolve() == source.resolve():
+                print(f"[beam-runtime] SAM3 ya enlazado: {target} -> {source}", flush=True)
+                return
+        except OSError:
+            pass
+        target.unlink()
+    elif target.exists():
+        if target.is_dir() and not any(target.iterdir()):
+            target.rmdir()
+        else:
+            raise RuntimeError(
+                f"No se puede enlazar SAM3: {target} ya existe y contiene datos; "
+                "Beam no eliminó ni sobrescribió nada."
+            )
+
+    target.symlink_to(source, target_is_directory=True)
+    if not target.is_dir():
+        raise RuntimeError(f"No se pudo crear el enlace SAM3: {target} -> {source}")
+    print(f"[beam-runtime] SAM3 enlazado: {target} -> {source}", flush=True)
+    checkpoint = source / "sam3.pt"
+    if not checkpoint.is_file():
+        print(f"[beam-runtime] Advertencia: no se encontró {checkpoint}.", flush=True)
+
+
+def _prepare_beam_runtime() -> None:
+    os.environ["MODELS_ROOT"] = VOLUME_PATH
+    _write_extra_model_paths()
+    _ensure_sam3_volume_link()
+
+
 def _generation_runtime_class():
     # The generated Dockerfile contains this runtime under /app/runtime. Delay the
     # import until Beam executes remotely so the local deployment CLI only needs
@@ -42,6 +119,7 @@ def _generation_runtime_class():
 
 
 def start_runtime() -> dict[str, Any]:
+    _prepare_beam_runtime()
     generation_runtime = _generation_runtime_class()
     return {"runtime": generation_runtime()}
 

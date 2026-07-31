@@ -738,6 +738,20 @@ class RuntimeBuildExecutionService:
             app_file = context / "tryon_beam_app.py"
             shutil.copy2(source_app, app_file)
 
+            # Beam injects its task-queue runner into the custom image and that
+            # runner imports betterproto before our handler/on_start executes.
+            # Harden only Beam's temporary Docker context so Modal, RunPod and
+            # the persisted runtime export remain byte-for-byte untouched.
+            dockerfile.write_text(
+                dockerfile.read_text(encoding="utf-8").rstrip()
+                + "\n\n# Beam-only runner dependencies and fail-fast validation.\n"
+                + "RUN /opt/conda/bin/python -m pip install --no-cache-dir "
+                  "'betterproto>=2.0.0b6,<3'\n"
+                + "RUN /opt/conda/bin/python -c \"import betterproto; "
+                  "print('Beam runner dependencies OK')\"\n",
+                encoding="utf-8",
+            )
+
             deployment_name = str(
                 cfg.deployment_name or "tryon-generation-runtime"
             ).strip()
