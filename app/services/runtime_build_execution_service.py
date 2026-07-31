@@ -800,43 +800,41 @@ class RuntimeBuildExecutionService:
                 monolithic_comfy_install, split_comfy_install, 1
             )
 
-            # Custom nodes are materialized inside the image by earlier Dockerfile
-            # layers, so they are not guaranteed to exist in Beam's temporary
-            # Windows context. Discover and install them at image-build time.
-            # This replacement affects only Beam's temporary Dockerfile copy.
+            # Beam-only: custom nodes are created inside the Docker image, not
+            # necessarily present in the temporary Windows context. Discover
+            # their requirements at image-build time. Keep Impact Pack/SAM2 in
+            # separate cacheable layers because SAM2 may require substantially
+            # longer build preparation.
             custom_install_pattern = re.compile(
                 r"^RUN find /app/ComfyUI/custom_nodes -type f -name requirements\.txt "
                 r"-print \| sort \| while IFS= read -r req; do .*?; done$",
                 re.MULTILINE,
             )
             split_custom_install = "\n".join([
-                "# Beam-only: discover custom-node requirements inside the built image.",
-                "RUN set -eu; find /app/ComfyUI/custom_nodes -type f -name requirements.txt "
-                "! -path '*/comfyui-impact-pack/requirements.txt' -print | sort | "
-                "while IFS= read -r req; do "
-                "echo '[runtime] Installing' \"$req\"; "
-                "sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)"
-                "([< >=!~ ;]|$)/Id' \"$req\"; "
-                "/opt/conda/bin/python -m pip install --constraint "
-                "/tmp/runtime-constraints.txt -r \"$req\"; done",
-                "RUN set -eu; req=/app/ComfyUI/custom_nodes/comfyui-impact-pack/requirements.txt; "
-                "if [ -f \"$req\" ]; then "
-                "echo '[runtime] Installing Impact Pack requirements without SAM2'; "
-                "sed -Ei '/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)"
-                "([< >=!~ ;]|$)/Id' \"$req\"; "
-                "grep -v 'github.com/facebookresearch/sam2' \"$req\" > /tmp/impact-pack-no-sam2.txt; "
-                "if [ -s /tmp/impact-pack-no-sam2.txt ]; then "
-                "/opt/conda/bin/python -m pip install --constraint /tmp/runtime-constraints.txt "
-                "-r /tmp/impact-pack-no-sam2.txt; fi; "
-                "else echo '[runtime] Impact Pack requirements not present; skipping'; fi",
-                "RUN set -eu; req=/app/ComfyUI/custom_nodes/comfyui-impact-pack/requirements.txt; "
-                "if [ -f \"$req\" ] && grep -q 'github.com/facebookresearch/sam2' \"$req\"; then "
-                "sam2_req=$(grep 'github.com/facebookresearch/sam2' \"$req\" | head -n 1); "
-                "echo '[runtime] Installing SAM2 without optional CUDA extension'; "
-                "SAM2_BUILD_CUDA=0 /opt/conda/bin/python -m pip install --no-build-isolation "
-                "--constraint /tmp/runtime-constraints.txt \"$sam2_req\"; "
-                "/opt/conda/bin/python -c \"import sam2; print('Beam SAM2 dependency OK')\"; "
-                "else echo '[runtime] SAM2 requirement not present; skipping'; fi",
+                "# Beam-only: install general custom-node requirements separately from Impact Pack/SAM2.",
+                "RUN find /app/ComfyUI/custom_nodes -type f -name requirements.txt "
+                "! -path '*/comfyui-impact-pack/*' -print | sort | "
+                "while IFS= read -r req; do echo '[runtime] Installing' \"$req\"; "
+                "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([< >=!~ ;]|\$)/Id\" \"$req\"; "
+                "/opt/conda/bin/python -m pip install --constraint /tmp/runtime-constraints.txt -r \"$req\" || exit 1; done",
+                "RUN impact_req='/app/ComfyUI/custom_nodes/comfyui-impact-pack/requirements.txt'; "
+                "if [ -f \"$impact_req\" ]; then echo '[runtime] Installing Impact Pack requirements without SAM2'; "
+                "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([< >=!~ ;]|\$)/Id\" \"$impact_req\"; "
+                "grep -v 'github.com/facebookresearch/sam2' \"$impact_req\" > /tmp/impact-pack-no-sam2.txt; "
+                "if [ -s /tmp/impact-pack-no-sam2.txt ]; then /opt/conda/bin/python -m pip install --constraint /tmp/runtime-constraints.txt -r /tmp/impact-pack-no-sam2.txt; fi; fi",
+                "RUN impact_req='/app/ComfyUI/custom_nodes/comfyui-impact-pack/requirements.txt'; "
+                "if [ -f \"$impact_req\" ] && grep -q 'github.com/facebookresearch/sam2' \"$impact_req\"; then "
+                "SAM2_BUILD_CUDA=0 /opt/conda/bin/python -m pip install --no-build-isolation --constraint /tmp/runtime-constraints.txt "
+                "'git+https://github.com/facebookresearch/sam2'; fi",
+                "RUN /opt/conda/bin/python - <<'PY'\n"
+                "from pathlib import Path\n"
+                "impact = Path('/app/ComfyUI/custom_nodes/comfyui-impact-pack/requirements.txt')\n"
+                "if impact.is_file() and 'github.com/facebookresearch/sam2' in impact.read_text(errors='ignore'):\n"
+                "    import sam2\n"
+                "    print('Beam SAM2 dependency OK')\n"
+                "else:\n"
+                "    print('Beam SAM2 dependency not required')\n"
+                "PY",
             ])
             docker_text, custom_install_count = custom_install_pattern.subn(
                 split_custom_install, docker_text, count=1
@@ -999,7 +997,6 @@ class RuntimeBuildExecutionService:
             if returncode != 0:
                 raise ValueError("Beam deploy falló: " + (output[-4000:] or "error desconocido"))
 
-            import re
             urls = re.findall(r"https://[^\s'\"]+", output)
             endpoint = next(
                 (url.rstrip(".,?;:") for url in urls if "beam.cloud" in url),
