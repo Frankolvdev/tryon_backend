@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import atexit
 import json
+import mimetypes
 import os
+import shlex
+import signal
+import subprocess
 import sys
 import tempfile
+import time
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
@@ -33,6 +40,18 @@ if not DOCKERFILE:
 # docker tag, or docker push is involved in this provider-specific path.
 image = Image().from_dockerfile(DOCKERFILE, CONTEXT_DIR)
 volumes = [Volume(name=VOLUME_NAME, mount_path=VOLUME_PATH)] if VOLUME_NAME else []
+
+
+COMFYUI_ROOT = Path("/app/ComfyUI")
+COMFYUI_MAIN = COMFYUI_ROOT / "main.py"
+COMFYUI_PORT = int(os.environ.get("TRYON_BEAM_COMFYUI_PORT", "8188"))
+COMFYUI_URL = f"http://127.0.0.1:{COMFYUI_PORT}"
+COMFY_USER_ROOT = Path(os.environ.get("TRYON_BEAM_COMFY_USER_ROOT", "/workflows"))
+COMFY_DATABASE_URL = os.environ.get(
+    "TRYON_BEAM_COMFY_DATABASE_URL",
+    f"sqlite:///{COMFY_USER_ROOT / 'comfyui.db'}",
+).strip()
+_COMFYUI_PROCESS: subprocess.Popen[Any] | None = None
 
 
 def _write_extra_model_paths() -> None:
@@ -111,6 +130,117 @@ def _prepare_beam_runtime() -> None:
     _ensure_sam3_volume_link()
 
 
+def _terminate_comfyui() -> None:
+    global _COMFYUI_PROCESS
+    process = _COMFYUI_PROCESS
+    _COMFYUI_PROCESS = None
+    if process is None or process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=15)
+    except Exception:
+        try:
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
+def _interrupt_comfyui() -> None:
+    try:
+        request = urllib.request.Request(f"{COMFYUI_URL}/interrupt", data=b"{}", method="POST")
+        request.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+    except Exception:
+        pass
+
+
+def _wait_for_comfyui(process: subprocess.Popen[Any], timeout_seconds: int = 300) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"ComfyUI terminó durante el arranque con código {process.returncode}.")
+        try:
+            with urllib.request.urlopen(f"{COMFYUI_URL}/system_stats", timeout=5) as response:
+                if 200 <= response.status < 300:
+                    print(f"[beam-runtime] ComfyUI listo en {COMFYUI_URL}.", flush=True)
+                    return
+        except Exception as error:
+            last_error = error
+        time.sleep(1)
+    _terminate_comfyui()
+    raise TimeoutError(f"ComfyUI no quedó disponible en {COMFYUI_URL}: {last_error}")
+
+
+def _start_comfyui() -> subprocess.Popen[Any]:
+    global _COMFYUI_PROCESS
+    if _COMFYUI_PROCESS is not None and _COMFYUI_PROCESS.poll() is None:
+        return _COMFYUI_PROCESS
+    if not COMFYUI_MAIN.is_file():
+        raise RuntimeError(f"No se encontró ComfyUI en {COMFYUI_MAIN}.")
+    COMFY_USER_ROOT.mkdir(parents=True, exist_ok=True)
+    (COMFY_USER_ROOT / "default" / "workflows").mkdir(parents=True, exist_ok=True)
+    env_vars = os.environ.copy()
+    env_vars.update({
+        "RUNTIME_PROVIDER": "beam",
+        "COMFYUI_PORT": str(COMFYUI_PORT),
+        "MODELS_ROOT": VOLUME_PATH,
+        "COMFY_USER_ROOT": str(COMFY_USER_ROOT),
+        "COMFY_DATABASE_URL": COMFY_DATABASE_URL,
+        "COMFYUI_URL": COMFYUI_URL,
+    })
+    extra_args = shlex.split(env_vars.get("COMFYUI_EXTRA_ARGS", ""))
+    command = [
+        sys.executable, str(COMFYUI_MAIN),
+        "--listen", "127.0.0.1",
+        "--port", str(COMFYUI_PORT),
+        "--user-directory", str(COMFY_USER_ROOT),
+        "--database-url", COMFY_DATABASE_URL,
+        *extra_args,
+    ]
+    print(f"[beam-runtime] Iniciando ComfyUI: {shlex.join(command)}", flush=True)
+    _COMFYUI_PROCESS = subprocess.Popen(
+        command, cwd=str(COMFYUI_ROOT), env=env_vars,
+        start_new_session=(os.name != "nt"),
+    )
+    _wait_for_comfyui(_COMFYUI_PROCESS)
+    return _COMFYUI_PROCESS
+
+
+def _publish_generation_files(value: Any) -> Any:
+    if isinstance(value, dict):
+        if value.get("__generation_file__") and value.get("local_path"):
+            source = Path(str(value["local_path"]))
+            if not source.is_file():
+                raise RuntimeError(f"El resultado generado no existe: {source}")
+            artifact_name = f"tryon-beam-file-{uuid.uuid4().hex}{source.suffix or '.bin'}"
+            published_path = Path(tempfile.gettempdir()) / artifact_name
+            published_path.write_bytes(source.read_bytes())
+            Output(path=str(published_path)).save()
+            enriched = dict(value)
+            enriched.pop("local_path", None)
+            enriched["beam_output_name"] = artifact_name
+            enriched["filename"] = enriched.get("filename") or source.name
+            enriched["content_type"] = enriched.get("content_type") or mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+            enriched["size_bytes"] = source.stat().st_size
+            return enriched
+        return {key: _publish_generation_files(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_publish_generation_files(item) for item in value]
+    return value
+
+
+atexit.register(_terminate_comfyui)
+
+
 def _generation_runtime_class():
     # The generated Dockerfile contains this runtime under /app/runtime. Delay the
     # import until Beam executes remotely so the local deployment CLI only needs
@@ -123,8 +253,9 @@ def _generation_runtime_class():
 
 def start_runtime() -> dict[str, Any]:
     _prepare_beam_runtime()
+    _start_comfyui()
     generation_runtime = _generation_runtime_class()
-    return {"runtime": generation_runtime()}
+    return {"runtime": generation_runtime(comfy_url=COMFYUI_URL)}
 
 
 @task_queue(
@@ -167,11 +298,19 @@ def handler(
     # with Beam's reserved ``context`` argument. Keep legacy kwargs support for
     # already queued tasks that do not contain a business field named context.
     payload = tryon_payload if isinstance(tryon_payload, dict) else legacy_payload
-    result = runtime.execute(payload)
+    try:
+        result = runtime.execute(payload)
+    except BaseException:
+        _interrupt_comfyui()
+        raise
     if not isinstance(result, dict):
         raise RuntimeError(
             f"Beam Generation Runtime returned {type(result).__name__}; expected a JSON object."
         )
+    if str(result.get("status") or "").lower() == "failed":
+        _interrupt_comfyui()
+        raise RuntimeError(str(result.get("error") or "Beam Generation Runtime failed."))
+    result = _publish_generation_files(result)
 
     # Beam Task Queues expose persisted Output files through the task-status API;
     # a normal Python return value is not included in the ``outputs`` array.

@@ -48,6 +48,11 @@ class BeamServerlessAdapterService:
     ) -> Any:
         outputs = task.get("outputs")
         if isinstance(outputs, list):
+            artifacts_by_name = {
+                str(item.get("name") or ""): item
+                for item in outputs
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            }
             json_artifacts = [
                 item
                 for item in outputs
@@ -58,15 +63,9 @@ class BeamServerlessAdapterService:
             if json_artifacts:
                 artifact = json_artifacts[-1]
                 active_session = session or self._session()
-                response = active_session.get(
-                    str(artifact["url"]),
-                    headers={"Authorization": f"Bearer {beam_credentials_service.normalize_token(api_key)}"},
-                    timeout=60,
+                response = self._download_output_response(
+                    active_session, str(artifact["url"]), api_key=api_key, timeout=60
                 )
-                if response.status_code in {401, 403}:
-                    # Beam output URLs can be pre-signed and reject an Authorization header.
-                    response = active_session.get(str(artifact["url"]), timeout=60)
-                response.raise_for_status()
                 try:
                     payload = response.json()
                 except ValueError as error:
@@ -77,7 +76,9 @@ class BeamServerlessAdapterService:
                     raise AppException(
                         f"Beam result artifact {artifact.get('name')} did not contain a JSON object."
                     )
-                return payload
+                return self._materialize_output_artifacts(
+                    payload, artifacts_by_name=artifacts_by_name, api_key=api_key, session=active_session
+                )
             if len(outputs) == 1 and isinstance(outputs[0], dict):
                 direct = outputs[0]
                 if "runtime_contract" in direct or "status" in direct:
@@ -88,6 +89,67 @@ class BeamServerlessAdapterService:
         if direct_output is not None:
             return direct_output
         return {}
+
+
+    @staticmethod
+    def _download_output_response(
+        session: requests.Session,
+        url: str,
+        *,
+        api_key: str,
+        timeout: int,
+    ) -> requests.Response:
+        response = session.get(
+            url,
+            headers={"Authorization": f"Bearer {beam_credentials_service.normalize_token(api_key)}"},
+            timeout=timeout,
+        )
+        if response.status_code in {401, 403}:
+            response = session.get(url, timeout=timeout)
+        response.raise_for_status()
+        return response
+
+    def _materialize_output_artifacts(
+        self,
+        value: Any,
+        *,
+        artifacts_by_name: dict[str, dict[str, Any]],
+        api_key: str,
+        session: requests.Session,
+    ) -> Any:
+        if isinstance(value, dict):
+            artifact_name = str(value.get("beam_output_name") or "").strip()
+            if value.get("__generation_file__") and artifact_name:
+                artifact = artifacts_by_name.get(artifact_name)
+                if not artifact or not str(artifact.get("url") or "").strip():
+                    raise AppException(f"Beam output artifact '{artifact_name}' was not returned by the task API.")
+                response = self._download_output_response(
+                    session, str(artifact["url"]), api_key=api_key, timeout=300
+                )
+                import tempfile
+                from pathlib import Path
+                suffix = Path(str(value.get("filename") or artifact_name)).suffix or ".bin"
+                destination = Path(tempfile.mkdtemp(prefix="tryon-beam-result-")) / f"result{suffix}"
+                destination.write_bytes(response.content)
+                enriched = dict(value)
+                enriched.pop("beam_output_name", None)
+                enriched["local_path"] = str(destination)
+                enriched["size_bytes"] = destination.stat().st_size
+                return enriched
+            return {
+                key: self._materialize_output_artifacts(
+                    item, artifacts_by_name=artifacts_by_name, api_key=api_key, session=session
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                self._materialize_output_artifacts(
+                    item, artifacts_by_name=artifacts_by_name, api_key=api_key, session=session
+                )
+                for item in value
+            ]
+        return value
 
     def _new_session(self) -> requests.Session:
         session = requests.Session()
