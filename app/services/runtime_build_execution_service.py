@@ -788,7 +788,7 @@ class RuntimeBuildExecutionService:
                 "RUN if [ -s /tmp/comfy-requirements-4.txt ]; then "
                 "/opt/conda/bin/python -m pip install --constraint "
                 "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-4.txt; fi",
-                "RUN /opt/conda/bin/python -m pip check",
+                "RUN /opt/conda/bin/python - <<'PY'\nimport re\nimport subprocess\nimport sys\n\nresult = subprocess.run(\n    [sys.executable, '-m', 'pip', 'check'],\n    text=True,\n    stdout=subprocess.PIPE,\n    stderr=subprocess.STDOUT,\n)\noutput = result.stdout or ''\nif output:\n    print(output, end='' if output.endswith('\\n') else '\\n')\n\nunexpected = [\n    line.strip()\n    for line in output.splitlines()\n    if line.strip()\n    and line.strip() != 'No broken requirements found.'\n    and not re.fullmatch(\n        r'decord(?:\\s+[^ ]+)? is not supported on this platform',\n        line.strip(),\n        flags=re.IGNORECASE,\n    )\n]\nif result.returncode and unexpected:\n    print('[beam-build] pip check detected unsupported conflicts:', file=sys.stderr)\n    for line in unexpected:\n        print(f'  - {line}', file=sys.stderr)\n    raise SystemExit(result.returncode)\nif result.returncode:\n    print('[beam-build] Ignoring known decord platform metadata warning only.')\nelse:\n    print('[beam-build] pip check OK')\nPY",
             ])
             if monolithic_comfy_install not in docker_text:
                 raise ValueError(
@@ -861,7 +861,7 @@ class RuntimeBuildExecutionService:
                 "RUN /opt/conda/bin/python -c \"import importlib; "
                 "importlib.import_module('betterproto.grpcstub.grpcio_client'); "
                 "print('Beam betterproto grpcstub OK')\"\n"
-                "RUN /opt/conda/bin/python -m pip check\n"
+                "RUN /opt/conda/bin/python - <<'PY'\nimport re\nimport subprocess\nimport sys\n\nresult = subprocess.run(\n    [sys.executable, '-m', 'pip', 'check'],\n    text=True,\n    stdout=subprocess.PIPE,\n    stderr=subprocess.STDOUT,\n)\noutput = result.stdout or ''\nif output:\n    print(output, end='' if output.endswith('\\n') else '\\n')\n\nunexpected = [\n    line.strip()\n    for line in output.splitlines()\n    if line.strip()\n    and line.strip() != 'No broken requirements found.'\n    and not re.fullmatch(\n        r'decord(?:\\s+[^ ]+)? is not supported on this platform',\n        line.strip(),\n        flags=re.IGNORECASE,\n    )\n]\nif result.returncode and unexpected:\n    print('[beam-build] pip check detected unsupported conflicts:', file=sys.stderr)\n    for line in unexpected:\n        print(f'  - {line}', file=sys.stderr)\n    raise SystemExit(result.returncode)\nif result.returncode:\n    print('[beam-build] Ignoring known decord platform metadata warning only.')\nelse:\n    print('[beam-build] pip check OK')\nPY\\n"
             )
             dockerfile.write_text(docker_text, encoding="utf-8")
 
