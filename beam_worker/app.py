@@ -144,7 +144,11 @@ def start_runtime() -> dict[str, Any]:
     on_start=start_runtime,
     checkpoint_enabled=_env_bool("TRYON_BEAM_CHECKPOINT", False),
 )
-def handler(context: Any, **payload: Any) -> dict[str, Any]:
+def handler(
+    context: Any,
+    tryon_payload: dict[str, Any] | None = None,
+    **legacy_payload: Any,
+) -> dict[str, Any]:
     runtime = None
     if isinstance(context, dict):
         runtime = context.get("runtime")
@@ -155,4 +159,9 @@ def handler(context: Any, **payload: Any) -> dict[str, Any]:
     if runtime is None:
         generation_runtime = _generation_runtime_class()
         runtime = generation_runtime()
+
+    # New Beam submissions arrive inside ``tryon_payload`` to avoid colliding
+    # with Beam's reserved ``context`` argument. Keep legacy kwargs support for
+    # already queued tasks that do not contain a business field named context.
+    payload = tryon_payload if isinstance(tryon_payload, dict) else legacy_payload
     return runtime.execute(payload)

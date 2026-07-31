@@ -95,10 +95,18 @@ class BeamServerlessAdapterService:
         if not cfg.enabled or not cfg.api_key or not target:
             raise AppException("Beam is selected, but its API key or endpoint is not configured.")
         # Deliberately no automatic retry: replaying submission could duplicate a paid job.
+        # Beam reserves the keyword ``context`` for its internal runner context.
+        # Keep the complete TryOn payload under a neutral envelope so business
+        # fields named ``context`` cannot collide with FunctionHandler.__call__.
+        request_payload = (
+            input_data
+            if set(input_data.keys()) == {"tryon_payload"}
+            else {"tryon_payload": input_data}
+        )
         response = self._session().post(
             target,
             headers=self._headers(cfg.api_key),
-            json=jsonable_encoder(input_data),
+            json=jsonable_encoder(request_payload),
             timeout=min(cfg.timeout_seconds, 120),
         )
         response.raise_for_status()
