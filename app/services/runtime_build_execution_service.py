@@ -857,11 +857,15 @@ class RuntimeBuildExecutionService:
                 "RUN /opt/conda/bin/python -m pip uninstall -y "
                 "betterproto betterproto-beta9 || true\n"
                 "RUN /opt/conda/bin/python -m pip install --no-cache-dir "
-                "--force-reinstall 'betterproto-beta9==2.0.1' 'cloudpickle>=2.2,<4'\n"
+                "--upgrade --force-reinstall 'beam-client>=0.2.202,<0.3' "
+                "'betterproto-beta9==2.0.1' 'cloudpickle>=2.2,<4' "
+                "'watchdog>=3,<7'\n"
                 "RUN /opt/conda/bin/python -c \"import importlib; "
                 "[importlib.import_module(name) for name in ("
-                "'betterproto.grpcstub.grpcio_client','cloudpickle')]; "
-                "print('Beam Beta9 runner dependencies OK')\"\n"
+                "'beam','beta9.runner.taskqueue','beta9.runner.common',"
+                "'beta9.sync','betterproto.grpcstub.grpcio_client',"
+                "'cloudpickle','watchdog.events')]; "
+                "print('Beam complete runner dependency seal OK')\"\n"
                 'RUN /opt/conda/bin/python -c "import base64; exec(base64.b64decode(\'aW1wb3J0IHJlCmltcG9ydCBzdWJwcm9jZXNzCmltcG9ydCBzeXMKcmVzdWx0ID0gc3VicHJvY2Vzcy5ydW4oW3N5cy5leGVjdXRhYmxlLCAnLW0nLCAncGlwJywgJ2NoZWNrJ10sIHRleHQ9VHJ1ZSwgc3Rkb3V0PXN1YnByb2Nlc3MuUElQRSwgc3RkZXJyPXN1YnByb2Nlc3MuU1RET1VUKQpvdXRwdXQgPSByZXN1bHQuc3Rkb3V0IG9yICcnCmlmIG91dHB1dDoKICAgIHByaW50KG91dHB1dCwgZW5kPScnIGlmIG91dHB1dC5lbmRzd2l0aCgnXG4nKSBlbHNlICdcbicpCnVuZXhwZWN0ZWQgPSBbbGluZS5zdHJpcCgpIGZvciBsaW5lIGluIG91dHB1dC5zcGxpdGxpbmVzKCkgaWYgbGluZS5zdHJpcCgpIGFuZCBsaW5lLnN0cmlwKCkgIT0gJ05vIGJyb2tlbiByZXF1aXJlbWVudHMgZm91bmQuJyBhbmQgbm90IHJlLmZ1bGxtYXRjaChyJ2RlY29yZCg/OlxzK1teIF0rKT8gaXMgbm90IHN1cHBvcnRlZCBvbiB0aGlzIHBsYXRmb3JtJywgbGluZS5zdHJpcCgpLCBmbGFncz1yZS5JR05PUkVDQVNFKV0KaWYgcmVzdWx0LnJldHVybmNvZGUgYW5kIHVuZXhwZWN0ZWQ6CiAgICBwcmludCgnW2JlYW0tYnVpbGRdIHBpcCBjaGVjayBkZXRlY3RlZCB1bnN1cHBvcnRlZCBjb25mbGljdHM6JywgZmlsZT1zeXMuc3RkZXJyKQogICAgZm9yIGxpbmUgaW4gdW5leHBlY3RlZDoKICAgICAgICBwcmludChmJyAgLSB7bGluZX0nLCBmaWxlPXN5cy5zdGRlcnIpCiAgICByYWlzZSBTeXN0ZW1FeGl0KHJlc3VsdC5yZXR1cm5jb2RlKQppZiByZXN1bHQucmV0dXJuY29kZToKICAgIHByaW50KCdbYmVhbS1idWlsZF0gSWdub3Jpbmcga25vd24gZGVjb3JkIHBsYXRmb3JtIG1ldGFkYXRhIHdhcm5pbmcgb25seS4nKQplbHNlOgogICAgcHJpbnQoJ1tiZWFtLWJ1aWxkXSBwaXAgY2hlY2sgT0snKQo=\'))"'
             )
             dockerfile.write_text(docker_text, encoding="utf-8")
