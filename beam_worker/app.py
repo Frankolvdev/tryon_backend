@@ -89,6 +89,36 @@ def _write_extra_model_paths() -> None:
     print(f"[beam-runtime] Rutas de modelos registradas: {target} -> {VOLUME_PATH}", flush=True)
 
 
+def _ensure_linux_machine_id() -> None:
+    """Provide the stable Linux machine-id expected by ComfyUI Execute Python."""
+    primary = Path("/etc/machine-id")
+    dbus = Path("/var/lib/dbus/machine-id")
+
+    machine_id = ""
+    for candidate_path in (primary, dbus):
+        if not candidate_path.is_file():
+            continue
+        try:
+            candidate = candidate_path.read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            continue
+        if len(candidate) == 32 and all(char in "0123456789abcdef" for char in candidate):
+            machine_id = candidate
+            break
+
+    if not machine_id:
+        machine_id = uuid.uuid4().hex
+
+    for target in (primary, dbus):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(machine_id + "\n", encoding="utf-8")
+
+    print(
+        f"[beam-runtime] Linux machine-id preparado para Execute Python: {machine_id[:8]}…",
+        flush=True,
+    )
+
+
 def _ensure_sam3_volume_link() -> None:
     """Expose the complete SAM3 tree where TBG-SAM3 scans it directly."""
     source = Path(VOLUME_PATH) / "sam3"
@@ -126,6 +156,7 @@ def _ensure_sam3_volume_link() -> None:
 
 def _prepare_beam_runtime() -> None:
     os.environ["MODELS_ROOT"] = VOLUME_PATH
+    _ensure_linux_machine_id()
     _write_extra_model_paths()
     _ensure_sam3_volume_link()
 
@@ -248,6 +279,11 @@ def _generation_runtime_class():
     sys.path.insert(0, "/app/runtime/runpod_worker")
     from generation_runtime import GenerationRuntime
 
+    resolver = getattr(GenerationRuntime, "_resolve_dynamic_node_types", None)
+    if not callable(resolver):
+        raise RuntimeError(
+            "Beam GenerationRuntime no contiene el remapeador dinámico de Execute Python."
+        )
     return GenerationRuntime
 
 
