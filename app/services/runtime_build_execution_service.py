@@ -814,32 +814,74 @@ class RuntimeBuildExecutionService:
                 r"-print \| sort \| while IFS= read -r req; do .*?; done$",
                 re.MULTILINE,
             )
-            split_custom_install = "\n".join([
-                "# Beam-only: install general custom-node dependencies inside the image.",
-                "RUN find /app/ComfyUI/custom_nodes -type f -name requirements.txt "
-                "! -path '*/comfyui-impact-pack/*' -print | sort | "
-                "while IFS= read -r req; do echo '[runtime] Installing' \"$req\"; "
-                "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
-                "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" \"$req\"; "
-                "/opt/conda/bin/python -m pip install --constraint "
-                "/tmp/runtime-constraints.txt -r \"$req\" || exit 1; done",
-                "# Beam-only: install Impact Pack without SAM2 in its own cached layer.",
-                "RUN req=/app/ComfyUI/custom_nodes/comfyui-impact-pack/requirements.txt; "
-                "if [ -f \"$req\" ]; then echo '[runtime] Installing Impact Pack'; "
-                "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
-                "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" \"$req\"; "
-                "grep -v 'github.com/facebookresearch/sam2' \"$req\" > "
-                "/tmp/impact-pack-no-sam2.txt; if [ -s /tmp/impact-pack-no-sam2.txt ]; "
-                "then /opt/conda/bin/python -m pip install --constraint "
-                "/tmp/runtime-constraints.txt -r /tmp/impact-pack-no-sam2.txt; fi; fi",
-                "# Beam-only: install SAM2 without its optional CUDA extension.",
-                "RUN req=/app/ComfyUI/custom_nodes/comfyui-impact-pack/requirements.txt; "
-                "if [ -f \"$req\" ] && grep -q 'github.com/facebookresearch/sam2' \"$req\"; "
-                "then sam2_req=$(grep 'github.com/facebookresearch/sam2' \"$req\" | head -n 1); "
-                "SAM2_BUILD_CUDA=0 /opt/conda/bin/python -m pip install "
-                "--no-build-isolation --constraint /tmp/runtime-constraints.txt \"$sam2_req\"; "
-                "/opt/conda/bin/python -c \"import sam2; print('Beam SAM2 dependency OK')\"; fi",
-            ])
+            # Build one Docker RUN per custom-node requirements file from the
+            # already-created Beam-only temporary context. This is intentionally
+            # generated here (after copytree), so each node becomes an independent
+            # cacheable layer instead of one 20+ minute shell loop.
+            custom_nodes_root = context / "custom_nodes"
+            requirement_files = []
+            if custom_nodes_root.is_dir():
+                requirement_files = sorted(
+                    path for path in custom_nodes_root.rglob("requirements.txt")
+                    if path.is_file()
+                )
+
+            general_requirements = []
+            impact_requirements = None
+            for requirement_path in requirement_files:
+                relative = requirement_path.relative_to(context).as_posix()
+                if relative.lower() == "custom_nodes/comfyui-impact-pack/requirements.txt":
+                    impact_requirements = relative
+                else:
+                    general_requirements.append(relative)
+
+            custom_install_lines = [
+                "# Beam-only: one cacheable dependency layer per custom node.",
+            ]
+            for relative in general_requirements:
+                image_path = "/app/ComfyUI/" + relative
+                custom_install_lines.append(
+                    "RUN req='" + image_path + "'; "
+                    "echo '[runtime] Installing' \"$req\"; "
+                    "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
+                    "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" \"$req\"; "
+                    "/opt/conda/bin/python -m pip install --constraint "
+                    "/tmp/runtime-constraints.txt -r \"$req\""
+                )
+
+            if impact_requirements:
+                impact_image_path = "/app/ComfyUI/" + impact_requirements
+                custom_install_lines.extend([
+                    "# Beam-only: install Impact Pack without SAM2 separately.",
+                    "RUN req='" + impact_image_path + "'; "
+                    "echo '[runtime] Installing Impact Pack'; "
+                    "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
+                    "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" \"$req\"; "
+                    "grep -v 'github.com/facebookresearch/sam2' \"$req\" > "
+                    "/tmp/impact-pack-no-sam2.txt; "
+                    "if [ -s /tmp/impact-pack-no-sam2.txt ]; then "
+                    "/opt/conda/bin/python -m pip install --constraint "
+                    "/tmp/runtime-constraints.txt -r /tmp/impact-pack-no-sam2.txt; fi",
+                    "# Beam-only: install SAM2 without its optional CUDA extension.",
+                    "RUN req='" + impact_image_path + "'; "
+                    "if grep -q 'github.com/facebookresearch/sam2' \"$req\"; then "
+                    "sam2_req=$(grep 'github.com/facebookresearch/sam2' \"$req\" | head -n 1); "
+                    "SAM2_BUILD_CUDA=0 /opt/conda/bin/python -m pip install "
+                    "--no-build-isolation --constraint /tmp/runtime-constraints.txt "
+                    "\"$sam2_req\"; "
+                    "/opt/conda/bin/python -c \"import sam2; "
+                    "print('Beam SAM2 dependency OK')\"; fi",
+                ])
+
+            # If the export has no custom-node requirements, remove the original
+            # monolithic installer rather than failing deployment. The runtime may
+            # legitimately contain nodes without Python dependencies.
+            if not requirement_files:
+                custom_install_lines.append(
+                    "RUN echo '[runtime] No custom-node requirements detected.'"
+                )
+
+            split_custom_install = "\n".join(custom_install_lines)
             docker_text, custom_install_count = custom_install_pattern.subn(
                 split_custom_install, docker_text, count=1
             )
