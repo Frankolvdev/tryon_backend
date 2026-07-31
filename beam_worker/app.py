@@ -42,6 +42,69 @@ image = Image().from_dockerfile(DOCKERFILE, CONTEXT_DIR)
 volumes = [Volume(name=VOLUME_NAME, mount_path=VOLUME_PATH)] if VOLUME_NAME else []
 
 
+_EXPECTED_MODEL_DIRS = (
+    "checkpoints",
+    "clip_vision",
+    "configs",
+    "controlnet",
+    "diffusion_models",
+    "embeddings",
+    "gligen",
+    "hypernetworks",
+    "loras",
+    "photomaker",
+    "sam3",
+    "style_models",
+    "text_encoders",
+    "unet",
+    "upscale_models",
+    "vae",
+    "vae_approx",
+)
+
+
+def _validate_direct_model_volume() -> None:
+    """Validate the configured Beam Volume without inventing nested model roots."""
+    root = Path(VOLUME_PATH)
+    if not VOLUME_NAME:
+        raise RuntimeError("Beam volume_name is empty in provider configuration.")
+    if not root.is_dir():
+        raise RuntimeError(
+            f"Beam did not mount configured volume {VOLUME_NAME!r} at {VOLUME_PATH!r}."
+        )
+
+    try:
+        entries = sorted(item.name for item in root.iterdir())
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not inspect Beam volume {VOLUME_NAME!r} at {VOLUME_PATH!r}: {exc}"
+        ) from exc
+
+    present = [name for name in _EXPECTED_MODEL_DIRS if (root / name).is_dir()]
+    print(
+        f"[beam-runtime] Volumen configurado: {VOLUME_NAME} -> {VOLUME_PATH}",
+        flush=True,
+    )
+    print(
+        "[beam-runtime] Contenido raíz del volumen: "
+        + (", ".join(entries[:80]) if entries else "<vacío>"),
+        flush=True,
+    )
+    if not present:
+        raise RuntimeError(
+            f"El volumen Beam configurado {VOLUME_NAME!r} está montado en "
+            f"{VOLUME_PATH!r}, pero no contiene carpetas de modelos en su raíz. "
+            "Se esperaba, por ejemplo, vae/, text_encoders/, unet/ o sam3/. "
+            f"Contenido encontrado: {entries[:80]!r}"
+        )
+
+    print(
+        "[beam-runtime] Carpetas de modelos detectadas directamente: "
+        + ", ".join(present),
+        flush=True,
+    )
+
+
 COMFYUI_ROOT = Path("/app/ComfyUI")
 COMFYUI_MAIN = COMFYUI_ROOT / "main.py"
 COMFYUI_PORT = int(os.environ.get("TRYON_BEAM_COMFYUI_PORT", "8188"))
@@ -148,14 +211,18 @@ def _ensure_sam3_volume_link() -> None:
     target.symlink_to(source, target_is_directory=True)
     if not target.is_dir():
         raise RuntimeError(f"No se pudo crear el enlace SAM3: {target} -> {source}")
-    print(f"[beam-runtime] SAM3 enlazado: {target} -> {source}", flush=True)
+    print(f"[beam-runtime] SAM3 enlazado desde el Volume: {target} -> {source}", flush=True)
     checkpoint = source / "sam3.pt"
     if not checkpoint.is_file():
         print(f"[beam-runtime] Advertencia: no se encontró {checkpoint}.", flush=True)
 
 
 def _prepare_beam_runtime() -> None:
+    # The configured Beam Volume is mounted directly at VOLUME_PATH. Its root
+    # contains vae/, text_encoders/, unet/, sam3/, etc.; no nested models/
+    # directory is invented or auto-detected.
     os.environ["MODELS_ROOT"] = VOLUME_PATH
+    _validate_direct_model_volume()
     _ensure_linux_machine_id()
     _write_extra_model_paths()
     _ensure_sam3_volume_link()
