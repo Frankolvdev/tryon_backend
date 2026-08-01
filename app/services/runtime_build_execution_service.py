@@ -193,45 +193,6 @@ class RuntimeBuildExecutionService:
             p=subprocess.run(['docker','push',build.image_tag],capture_output=True,text=True)
             RuntimeBuildExecutionService._append(db,build,p.stdout+p.stderr)
             if p.returncode: raise RuntimeError('docker push terminó con error. Inicia sesión en el registro en el host constructor.')
-
-            # Publish an immutable Beam-only alias based on the actual runtime
-            # content. Modal and RunPod continue using build.image_tag unchanged.
-            context = Path(build.context_path or '').expanduser().resolve()
-            if context.is_dir():
-                fingerprint = RuntimeBuildExecutionService._beam_runtime_fingerprint(context)
-                beam_image_tag = RuntimeBuildExecutionService._beam_immutable_image_tag(
-                    build, fingerprint
-                )
-                tag_result = subprocess.run(
-                    ['docker', 'tag', build.image_tag, beam_image_tag],
-                    capture_output=True, text=True
-                )
-                if tag_result.returncode != 0:
-                    raise RuntimeError(
-                        'No fue posible crear la etiqueta inmutable de Beam: ' +
-                        (tag_result.stderr or tag_result.stdout or 'error desconocido')
-                    )
-                beam_push = subprocess.run(
-                    ['docker', 'push', beam_image_tag],
-                    capture_output=True, text=True
-                )
-                RuntimeBuildExecutionService._append(
-                    db, build, beam_push.stdout + beam_push.stderr
-                )
-                if beam_push.returncode != 0:
-                    raise RuntimeError(
-                        'No fue posible publicar la etiqueta inmutable de Beam. '
-                        'La imagen principal sí fue publicada, pero Beam necesita '
-                        'su alias por huella para redeploys rápidos.'
-                    )
-                manifest = dict(build.manifest or {})
-                manifest['beam_runtime_image'] = {
-                    'tag': beam_image_tag,
-                    'fingerprint': fingerprint,
-                    'published_at': utc_now().isoformat(),
-                }
-                build.manifest = manifest
-
             build.published=True; build.status='published'; build.phase='published'; build.progress=100; db.add(build); db.commit()
         except Exception as exc:
             build=db.get(RuntimeBuilderBuild,build_id)
@@ -627,73 +588,77 @@ class RuntimeBuildExecutionService:
 
     @staticmethod
     def _beam_runtime_fingerprint(source_context):
-        """Return a stable content hash for the Beam runtime image.
+        """Return a content fingerprint for the Beam runtime only.
 
-        Provider configuration is intentionally excluded. Modal and RunPod do not
-        call this helper. Model files are stored in provider volumes and are also
-        excluded so changing GPU/idle/checkpoint never invalidates the image.
+        Provider configuration (GPU, keep-warm, workers, checkpoint, etc.) is
+        deliberately excluded. Modal and RunPod do not call this helper.
         """
         import hashlib
 
-        root = Path(source_context).expanduser().resolve()
+        source_context = Path(source_context).resolve()
         digest = hashlib.sha256()
         excluded_dirs = {
-            ".git", ".github", "__pycache__", ".pytest_cache", ".mypy_cache",
-            ".ruff_cache", "tests", "test", "docs", "examples", "example",
-            "demo", "demos", "models", "outputs", "output", "input",
+            ".git", ".github", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+            "__pycache__", "tests", "test", "docs", "examples", "example",
+            "demo", "demos",
         }
-        excluded_suffixes = {".pyc", ".pyo", ".log", ".tmp"}
-        for item in sorted(root.rglob("*"), key=lambda value: value.as_posix().lower()):
+        excluded_suffixes = {".pyc", ".pyo"}
+
+        for candidate in sorted(source_context.rglob("*")):
             try:
-                relative = item.relative_to(root)
+                relative = candidate.relative_to(source_context)
             except ValueError:
                 continue
-            parts = tuple(part.lower() for part in relative.parts)
-            if any(part in excluded_dirs for part in parts):
+            lowered = tuple(part.lower() for part in relative.parts)
+            if any(
+                part in excluded_dirs
+                or (part.startswith("blender-") and "windows-x64" in part)
+                for part in lowered
+            ):
                 continue
-            if any(part.startswith("blender-") and "windows-x64" in part for part in parts):
+            if any(
+                len(lowered) >= 2 and lowered[-2:] == pair
+                for pair in (
+                    ("assets", "videos"), ("assets", "video"),
+                    ("assets", "demos"), ("assets", "demo"),
+                    ("assets", "examples"), ("assets", "example"),
+                )
+            ):
                 continue
-            if not item.is_file() or item.suffix.lower() in excluded_suffixes:
+            if not candidate.is_file() or candidate.suffix.lower() in excluded_suffixes:
                 continue
             digest.update(relative.as_posix().encode("utf-8", errors="surrogatepass"))
             digest.update(b"\0")
-            with item.open("rb") as handle:
-                while True:
-                    chunk = handle.read(1024 * 1024)
-                    if not chunk:
-                        break
+            with candidate.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
             digest.update(b"\0")
         return digest.hexdigest()
 
     @staticmethod
-    def _beam_immutable_image_tag(build, fingerprint):
-        """Create a Beam-only immutable alias without changing Modal/RunPod tags."""
-        image_tag = str(build.image_tag or "").strip()
-        if not image_tag:
-            raise ValueError("El build no tiene una etiqueta de imagen publicada.")
-        registry_and_name = image_tag
-        last_segment = registry_and_name.rsplit("/", 1)[-1]
-        if ":" in last_segment:
-            registry_and_name = registry_and_name.rsplit(":", 1)[0]
-        return f"{registry_and_name}:beam-{fingerprint[:16]}"
-
-    @staticmethod
-    def _prepare_beam_image_reference_context(build, source_context):
-        """Create a truly minimal context that references an already published image."""
+    def _prepare_beam_reference_context(image_ref, fingerprint):
+        """Create a genuinely tiny Beam context based on a published image."""
         import tempfile
 
-        fingerprint = RuntimeBuildExecutionService._beam_runtime_fingerprint(source_context)
-        immutable_tag = RuntimeBuildExecutionService._beam_immutable_image_tag(build, fingerprint)
-        cache_root = Path(tempfile.gettempdir()) / "tryon-beam-image-reference" / fingerprint[:24]
-        cache_root.mkdir(parents=True, exist_ok=True)
-        dockerfile = cache_root / "Dockerfile"
-        dockerfile.write_text(
-            f"FROM {immutable_tag}\n",
-            encoding="utf-8",
+        safe_fingerprint = str(fingerprint)[:24]
+        deploy_root = (
+            Path(tempfile.gettempdir())
+            / "tryon-beam-reference-cache"
+            / safe_fingerprint
         )
-        (cache_root / ".beamignore").write_text("*\n!Dockerfile\n", encoding="utf-8")
-        return cache_root, dockerfile, immutable_tag, fingerprint
+        context = deploy_root / "runtime"
+        context.mkdir(parents=True, exist_ok=True)
+        dockerfile = context / "Dockerfile"
+        desired = f"FROM {image_ref}\n"
+        if not dockerfile.exists() or dockerfile.read_text(encoding="utf-8") != desired:
+            dockerfile.write_text(desired, encoding="utf-8")
+        (context / ".beamignore").write_text(
+            "*\n!Dockerfile\n!.beamignore\n", encoding="utf-8"
+        )
+        (context / ".dockerignore").write_text(
+            "*\n!Dockerfile\n", encoding="utf-8"
+        )
+        return deploy_root, context
 
     @staticmethod
     def _prepare_beam_deploy_context(source_context):
@@ -703,7 +668,6 @@ class RuntimeBuildExecutionService:
         must reuse byte-for-byte the same Docker build context. Modal and RunPod
         never use this helper.
         """
-        import hashlib
         import tempfile
 
         source_context = Path(source_context).resolve()
@@ -716,7 +680,6 @@ class RuntimeBuildExecutionService:
         }
         excluded_suffixes = {".pyc", ".pyo"}
 
-        # Content-based fingerprint: timestamps do not invalidate Beam layers.
         fingerprint = RuntimeBuildExecutionService._beam_runtime_fingerprint(
             source_context
         )[:24]
@@ -857,53 +820,67 @@ class RuntimeBuildExecutionService:
         deploy_root = None
         home = None
         try:
-            fast_image_reference = False
-            excluded = {"directories": 0, "files": 0}
-            reused_context = False
-
             runtime_fingerprint = RuntimeBuildExecutionService._beam_runtime_fingerprint(
                 source_context
             )
-            beam_image_info = dict((build.manifest or {}).get('beam_runtime_image') or {})
-            beam_image_tag = str(beam_image_info.get('tag') or '').strip()
-            beam_image_fingerprint = str(beam_image_info.get('fingerprint') or '').strip()
+            manifest = dict(build.manifest or {})
+            beam_binding = dict(manifest.get("beam_runtime_image") or {})
+            bound_fingerprint = str(beam_binding.get("fingerprint") or "")
+            bound_image_ref = str(beam_binding.get("image_ref") or "").strip()
 
-            if (
-                build.published
-                and beam_image_tag
-                and beam_image_fingerprint == runtime_fingerprint
-                and not beam_image_tag.startswith('ghcr.io/your-org/')
-            ):
-                deploy_root, dockerfile, _, _ = (
-                    RuntimeBuildExecutionService._prepare_beam_image_reference_context(
-                        build, source_context
-                    )
+            if bound_fingerprint and bound_fingerprint != runtime_fingerprint:
+                raise ValueError(
+                    "El runtime exportado cambió desde la imagen Beam publicada. "
+                    "Ejecuta Build y Publicar antes de desplegar; se bloqueó la caída "
+                    "silenciosa al build completo para evitar otra espera de horas."
                 )
-                context = deploy_root
-                fast_image_reference = True
+
+            image_ref = bound_image_ref
+            if not image_ref and bool(build.published) and str(build.image_tag or "").strip():
+                image_ref = str(build.image_tag).strip()
+                manifest["beam_runtime_image"] = {
+                    "fingerprint": runtime_fingerprint,
+                    "image_ref": image_ref,
+                    "bound_at": utc_now().isoformat(),
+                    "source": "published_runtime_build",
+                }
+                build.manifest = manifest
+                db.add(build)
+                db.commit()
+                db.refresh(build)
+
+            fast_reference_deploy = bool(image_ref)
+            if fast_reference_deploy:
+                deploy_root, context = RuntimeBuildExecutionService._prepare_beam_reference_context(
+                    image_ref, runtime_fingerprint
+                )
+                excluded = {"directories": 0, "files": 0}
                 reused_context = True
                 RuntimeBuildExecutionService._update_deployment(
                     db, build, deployment,
-                    phase='preparing-runtime', progress=40,
-                    message='Reutilizando imagen inmutable del runtime Beam.',
+                    phase="preparing-runtime", progress=40,
+                    message="Reutilizando imagen publicada del runtime Beam.",
                     log=(
-                        '[beam] Deploy rápido desde imagen inmutable: ' +
-                        beam_image_tag + '. No se sincronizarán custom_nodes.'
+                        f"[beam] Deploy rápido desde imagen publicada: {image_ref}\n"
+                        "[beam] Huella del runtime verificada; no se sincronizarán "
+                        "custom_nodes ni se reconstruirá ComfyUI."
                     ),
                     beam_runtime_fingerprint=runtime_fingerprint,
-                    beam_runtime_image=beam_image_tag,
+                    beam_runtime_image_ref=image_ref,
                 )
             else:
                 deploy_root, context, excluded, reused_context = RuntimeBuildExecutionService._prepare_beam_deploy_context(
                     source_context
                 )
-                dockerfile = context / 'Dockerfile'
-
-            # Keep the Beam handler outside the Docker build context.
-            app_file = deploy_root / 'tryon_beam_app.py'
+            dockerfile = context / "Dockerfile"
+            # Keep the Beam handler outside the Docker build context. The handler
+            # is synced as application code by the Beam CLI, while the 16+ GiB
+            # runtime image remains content-identical and cacheable when only
+            # Beam orchestration code changes.
+            app_file = deploy_root / "tryon_beam_app.py"
             shutil.copy2(source_app, app_file)
 
-            if not reused_context and not fast_image_reference:
+            if not fast_reference_deploy and not reused_context:
                 # Beam injects its task-queue runner into the custom image and that
                 # runner imports betterproto before our handler/on_start executes.
                 # Harden only Beam's temporary Docker context so Modal, RunPod and
@@ -1087,14 +1064,14 @@ class RuntimeBuildExecutionService:
                     ),
                     encoding="utf-8",
                 )
-            else:
+            elif not fast_reference_deploy:
                 RuntimeBuildExecutionService._update_deployment(
                     db, build, deployment,
                     phase="preparing-runtime", progress=40,
-                    message="Reutilizando imagen Beam ya preparada.",
+                    message="Reutilizando contexto Beam ya preparado.",
                     log=(
                         "[beam] Contexto Docker persistente reutilizado. "
-                        "No se copiarán ni regenerarán las capas del runtime."
+                        "Las capas previas podrán usar caché."
                     ),
                 )
 
@@ -1141,20 +1118,20 @@ class RuntimeBuildExecutionService:
                 db, build, deployment,
                 phase="building-image", progress=45,
                 message=(
-                    "Imagen Beam reutilizada; publicando solo configuración."
-                    if fast_image_reference else
-                    ("Contexto Beam reutilizado; publicando configuración."
-                     if reused_context else
-                     "Contexto Beam mínimo listo; construyendo imagen Docker.")
+                    "Imagen publicada verificada; aplicando configuración Beam."
+                    if fast_reference_deploy else
+                    "Contexto Beam reutilizado; publicando configuración."
+                    if reused_context else
+                    "Contexto Beam listo; construyendo imagen Docker."
                 ),
                 log=(
-                    "[beam] Deploy de configuración: imagen inmutable reutilizada; contexto Docker de un solo archivo."
-                    if fast_image_reference else
-                    ("[beam] Contexto Docker persistente reutilizado; Beam debe usar la imagen cacheada."
-                     if reused_context else
-                     "[beam] Contexto mínimo creado conservando la estructura funcional del runtime. "
-                     f"Se excluyeron {excluded['directories']} directorios y "
-                     f"{excluded['files']} archivos prescindibles.")
+                    "[beam] Contexto de referencia real: solo Dockerfile y handler."
+                    if fast_reference_deploy else
+                    "[beam] Contexto Docker persistente reutilizado; Beam podrá usar sus capas cacheadas."
+                    if reused_context else
+                    "[beam] Contexto de build creado conservando la estructura funcional del runtime. "
+                    f"Se excluyeron {excluded['directories']} directorios y "
+                    f"{excluded['files']} archivos prescindibles."
                 ),
                 app_name=deployment_name,
                 volume_name=volume_name,
@@ -1164,7 +1141,11 @@ class RuntimeBuildExecutionService:
                 db, build, deployment,
                 phase="deploying", progress=65,
                 message="Desplegando Beam Task Queue.",
-                log=("[beam:4/6] Redeploy rápido desde imagen inmutable." if fast_image_reference else "[beam:4/6] Ejecutando beam deploy desde el contexto mínimo, no desde el export completo."),
+                log=(
+                    "[beam:4/6] Ejecutando redeploy rápido desde imagen publicada."
+                    if fast_reference_deploy else
+                    "[beam:4/6] Ejecutando beam deploy desde el contexto de build."
+                ),
             )
 
             from collections import deque
@@ -1221,8 +1202,16 @@ class RuntimeBuildExecutionService:
                         RuntimeBuildExecutionService._update_deployment(
                             db, build, deployment,
                             progress=progress,
-                            message=f"Beam está sincronizando el contexto mínimo ({added_files:,} archivos).",
-                            log=f"[beam] Sincronización del contexto mínimo: {added_files:,} archivos.",
+                            message=(
+                                f"Beam está sincronizando el redeploy rápido ({added_files:,} archivos)."
+                                if fast_reference_deploy else
+                                f"Beam está sincronizando el contexto de build ({added_files:,} archivos)."
+                            ),
+                            log=(
+                                f"[beam] Sincronización rápida: {added_files:,} archivos."
+                                if fast_reference_deploy else
+                                f"[beam] Sincronización del contexto de build: {added_files:,} archivos."
+                            ),
                         )
                         last_flush = now
                     continue
@@ -1268,7 +1257,11 @@ class RuntimeBuildExecutionService:
                 db, build, deployment,
                 status="deployed", phase="completed", progress=100,
                 message="Despliegue Beam completado.",
-                log="[beam:6/6] Deployment Beam completado desde contexto mínimo.",
+                log=(
+                    "[beam:6/6] Redeploy Beam completado desde imagen publicada."
+                    if fast_reference_deploy else
+                    "[beam:6/6] Deployment Beam completado desde contexto de build."
+                ),
                 endpoint=endpoint,
                 process_pid=None,
                 finished_at=utc_now().isoformat(),
