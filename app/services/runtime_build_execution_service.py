@@ -835,21 +835,28 @@ class RuntimeBuildExecutionService:
                     "silenciosa al build completo para evitar otra espera de horas."
                 )
 
-            image_ref = bound_image_ref
-            if not image_ref and bool(build.published) and str(build.image_tag or "").strip():
-                image_ref = str(build.image_tag).strip()
-                manifest["beam_runtime_image"] = {
-                    "fingerprint": runtime_fingerprint,
-                    "image_ref": image_ref,
-                    "bound_at": utc_now().isoformat(),
-                    "source": "published_runtime_build",
-                }
-                build.manifest = manifest
-                db.add(build)
-                db.commit()
-                db.refresh(build)
+            image_ref = bound_image_ref or str(build.image_tag or "").strip()
+            if not image_ref or image_ref.startswith("ghcr.io/your-org/"):
+                raise ValueError(
+                    "Beam no tiene una imagen de runtime publicada y reutilizable para este build. "
+                    "Ejecuta Publicar una sola vez desde Runtime Builder. El deploy se detuvo antes "
+                    "de sincronizar custom_nodes; no se permitirá la caída silenciosa al build de horas."
+                )
 
-            fast_reference_deploy = bool(image_ref)
+            # Bind the exact image reference to this runtime fingerprint regardless of
+            # the legacy `published` flag. The reference itself is the source of truth.
+            manifest["beam_runtime_image"] = {
+                "fingerprint": runtime_fingerprint,
+                "image_ref": image_ref,
+                "bound_at": utc_now().isoformat(),
+                "source": "runtime_build_image_tag",
+            }
+            build.manifest = manifest
+            db.add(build)
+            db.commit()
+            db.refresh(build)
+
+            fast_reference_deploy = True
             if fast_reference_deploy:
                 deploy_root, context = RuntimeBuildExecutionService._prepare_beam_reference_context(
                     image_ref, runtime_fingerprint
@@ -869,9 +876,9 @@ class RuntimeBuildExecutionService:
                     beam_runtime_image_ref=image_ref,
                 )
             else:
-                deploy_root, context, excluded, reused_context = RuntimeBuildExecutionService._prepare_beam_deploy_context(
-                    source_context
-                )
+                # Defensive dead branch: configuration deploys must never fall back
+                # to the multi-hour runtime build path.
+                raise RuntimeError("Beam fast redeploy invariant violated.")
             dockerfile = context / "Dockerfile"
             # Keep the Beam handler outside the Docker build context. The handler
             # is synced as application code by the Beam CLI, while the 16+ GiB
@@ -1087,7 +1094,8 @@ class RuntimeBuildExecutionService:
             env.update({
                 "HOME": home,
                 "USERPROFILE": home,
-                "TRYON_BEAM_DOCKERFILE": str(dockerfile),
+                "TRYON_BEAM_BASE_IMAGE": image_ref,
+                "TRYON_BEAM_DOCKERFILE": "",
                 "TRYON_BEAM_CONTEXT_DIR": str(context),
                 "TRYON_BEAM_DEPLOYMENT_NAME": deployment_name,
                 "TRYON_BEAM_VOLUME_NAME": volume_name,
@@ -1142,7 +1150,7 @@ class RuntimeBuildExecutionService:
                 phase="deploying", progress=65,
                 message="Desplegando Beam Task Queue.",
                 log=(
-                    "[beam:4/6] Ejecutando redeploy rápido desde imagen publicada."
+                    "[beam:4/6] Ejecutando redeploy rápido desde imagen publicada; sin contexto de runtime."
                     if fast_reference_deploy else
                     "[beam:4/6] Ejecutando beam deploy desde el contexto de build."
                 ),

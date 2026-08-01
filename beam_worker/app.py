@@ -25,6 +25,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+BASE_IMAGE = os.environ.get("TRYON_BEAM_BASE_IMAGE", "").strip()
 DOCKERFILE = os.environ.get("TRYON_BEAM_DOCKERFILE", "./Dockerfile").strip()
 CONTEXT_DIR = os.environ.get("TRYON_BEAM_CONTEXT_DIR", ".").strip()
 VOLUME_NAME = os.environ.get("TRYON_BEAM_VOLUME_NAME", "tryon-models").strip()
@@ -33,12 +34,17 @@ DEPLOYMENT_NAME = os.environ.get(
     "TRYON_BEAM_DEPLOYMENT_NAME", "tryon-generation-runtime"
 ).strip()
 
-if not DOCKERFILE:
-    raise RuntimeError("TRYON_BEAM_DOCKERFILE is required for the Beam deployment.")
-
-# Beam builds and stores this image internally. No Docker registry, docker login,
-# docker tag, or docker push is involved in this provider-specific path.
-image = Image().from_dockerfile(DOCKERFILE, CONTEXT_DIR)
+if BASE_IMAGE:
+    # Configuration-only redeploy: reuse the exact published runtime image.
+    # This avoids syncing/building ComfyUI and custom_nodes again.
+    image = Image(base_image=BASE_IMAGE)
+else:
+    if not DOCKERFILE:
+        raise RuntimeError(
+            "TRYON_BEAM_DOCKERFILE is required when TRYON_BEAM_BASE_IMAGE is empty."
+        )
+    # Full runtime build path, used only when an image has not been published yet.
+    image = Image().from_dockerfile(DOCKERFILE, CONTEXT_DIR)
 volumes = [Volume(name=VOLUME_NAME, mount_path=VOLUME_PATH)] if VOLUME_NAME else []
 
 
