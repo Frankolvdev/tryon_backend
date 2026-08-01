@@ -780,9 +780,21 @@ class GenerationModuleRuntimeService:
             item.provider_job_id=submitted["provider_job_id"]; item.provider_endpoint_id=submitted["endpoint"]; item.provider_status=submitted.get("status") or "PENDING"; item.dispatch_attempts+=1
             generation_module_execution_store_service.save(item.model_copy(deep=True))
         result=beam_serverless_adapter_service.execute_submitted_job(db,provider_job_id=submitted["provider_job_id"],endpoint=submitted["endpoint"],timeout_seconds=timeout,progress_callback=lambda p,m,meta=None:self._remote_module_progress(execution_id,p,m,meta or {}),cancellation_callback=lambda:self.get(execution_id).cancel_requested)
-        output=result.get("output")
-        if not isinstance(output,dict) or output.get("runtime_contract")!="tryon.generation-runtime/v1" or output.get("status")!="completed":
-            raise RuntimeError(str((output or {}).get("error") if isinstance(output,dict) else "Beam Generation Runtime returned an invalid payload."))
+        output = result.get("output")
+        valid_output = (
+            isinstance(output, dict)
+            and output.get("runtime_contract") == "tryon.generation-runtime/v1"
+            and output.get("status") == "completed"
+        )
+        if not valid_output:
+            detail = output.get("error") if isinstance(output, dict) else None
+            if not detail:
+                task = result.get("task") if isinstance(result.get("task"), dict) else {}
+                detail = task.get("error") or (
+                    "Beam marked the task complete, but its result artifacts were not available "
+                    "or did not contain the Generation Runtime contract."
+                )
+            raise RuntimeError(str(detail))
         with self._lock:
             item=self._items[execution_id]
             for index,remote_step in enumerate(output.get("steps") or []):

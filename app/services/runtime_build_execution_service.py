@@ -735,7 +735,11 @@ class RuntimeBuildExecutionService:
                 source_context
             )
             dockerfile = context / "Dockerfile"
-            app_file = context / "tryon_beam_app.py"
+            # Keep the Beam handler outside the Docker build context. The handler
+            # is synced as application code by the Beam CLI, while the 16+ GiB
+            # runtime image remains content-identical and cacheable when only
+            # Beam orchestration code changes.
+            app_file = deploy_root / "tryon_beam_app.py"
             shutil.copy2(source_app, app_file)
 
             # Beam injects its task-queue runner into the custom image and that
@@ -975,7 +979,7 @@ class RuntimeBuildExecutionService:
             output_tail = deque(maxlen=5000)
             returncode = None
             popen_kwargs = {
-                "cwd": str(context),
+                "cwd": str(deploy_root),
                 "env": env,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.STDOUT,

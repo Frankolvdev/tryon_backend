@@ -299,7 +299,16 @@ class BeamServerlessAdapterService:
                     {"provider_status": status},
                 )
             if status == "COMPLETE":
+                # Beam can report COMPLETE slightly before persisted Output artifacts
+                # become visible through the task API. Do not convert that short
+                # consistency window into a failed TryOn execution.
+                completion_seen_at = locals().get("completion_seen_at")
+                if completion_seen_at is None:
+                    completion_seen_at = time.monotonic()
                 outputs = self._task_output(task, api_key=cfg.api_key, session=active_session)
+                if not outputs and time.monotonic() - completion_seen_at < 45:
+                    time.sleep(2.0)
+                    continue
                 return {
                     "provider": "beam",
                     "provider_job_id": provider_job_id,
