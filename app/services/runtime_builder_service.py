@@ -23,6 +23,16 @@ class RuntimeBuilderService:
 
     DEFAULT_MODAL_VOLUME_PATH = "/models"
 
+    # Snapshot engine separado y versionable. Solo se usa en runtimes Modal.
+    DEFAULT_RUNTIME_ENGINE_REPOSITORY = (
+        "https://github.com/Frankolvdev/comfyui_runtime_engine.git"
+    )
+    DEFAULT_RUNTIME_ENGINE_REF = "main"
+    DEFAULT_RUNTIME_ENGINE_INSTALL_PATH = "/opt/comfyui-runtime-engine"
+    DEFAULT_MODAL_RESIDENT_MODELS = (
+        "diffusion_models/realDream_klein9BV1.safetensors",
+    )
+
 
     PROTECTED_GPU_PACKAGES = {
         "torch", "torchvision", "torchaudio", "xformers", "triton",
@@ -290,6 +300,79 @@ class RuntimeBuilderService:
         return 'import gc\nimport json\nimport os\nimport sys\nimport threading\nimport time\n\n_PATCH_LOCK = threading.Lock()\n_PATCHED = False\n_SAM3_CACHE = {}\n\n\ndef _enabled(name, default):\n    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}\n\n\ndef _log(event, **fields):\n    payload = {"event": event, "timestamp": time.time(), **fields}\n    print("[tryon-runtime-guard] " + json.dumps(payload, ensure_ascii=False, default=str), flush=True)\n\n\ndef _gpu_state():\n    try:\n        import torch\n        if not torch.cuda.is_available():\n            return {"cuda": False}\n        free, total = torch.cuda.mem_get_info()\n        return {\n            "cuda": True,\n            "free_gb": round(free / 1073741824, 3),\n            "total_gb": round(total / 1073741824, 3),\n            "allocated_gb": round(torch.cuda.memory_allocated() / 1073741824, 3),\n            "reserved_gb": round(torch.cuda.memory_reserved() / 1073741824, 3),\n        }\n    except Exception as exc:\n        return {"error": f"{type(exc).__name__}: {exc}"}\n\n\ndef _find_mapping_class(class_type):\n    for module in list(sys.modules.values()):\n        mapping = getattr(module, "NODE_CLASS_MAPPINGS", None)\n        if isinstance(mapping, dict) and class_type in mapping:\n            return mapping[class_type]\n    return None\n\n\ndef _patch_purge():\n    cls = _find_mapping_class("LayerUtility: PurgeVRAM V2")\n    if cls is None or getattr(cls, "_tryon_guarded", False):\n        return cls is not None\n    original = cls.purge_vram_v2\n\n    def guarded(self, anything, purge_cache, purge_models):\n        started = time.monotonic()\n        before = _gpu_state()\n        optimize = _enabled("TRYON_SELECTIVE_PURGE", "true")\n        fallback = _enabled("TRYON_FALLBACK_ORIGINAL_PURGE", "true")\n        threshold = float(os.getenv("TRYON_SELECTIVE_PURGE_MIN_FREE_GB", "28"))\n        try:\n            if not optimize or not purge_models:\n                result = original(self, anything, purge_cache, purge_models)\n                _log("purge_original", before=before, after=_gpu_state(), duration_s=round(time.monotonic()-started, 4))\n                return result\n\n            module = sys.modules.get(cls.__module__)\n            clear_memory = getattr(module, "clear_memory", None)\n            if callable(clear_memory):\n                clear_memory()\n            else:\n                gc.collect()\n            after_cache = _gpu_state()\n            free_gb = float(after_cache.get("free_gb", 0) or 0)\n            if free_gb >= threshold:\n                _log("purge_selective_keep_models", threshold_gb=threshold, before=before, after=after_cache, duration_s=round(time.monotonic()-started, 4))\n                return (anything,)\n\n            if _SAM3_CACHE:\n                _log("sam3_cache_released_for_pressure", entries=len(_SAM3_CACHE), free_gb=free_gb, threshold_gb=threshold)\n                _SAM3_CACHE.clear()\n                gc.collect()\n            result = original(self, anything, purge_cache, purge_models)\n            _log("purge_full_low_memory", threshold_gb=threshold, before=before, after=_gpu_state(), duration_s=round(time.monotonic()-started, 4))\n            return result\n        except BaseException as exc:\n            _log("purge_guard_error", error_type=type(exc).__name__, error=str(exc), fallback=fallback)\n            if fallback:\n                return original(self, anything, purge_cache, purge_models)\n            raise\n\n    cls.purge_vram_v2 = guarded\n    cls._tryon_guarded = True\n    _log("purge_patch_installed", class_module=cls.__module__)\n    return True\n\n\ndef _patch_sam3():\n    if not _enabled("TRYON_PROTECT_SAM3", "true"):\n        return True\n    cls = _find_mapping_class("TBGSAM3ModelLoaderAdvanced")\n    if cls is None or getattr(cls, "_tryon_guarded", False):\n        return cls is not None\n    function_name = getattr(cls, "FUNCTION", "")\n    original = getattr(cls, function_name, None)\n    if not function_name or not callable(original):\n        return False\n\n    def cached(self, *args, **kwargs):\n        key = (args, tuple(sorted((str(k), repr(v)) for k, v in kwargs.items())))\n        try:\n            hash(key)\n        except TypeError:\n            key = repr(key)\n        if key in _SAM3_CACHE:\n            _log("sam3_cache_hit", entries=len(_SAM3_CACHE), gpu=_gpu_state())\n            return _SAM3_CACHE[key]\n        started = time.monotonic()\n        result = original(self, *args, **kwargs)\n        _SAM3_CACHE[key] = result\n        _log("sam3_cache_store", entries=len(_SAM3_CACHE), duration_s=round(time.monotonic()-started, 4), gpu=_gpu_state())\n        return result\n\n    setattr(cls, function_name, cached)\n    cls._tryon_guarded = True\n    _log("sam3_patch_installed", class_module=cls.__module__, function=function_name)\n    return True\n\n\ndef _install():\n    global _PATCHED\n    deadline = time.monotonic() + 90\n    while time.monotonic() < deadline:\n        with _PATCH_LOCK:\n            purge_ok = _patch_purge()\n            sam_ok = _patch_sam3()\n            if purge_ok and sam_ok:\n                _PATCHED = True\n                _log("guard_ready", selective_purge=_enabled("TRYON_SELECTIVE_PURGE", "true"), protect_sam3=_enabled("TRYON_PROTECT_SAM3", "true"), fallback=_enabled("TRYON_FALLBACK_ORIGINAL_PURGE", "true"))\n                return\n        time.sleep(0.25)\n    _log("guard_partial_timeout", purge_found=_find_mapping_class("LayerUtility: PurgeVRAM V2") is not None, sam3_found=_find_mapping_class("TBGSAM3ModelLoaderAdvanced") is not None)\n\n\nthreading.Thread(target=_install, name="tryon-runtime-guard", daemon=True).start()\n\nNODE_CLASS_MAPPINGS = {}\nNODE_DISPLAY_NAME_MAPPINGS = {}\n'
 
     @staticmethod
+    def _modal_runtime_engine_toml(volume_path: str) -> str:
+        residents = "\n".join(
+            f'  "{item}",'
+            for item in RuntimeBuilderService.DEFAULT_MODAL_RESIDENT_MODELS
+        )
+        return f"""[runtime]
+mode = "embedded"
+comfyui_path = "/app/ComfyUI"
+host = "127.0.0.1"
+port = 8188
+startup_timeout_seconds = 900
+strict_version = true
+supported_versions = ["0.15"]
+
+[embedded]
+allow_simulation_only = false
+extra_args = ["--disable-api-nodes"]
+shutdown_grace_seconds = 5.0
+ensure_workspace = true
+
+[snapshot]
+enabled = true
+gpu_enabled = true
+resident_models = [
+{residents}
+]
+
+[residency]
+model_roots = ["{volume_path}"]
+strict = true
+execution_reserve_gb = 8.0
+warmup_workflow = "/app/runtime/modal-snapshot-warmup.json"
+warmup_timeout_seconds = 900
+warmup_inputs = []
+
+sam3_source_model = "{volume_path}/sam3/sam3.pt"
+sam3_expected_model = "models/sam3/sam3.pt"
+sam3_link_mode = "symlink"
+sam3_replace_existing = false
+
+[snapshot_lifecycle]
+provider = "modal"
+state_path = "/tmp/comfy-runtime-snapshot-state.json"
+audit_path = "/tmp/comfy-runtime-snapshot-audit.json"
+
+[diagnostics]
+json_events = true
+event_log = "/tmp/comfy-runtime-events.jsonl"
+"""
+
+    @staticmethod
+    def _modal_snapshot_warmup_workflow() -> str:
+        return json.dumps(
+            {
+                "runtime-resident-unet": {
+                    "class_type": "UNETLoader",
+                    "inputs": {
+                        "unet_name": "realDream_klein9BV1.safetensors",
+                        "weight_dtype": "default",
+                    },
+                },
+                "runtime-resident-sink": {
+                    "class_type": "TryonSnapshotWarmupSink",
+                    "inputs": {
+                        "value": ["runtime-resident-unet", 0],
+                    },
+                },
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    @staticmethod
     def _modal_app(volume_name: str, volume_path: str, runtime_name: str) -> str:
         # Docker Desktop and RunPod keep using scripts/startup.sh unchanged.
         # Modal starts ComfyUI directly after snapshot restoration and exposes
@@ -308,6 +391,7 @@ import uuid
 from pathlib import Path
 
 import modal
+from comfyui_runtime_engine.modal import ModalSnapshotAdapter
 
 APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
@@ -342,6 +426,34 @@ INPUT_CONCURRENCY = int(os.getenv("TRYON_MODAL_INPUT_CONCURRENCY", "1000"))
 SCALEDOWN_WINDOW = int(os.getenv("TRYON_MODAL_SCALEDOWN_WINDOW", "300"))
 CPU_MEMORY_REQUEST_MB = int(os.getenv("TRYON_MODAL_CPU_MEMORY_REQUEST_MB", "32768"))
 EXECUTION_TIMEOUT = int(os.getenv("TRYON_MODAL_EXECUTION_TIMEOUT", "1800"))
+RUNTIME_ENGINE_ENABLED = os.getenv(
+    "TRYON_MODAL_RUNTIME_ENGINE_ENABLED",
+    "true",
+).strip().lower() in {{"1", "true", "yes", "on"}}
+RUNTIME_ENGINE_CONFIG = Path(
+    os.getenv(
+        "TRYON_MODAL_RUNTIME_ENGINE_CONFIG",
+        "/app/runtime/runtime-engine.toml",
+    )
+)
+RUNTIME_ENGINE_READY_PATH = Path(
+    os.getenv(
+        "TRYON_MODAL_RUNTIME_ENGINE_READY_PATH",
+        "/tmp/comfy-runtime-modal-ready.json",
+    )
+)
+RUNTIME_ENGINE_RESTORE_PATH = Path(
+    os.getenv(
+        "TRYON_MODAL_RUNTIME_ENGINE_RESTORE_PATH",
+        "/tmp/comfy-runtime-modal-restore.json",
+    )
+)
+RUNTIME_ENGINE_LOG_PATH = Path(
+    os.getenv(
+        "TRYON_MODAL_RUNTIME_ENGINE_LOG_PATH",
+        "/tmp/comfy-runtime-modal.log",
+    )
+)
 
 COMFYUI_ROOT = Path("/app/ComfyUI")
 COMFYUI_MAIN = COMFYUI_ROOT / "main.py"
@@ -1063,12 +1175,48 @@ class ComfyUIServer:
         _modal_trace(
             "container_snapshot_initialize",
             role="pipeline_server",
-            snapshot_mode="comfyui_gpu_warm_snapshot",
+            snapshot_mode=(
+                "runtime_engine_gpu_snapshot"
+                if RUNTIME_ENGINE_ENABLED
+                else "comfyui_gpu_warm_snapshot"
+            ),
             comfyui_started=False,
             models_loaded=False,
+            runtime_engine_enabled=RUNTIME_ENGINE_ENABLED,
         )
         os.environ["RUNTIME_PROVIDER"] = "modal"
         os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
+
+        if RUNTIME_ENGINE_ENABLED:
+            _prepare_runtime_directories()
+            _write_snapshot_warmup_node()
+            self.snapshot_adapter = ModalSnapshotAdapter(
+                config_path=RUNTIME_ENGINE_CONFIG,
+                host="127.0.0.1",
+                port=COMFYUI_PORT,
+                startup_timeout_seconds=STARTUP_TIMEOUT,
+                ready_path=RUNTIME_ENGINE_READY_PATH,
+                restore_path=RUNTIME_ENGINE_RESTORE_PATH,
+                log_path=RUNTIME_ENGINE_LOG_PATH,
+            )
+            report = self.snapshot_adapter.prepare_snapshot()
+            self.comfyui_process = self.snapshot_adapter.process
+            _modal_trace(
+                "container_snapshot_ready",
+                role="pipeline_server",
+                snapshot_mode="runtime_engine_gpu_snapshot",
+                comfyui_started=True,
+                models_loaded=True,
+                runtime_engine_health=report,
+                gpu=_diagnostic_gpu_state(),
+            )
+            print(
+                "[modal] Runtime engine snapshot-ready; creando snapshot CPU+GPU.",
+                flush=True,
+            )
+            return
+
+        # Fallback exacto al comportamiento Modal anterior.
         print("[modal] Iniciando ComfyUI antes del snapshot de memoria.", flush=True)
         self._start_process()
         _run_snapshot_model_warmup()
@@ -1078,6 +1226,7 @@ class ComfyUIServer:
             snapshot_mode="comfyui_gpu_warm_snapshot",
             comfyui_started=True,
             models_loaded=True,
+            runtime_engine_enabled=False,
             gpu=_diagnostic_gpu_state(),
         )
         print(
@@ -1090,8 +1239,39 @@ class ComfyUIServer:
         _modal_trace(
             "container_restore_start",
             role="pipeline_server",
-            startup_mode="restored_comfyui_gpu_snapshot",
+            startup_mode=(
+                "restored_runtime_engine_gpu_snapshot"
+                if RUNTIME_ENGINE_ENABLED
+                else "restored_comfyui_gpu_snapshot"
+            ),
+            runtime_engine_enabled=RUNTIME_ENGINE_ENABLED,
         )
+
+        if RUNTIME_ENGINE_ENABLED:
+            adapter = getattr(self, "snapshot_adapter", None)
+            if adapter is None:
+                raise RuntimeError(
+                    "El snapshot no restauró ModalSnapshotAdapter."
+                )
+            report = adapter.after_restore()
+            self.comfyui_process = adapter.process
+            _modal_trace(
+                "container_ready",
+                role="pipeline_server",
+                restored_from_snapshot=True,
+                comfyui_snapshotted=True,
+                models_snapshotted=True,
+                startup_mode="restored_runtime_engine_gpu_snapshot",
+                runtime_engine_health=report,
+                gpu=_diagnostic_gpu_state(),
+            )
+            print(
+                "[modal] Runtime engine restaurado y validado.",
+                flush=True,
+            )
+            return
+
+        # Fallback exacto al restore anterior.
         process = getattr(self, "comfyui_process", None)
         if process is None:
             raise RuntimeError(
@@ -1408,6 +1588,26 @@ class ComfyUIServer:
                     "RUN python --version && python -m pip install --upgrade 'pip>=25,<26' setuptools wheel",
                     f"RUN git clone {config.comfyui_repository} /app/ComfyUI",
                     commit_line,
+                    (
+                        "ARG COMFY_RUNTIME_ENGINE_GIT_URL="
+                        + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REPOSITORY
+                    ) if modal_enabled else "",
+                    (
+                        "ARG COMFY_RUNTIME_ENGINE_GIT_REF="
+                        + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
+                    ) if modal_enabled else "",
+                    (
+                        "RUN git clone --filter=blob:none "
+                        "${COMFY_RUNTIME_ENGINE_GIT_URL} "
+                        + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                        + " && git -C "
+                        + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                        + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
+                    ) if modal_enabled else "",
+                    (
+                        "RUN python -m pip install --no-cache-dir "
+                        + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                    ) if modal_enabled else "",
                     f"RUN python -m pip install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
                     "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r /app/ComfyUI/requirements.txt",
                     *node_lines,
@@ -1518,6 +1718,12 @@ wait $COMFY_PID
         }
 
         if modal_enabled:
+            result["modal_runtime_engine_toml"] = (
+                RuntimeBuilderService._modal_runtime_engine_toml(volume_path)
+            )
+            result["modal_snapshot_warmup_workflow"] = (
+                RuntimeBuilderService._modal_snapshot_warmup_workflow()
+            )
             volume_name = str(modal_volume_name or "").strip()
             if not volume_name:
                 volume_name = f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models"

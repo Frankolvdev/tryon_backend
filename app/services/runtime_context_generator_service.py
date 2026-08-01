@@ -547,6 +547,14 @@ fi
             ".dockerignore": "**/.git\n**/__pycache__\n**/*.pyc\n.venv\nnode_modules\n",
             "tryon_runtime_guard/__init__.py": generated["tryon_runtime_guard"],
         }
+        if generated.get("modal_runtime_engine_toml"):
+            files["runtime-engine.toml"] = generated[
+                "modal_runtime_engine_toml"
+            ]
+        if generated.get("modal_snapshot_warmup_workflow"):
+            files["modal-snapshot-warmup.json"] = generated[
+                "modal_snapshot_warmup_workflow"
+            ]
         if generated.get("modal_app"):
             modal_app = generated["modal_app"]
             required_modal_fragments = (
@@ -555,6 +563,10 @@ fi
                 'def run_pipeline(self, payload):',
                 'TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"',
                 'from generation_runtime import GenerationRuntime',
+                'from comfyui_runtime_engine.modal import ModalSnapshotAdapter',
+                'TRYON_MODAL_RUNTIME_ENGINE_ENABLED',
+                'snapshot_adapter.prepare_snapshot()',
+                'adapter.after_restore()',
             )
             missing_fragments = [
                 fragment for fragment in required_modal_fragments if fragment not in modal_app
@@ -630,6 +642,31 @@ fi
         if config.comfyui_commit:
             lines.append(f"RUN git -C {comfy_target} checkout {config.comfyui_commit}")
         lines += [
+            (
+                "ARG COMFY_RUNTIME_ENGINE_GIT_URL="
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REPOSITORY
+            ),
+            (
+                "ARG COMFY_RUNTIME_ENGINE_GIT_REF="
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
+            ),
+            (
+                "RUN git clone --filter=blob:none "
+                "${COMFY_RUNTIME_ENGINE_GIT_URL} "
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                + " && git -C "
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
+            ),
+            (
+                "RUN python -m pip install --no-cache-dir "
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+            ),
+            "COPY runtime-engine.toml /app/runtime/runtime-engine.toml",
+            (
+                "COPY modal-snapshot-warmup.json "
+                "/app/runtime/modal-snapshot-warmup.json"
+            ),
             f"RUN python -m pip install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
             f"RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' {comfy_target}/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r {comfy_target}/requirements.txt",
             "COPY requirements.txt /tmp/runtime-requirements.txt",
