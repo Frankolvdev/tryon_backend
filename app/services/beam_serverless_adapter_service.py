@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import base64
 import logging
+import mimetypes
+import tempfile
 import threading
 import time
+from pathlib import Path
+from uuid import uuid4
 from typing import Any, Callable
 
 import requests
@@ -126,16 +131,49 @@ class BeamServerlessAdapterService:
                 response = self._download_output_response(
                     session, str(artifact["url"]), api_key=api_key, timeout=300
                 )
-                import tempfile
-                from pathlib import Path
                 suffix = Path(str(value.get("filename") or artifact_name)).suffix or ".bin"
                 destination = Path(tempfile.mkdtemp(prefix="tryon-beam-result-")) / f"result{suffix}"
                 destination.write_bytes(response.content)
                 enriched = dict(value)
                 enriched.pop("beam_output_name", None)
+                enriched["temporary"] = True
                 enriched["local_path"] = str(destination)
                 enriched["size_bytes"] = destination.stat().st_size
                 return enriched
+
+            # Some Beam runtimes embed generated files directly in the result JSON,
+            # matching Modal's data-URI transport. Materialize those bytes locally
+            # before the shared persistence layer runs, without changing Modal or RunPod.
+            if value.get("__generation_file__"):
+                data = value.get("data")
+                if isinstance(data, str) and data.startswith("data:") and ";base64," in data:
+                    header, encoded = data.split(",", 1)
+                    filename = Path(str(value.get("filename") or uuid4().hex)).name
+                    declared_type = str(value.get("content_type") or "").strip()
+                    header_type = header[5:].split(";", 1)[0].strip()
+                    guessed_type = mimetypes.guess_type(filename)[0]
+                    content_type = declared_type or header_type or guessed_type or "application/octet-stream"
+                    if content_type == "application/octet-stream" and guessed_type:
+                        content_type = guessed_type
+                    try:
+                        content = base64.b64decode(encoded, validate=True)
+                    except Exception as exc:
+                        raise AppException("Beam returned an invalid base64 generation file payload.") from exc
+                    suffix = Path(filename).suffix or mimetypes.guess_extension(content_type) or ".bin"
+                    destination = Path(tempfile.mkdtemp(prefix="tryon-beam-result-")) / f"{uuid4().hex[:10]}{suffix}"
+                    destination.write_bytes(content)
+                    normalized = {
+                        "__generation_file__": True,
+                        "temporary": True,
+                        "local_path": str(destination),
+                        "filename": filename,
+                        "content_type": content_type,
+                        "size_bytes": len(content),
+                    }
+                    if value.get("node_id") is not None:
+                        normalized["node_id"] = str(value.get("node_id"))
+                    return normalized
+
             return {
                 key: self._materialize_output_artifacts(
                     item, artifacts_by_name=artifacts_by_name, api_key=api_key, session=session
