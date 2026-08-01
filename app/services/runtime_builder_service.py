@@ -391,7 +391,6 @@ import uuid
 from pathlib import Path
 
 import modal
-from comfyui_runtime_engine.modal import ModalSnapshotAdapter
 
 APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
@@ -1188,6 +1187,11 @@ class ComfyUIServer:
         os.environ["COMFYUI_PORT"] = str(COMFYUI_PORT)
 
         if RUNTIME_ENGINE_ENABLED:
+            # Import diferido: modal deploy importa este archivo primero en el host
+            # local, donde el Engine no tiene por qué estar instalado. Este bloque
+            # se ejecuta dentro de la imagen Modal, que sí instala el paquete.
+            from comfyui_runtime_engine.modal import ModalSnapshotAdapter
+
             _prepare_runtime_directories()
             _write_snapshot_warmup_node()
             self.snapshot_adapter = ModalSnapshotAdapter(
