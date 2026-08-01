@@ -158,26 +158,38 @@ class RuntimeBuildExecutionService:
                 raise RuntimeError(str(exc)) from exc
             build.context_path=str(ctx)
             RuntimeBuildExecutionService._append(db,build,f"[runtime-builder] Usando exportación persistida: {ctx}","building",12)
-            cmd=['docker','build','--platform',cfg.target_platform,'-t',build.image_tag,'-f',str(ctx/'Dockerfile')]
-            if no_cache:
-                RuntimeBuildExecutionService._append(db,build,'[runtime-builder] Compilación sin caché activada: se ignorarán las layers anteriores.','building',12)
-                cmd.append('--no-cache')
-            cmd.append(str(ctx))
-            proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
-            for line in proc.stdout or []:
-                db.refresh(build)
-                if build.status=='cancelled': proc.terminate(); return
-                RuntimeBuildExecutionService._append(db,build,line,"building",min(85,build.progress+1))
-            if proc.wait()!=0: raise RuntimeError("docker build terminó con error.")
-            inspect=subprocess.run(['docker','image','inspect',build.image_tag,'--format','{{.Id}}|{{.Size}}'],capture_output=True,text=True,timeout=30)
+            is_beam_build = str(getattr(cfg, "provider", "") or "").strip().lower() == "beam"
+            if is_beam_build:
+                # Beam builds only its provider-specific reusable image. This avoids
+                # compiling the generic image first and then compiling Beam again.
+                runtime_image = RuntimeBuildExecutionService._build_and_publish_beam_runtime_image(
+                    db, build, cfg, ctx, no_cache=no_cache
+                )
+            else:
+                runtime_image = build.image_tag
+                cmd=['docker','build','--platform',cfg.target_platform,'-t',runtime_image,'-f',str(ctx/'Dockerfile')]
+                if no_cache:
+                    RuntimeBuildExecutionService._append(db,build,'[runtime-builder] Compilación sin caché activada: se ignorarán las layers anteriores.','building',12)
+                    cmd.append('--no-cache')
+                cmd.append(str(ctx))
+                proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+                for line in proc.stdout or []:
+                    db.refresh(build)
+                    if build.status=='cancelled': proc.terminate(); return
+                    RuntimeBuildExecutionService._append(db,build,line,"building",min(85,build.progress+1))
+                if proc.wait()!=0: raise RuntimeError("docker build terminó con error.")
+
+            inspect=subprocess.run(['docker','image','inspect',runtime_image,'--format','{{.Id}}|{{.Size}}'],capture_output=True,text=True,timeout=30)
             if inspect.returncode==0:
                 parts=inspect.stdout.strip().split('|'); build.image_id=parts[0]; build.image_size_bytes=int(parts[1]) if len(parts)>1 else None
             build.status='validating'; RuntimeBuildExecutionService._append(db,build,"[runtime-builder] Imagen construida; validando metadatos...","validating",90)
-            test=subprocess.run(['docker','run','--rm','--entrypoint','python3',build.image_tag,'-c','import json; print("runtime-ok")'],capture_output=True,text=True,timeout=120)
-            build.validation_result={**(build.validation_result or {}),"container_smoke_test":test.returncode==0,"smoke_output":(test.stdout+test.stderr)[-4000:]}
+            test=subprocess.run(['docker','run','--rm','--entrypoint','python3',runtime_image,'-c','import json; print("runtime-ok")'],capture_output=True,text=True,timeout=120)
+            build.validation_result={**(build.validation_result or {}),"container_smoke_test":test.returncode==0,"smoke_output":(test.stdout+test.stderr)[-4000:],"validated_image":runtime_image}
             if test.returncode!=0: raise RuntimeError("La prueba de arranque del contenedor falló.")
+
             build.status='succeeded'; build.phase='completed'; build.progress=100; build.finished_at=utc_now(); RuntimeBuildExecutionService._append(db,build,"[runtime-builder] Build y validación completados.")
-            if push_after_build: RuntimeBuildExecutionService.publish(build.id)
+            if push_after_build and str(getattr(cfg, "provider", "") or "").strip().lower() != "beam":
+                RuntimeBuildExecutionService.publish(build.id)
         except Exception as exc:
             build=db.get(RuntimeBuilderBuild,build_id)
             if build and build.status!='cancelled': build.status='failed'; build.phase='failed'; build.error_message=str(exc); build.finished_at=utc_now(); RuntimeBuildExecutionService._append(db,build,f"[error] {exc}")
@@ -743,6 +755,131 @@ class RuntimeBuildExecutionService:
         return image_ref, fingerprint, True
 
     @staticmethod
+    def _build_and_publish_beam_runtime_image(db, build, cfg, source_context, no_cache=False):
+        """Builds and publishes the reusable Beam image during Build only.
+
+        This method is intentionally called only from the explicit Runtime Builder
+        Build action when the runtime configuration provider is ``beam``. It never
+        runs from Deploy, Modal or RunPod.
+        """
+        fingerprint = RuntimeBuildExecutionService._beam_runtime_fingerprint(source_context)
+        image_ref = RuntimeBuildExecutionService._beam_immutable_image_ref(build, fingerprint)
+        manifest = dict(build.manifest or {})
+        existing = dict(manifest.get("beam_runtime_image") or {})
+
+        if (
+            str(existing.get("fingerprint") or "") == fingerprint
+            and str(existing.get("image_ref") or "").strip() == image_ref
+            and bool(existing.get("published"))
+        ):
+            RuntimeBuildExecutionService._append(
+                db, build,
+                f"[beam-build] Imagen reutilizable ya preparada: {image_ref}",
+                "beam-image-ready", 96,
+            )
+            return image_ref
+
+        RuntimeBuildExecutionService._append(
+            db, build,
+            f"[beam-build] Preparando imagen reutilizable por huella: {image_ref}",
+            "beam-image-preparing", 92,
+        )
+        deploy_root, context, excluded, reused = (
+            RuntimeBuildExecutionService._prepare_beam_deploy_context(source_context)
+        )
+        dockerfile = context / "Dockerfile"
+        RuntimeBuildExecutionService._append(
+            db, build,
+            "[beam-build] Contexto exclusivo de Beam "
+            + ("reutilizado" if reused else "preparado")
+            + f"; excluidos {excluded['directories']} directorios y {excluded['files']} archivos.",
+            "beam-image-building", 93,
+        )
+
+        command = [
+            "docker", "build", "--platform", str(cfg.target_platform or "linux/amd64"),
+            "-t", image_ref, "-f", str(dockerfile),
+        ]
+        if no_cache:
+            command.append("--no-cache")
+        command.append(str(context))
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        for line in process.stdout or []:
+            db.refresh(build)
+            if build.status == "cancelled":
+                process.terminate()
+                raise RuntimeError("Build Beam cancelado.")
+            RuntimeBuildExecutionService._append(
+                db, build, "[beam-build] " + line.rstrip(),
+                "beam-image-building", 94,
+            )
+        if process.wait() != 0:
+            raise RuntimeError(
+                "No fue posible construir la imagen reutilizable de Beam. "
+                "Modal y RunPod no fueron modificados."
+            )
+
+        RuntimeBuildExecutionService._append(
+            db, build, f"[beam-build] Publicando automáticamente {image_ref}...",
+            "beam-image-publishing", 97,
+        )
+        pushed = subprocess.Popen(
+            ["docker", "push", image_ref],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        for line in pushed.stdout or []:
+            RuntimeBuildExecutionService._append(
+                db, build, "[beam-build] " + line.rstrip(),
+                "beam-image-publishing", 98,
+            )
+        if pushed.wait() != 0:
+            raise RuntimeError(
+                "El Build de Beam terminó, pero no se pudo publicar su imagen reutilizable. "
+                "Configura una Imagen del registro real en Runtime Builder e inicia sesión "
+                "con docker login en el host del backend. Deploy no construirá la imagen."
+            )
+
+        manifest["beam_runtime_image"] = {
+            "fingerprint": fingerprint,
+            "image_ref": image_ref,
+            "published": True,
+            "published_at": utc_now().isoformat(),
+            "source": "manual_runtime_builder_build",
+        }
+        build.manifest = manifest
+        build.published = True
+        db.add(build)
+        db.commit()
+        db.refresh(build)
+        RuntimeBuildExecutionService._append(
+            db, build, f"[beam-build] Imagen lista para Deploy rápido: {image_ref}",
+            "beam-image-ready", 99,
+        )
+        return image_ref
+
+    @staticmethod
+    def _require_beam_runtime_image(build, source_context):
+        """Return the image created by Build; never build from Deploy."""
+        fingerprint = RuntimeBuildExecutionService._beam_runtime_fingerprint(source_context)
+        binding = dict((build.manifest or {}).get("beam_runtime_image") or {})
+        image_ref = str(binding.get("image_ref") or "").strip()
+        if not image_ref or not bool(binding.get("published")):
+            raise ValueError(
+                "Este build todavía no tiene una imagen Beam preparada. Ejecuta Build primero. "
+                "Deploy se detuvo antes de sincronizar custom_nodes."
+            )
+        if str(binding.get("fingerprint") or "") != fingerprint:
+            raise ValueError(
+                "El runtime exportado cambió después del último Build de Beam. "
+                "Ejecuta Build nuevamente y después Deploy."
+            )
+        return image_ref, fingerprint
+
+    @staticmethod
     def _prepare_beam_reference_context(image_ref, fingerprint):
         """Create a genuinely tiny Beam context based on a published image."""
         import tempfile
@@ -927,9 +1064,9 @@ class RuntimeBuildExecutionService:
         deploy_root = None
         home = None
         try:
-            image_ref, runtime_fingerprint, image_prepared = (
-                RuntimeBuildExecutionService._ensure_beam_registry_image(
-                    db, build, source_context, deployment
+            image_ref, runtime_fingerprint = (
+                RuntimeBuildExecutionService._require_beam_runtime_image(
+                    build, source_context
                 )
             )
 
