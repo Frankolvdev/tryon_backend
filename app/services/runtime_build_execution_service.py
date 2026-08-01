@@ -636,6 +636,113 @@ class RuntimeBuildExecutionService:
         return digest.hexdigest()
 
     @staticmethod
+    def _beam_immutable_image_ref(build, fingerprint):
+        image_tag = str(build.image_tag or "").strip()
+        if not image_tag:
+            raise ValueError("El build no tiene una etiqueta Docker configurada.")
+        if image_tag.startswith("ghcr.io/your-org/"):
+            raise ValueError(
+                "La imagen configurada todavía usa ghcr.io/your-org. Cambia Imagen del registro "
+                "en Runtime Builder por un repositorio real antes de preparar la imagen Beam."
+            )
+        last = image_tag.rsplit("/", 1)[-1]
+        repository = image_tag.rsplit(":", 1)[0] if ":" in last else image_tag
+        return f"{repository}:beam-{str(fingerprint)[:20]}"
+
+    @staticmethod
+    def _ensure_beam_registry_image(db, build, source_context, deployment):
+        """Build and publish an immutable, Beam-only image for this runtime hash.
+
+        This path never changes the shared Dockerfile used by Modal or RunPod.
+        The first Beam image is built from a provider-specific context. Later
+        runtime changes reuse Docker layers and rebuild only affected node layers.
+        Configuration-only deploys reuse the already published image directly.
+        """
+        fingerprint = RuntimeBuildExecutionService._beam_runtime_fingerprint(source_context)
+        manifest = dict(build.manifest or {})
+        binding = dict(manifest.get("beam_runtime_image") or {})
+        if (
+            str(binding.get("fingerprint") or "") == fingerprint
+            and str(binding.get("image_ref") or "").strip()
+            and bool(binding.get("published"))
+        ):
+            return str(binding["image_ref"]).strip(), fingerprint, False
+
+        image_ref = RuntimeBuildExecutionService._beam_immutable_image_ref(build, fingerprint)
+        deploy_root = None
+        try:
+            deploy_root, context, excluded, reused = (
+                RuntimeBuildExecutionService._prepare_beam_deploy_context(source_context)
+            )
+            dockerfile = context / "Dockerfile"
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                phase="building-runtime-image", progress=25,
+                message="Construyendo imagen incremental exclusiva de Beam.",
+                log=(
+                    f"[beam:image] Imagen inmutable: {image_ref}.\n"
+                    f"[beam:image] Contexto Beam {'reutilizado' if reused else 'preparado'}; "
+                    f"se excluyeron {excluded['directories']} directorios y {excluded['files']} archivos.\n"
+                    "[beam:image] Modal y RunPod no usan este Dockerfile ni este contexto."
+                ),
+            )
+            command = [
+                "docker", "build", "--platform", "linux/amd64",
+                "-t", image_ref, "-f", str(dockerfile), str(context),
+            ]
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            for line in process.stdout or []:
+                RuntimeBuildExecutionService._update_deployment(
+                    db, build, deployment, log="[beam:image] " + line.rstrip()
+                )
+            if process.wait() != 0:
+                raise RuntimeError(
+                    "No fue posible construir la imagen incremental de Beam. "
+                    "Las imágenes y flujos de Modal/RunPod no fueron modificados."
+                )
+
+            RuntimeBuildExecutionService._update_deployment(
+                db, build, deployment,
+                phase="publishing-runtime-image", progress=38,
+                message="Publicando imagen inmutable de Beam.",
+                log=f"[beam:image] Publicando {image_ref} en el registro configurado.",
+            )
+            pushed = subprocess.Popen(
+                ["docker", "push", image_ref],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            for line in pushed.stdout or []:
+                RuntimeBuildExecutionService._update_deployment(
+                    db, build, deployment, log="[beam:image] " + line.rstrip()
+                )
+            if pushed.wait() != 0:
+                raise RuntimeError(
+                    "No fue posible publicar la imagen inmutable de Beam. Ejecuta "
+                    "docker login para el registro configurado y verifica permisos de escritura."
+                )
+        finally:
+            # The persistent Beam context is intentionally retained for Docker layer
+            # reuse. Only temporary derivative directories would be removed here.
+            pass
+
+        manifest["beam_runtime_image"] = {
+            "fingerprint": fingerprint,
+            "image_ref": image_ref,
+            "published": True,
+            "published_at": utc_now().isoformat(),
+            "source": "beam_incremental_registry_image",
+        }
+        build.manifest = manifest
+        db.add(build)
+        db.commit()
+        db.refresh(build)
+        return image_ref, fingerprint, True
+
+    @staticmethod
     def _prepare_beam_reference_context(image_ref, fingerprint):
         """Create a genuinely tiny Beam context based on a published image."""
         import tempfile
@@ -820,41 +927,11 @@ class RuntimeBuildExecutionService:
         deploy_root = None
         home = None
         try:
-            runtime_fingerprint = RuntimeBuildExecutionService._beam_runtime_fingerprint(
-                source_context
+            image_ref, runtime_fingerprint, image_prepared = (
+                RuntimeBuildExecutionService._ensure_beam_registry_image(
+                    db, build, source_context, deployment
+                )
             )
-            manifest = dict(build.manifest or {})
-            beam_binding = dict(manifest.get("beam_runtime_image") or {})
-            bound_fingerprint = str(beam_binding.get("fingerprint") or "")
-            bound_image_ref = str(beam_binding.get("image_ref") or "").strip()
-
-            if bound_fingerprint and bound_fingerprint != runtime_fingerprint:
-                raise ValueError(
-                    "El runtime exportado cambió desde la imagen Beam publicada. "
-                    "Ejecuta Build y Publicar antes de desplegar; se bloqueó la caída "
-                    "silenciosa al build completo para evitar otra espera de horas."
-                )
-
-            image_ref = bound_image_ref or str(build.image_tag or "").strip()
-            if not image_ref or image_ref.startswith("ghcr.io/your-org/"):
-                raise ValueError(
-                    "Beam no tiene una imagen de runtime publicada y reutilizable para este build. "
-                    "Ejecuta Publicar una sola vez desde Runtime Builder. El deploy se detuvo antes "
-                    "de sincronizar custom_nodes; no se permitirá la caída silenciosa al build de horas."
-                )
-
-            # Bind the exact image reference to this runtime fingerprint regardless of
-            # the legacy `published` flag. The reference itself is the source of truth.
-            manifest["beam_runtime_image"] = {
-                "fingerprint": runtime_fingerprint,
-                "image_ref": image_ref,
-                "bound_at": utc_now().isoformat(),
-                "source": "runtime_build_image_tag",
-            }
-            build.manifest = manifest
-            db.add(build)
-            db.commit()
-            db.refresh(build)
 
             fast_reference_deploy = True
             if fast_reference_deploy:
