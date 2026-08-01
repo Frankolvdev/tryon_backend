@@ -588,22 +588,17 @@ class RuntimeBuildExecutionService:
 
     @staticmethod
     def _prepare_beam_deploy_context(source_context):
-        """Create a provider-local Beam context without changing the runtime export.
+        """Create or reuse a persistent Beam-only runtime context.
 
-        The complete functional runtime structure is preserved so Dockerfile COPY/ADD
-        instructions continue to work. Only development metadata, caches, examples,
-        video datasets and Windows-only Blender bundles are pruned. Modal and RunPod
+        Configuration-only deploys (GPU, keep-warm, workers, checkpoint, etc.)
+        must reuse byte-for-byte the same Docker build context. Modal and RunPod
         never use this helper.
         """
+        import hashlib
         import tempfile
 
         source_context = Path(source_context).resolve()
-        deploy_root = Path(tempfile.mkdtemp(prefix="tryon-beam-context-"))
-        deploy_context = deploy_root / "runtime"
-        excluded = {
-            "directories": 0,
-            "files": 0,
-        }
+        excluded = {"directories": 0, "files": 0}
 
         always_excluded_dirs = {
             ".git", ".github", ".pytest_cache", ".mypy_cache",
@@ -611,6 +606,59 @@ class RuntimeBuildExecutionService:
             "docs", "examples", "example", "demo", "demos",
         }
         excluded_suffixes = {".pyc", ".pyo"}
+
+        # Build a stable runtime fingerprint without hashing multi-gigabyte model
+        # files. The exported runtime contains code/dependencies, while models live
+        # in the Beam Volume and are intentionally outside this context.
+        digest = hashlib.sha256()
+        for candidate_name in (
+            "Dockerfile",
+            "runtime_manifest.json",
+            "requirements.txt",
+            "extra_model_paths.yaml",
+        ):
+            candidate = source_context / candidate_name
+            if candidate.is_file():
+                digest.update(candidate_name.encode("utf-8"))
+                digest.update(candidate.read_bytes())
+
+        for candidate in sorted(source_context.rglob("*")):
+            try:
+                relative = candidate.relative_to(source_context)
+            except ValueError:
+                continue
+            lowered = tuple(part.lower() for part in relative.parts)
+            if any(
+                part in always_excluded_dirs
+                or (part.startswith("blender-") and "windows-x64" in part)
+                for part in lowered
+            ):
+                continue
+            if candidate.is_file():
+                if candidate.suffix.lower() in excluded_suffixes:
+                    continue
+                stat = candidate.stat()
+                digest.update(relative.as_posix().encode("utf-8", errors="surrogatepass"))
+                digest.update(str(stat.st_size).encode("ascii"))
+                digest.update(str(stat.st_mtime_ns).encode("ascii"))
+
+        fingerprint = digest.hexdigest()[:24]
+        cache_base = Path(tempfile.gettempdir()) / "tryon-beam-deploy-cache"
+        deploy_root = cache_base / fingerprint
+        deploy_context = deploy_root / "runtime"
+        ready_marker = deploy_root / ".tryon-beam-context-ready.json"
+
+        if deploy_context.is_dir() and ready_marker.is_file():
+            try:
+                marker = json.loads(ready_marker.read_text(encoding="utf-8"))
+            except Exception:
+                marker = {}
+            if marker.get("fingerprint") == fingerprint:
+                return deploy_root, deploy_context, marker.get("excluded", excluded), True
+
+        staging_root = cache_base / f".{fingerprint}-{uuid.uuid4().hex}.tmp"
+        staging_context = staging_root / "runtime"
+        cache_base.mkdir(parents=True, exist_ok=True)
 
         def ignore(directory, names):
             directory_path = Path(directory)
@@ -621,7 +669,6 @@ class RuntimeBuildExecutionService:
                 lower = name.lower()
                 candidate_parts = relative_parts + (lower,)
                 candidate = directory_path / name
-
                 exclude = False
                 if candidate.is_dir():
                     if lower in always_excluded_dirs:
@@ -644,7 +691,6 @@ class RuntimeBuildExecutionService:
                         exclude = True
                     if exclude:
                         excluded["files"] += 1
-
                 if exclude:
                     ignored.append(name)
             return ignored
@@ -652,40 +698,43 @@ class RuntimeBuildExecutionService:
         try:
             shutil.copytree(
                 source_context,
-                deploy_context,
+                staging_context,
                 ignore=ignore,
                 symlinks=True,
             )
+            beamignore = staging_context / ".beamignore"
+            beamignore.write_text(
+                "\n".join([
+                    "**/.git/**",
+                    "**/.github/**",
+                    "**/__pycache__/**",
+                    "**/*.pyc",
+                    "**/*.pyo",
+                    "**/tests/**",
+                    "**/test/**",
+                    "**/docs/**",
+                    "**/examples/**",
+                    "**/example/**",
+                    "**/demo/**",
+                    "**/demos/**",
+                    "**/assets/videos/**",
+                    "**/assets/video/**",
+                    "**/assets/demos/**",
+                    "**/assets/demo/**",
+                    "**/assets/examples/**",
+                    "**/assets/example/**",
+                    "**/blender-*-windows-x64/**",
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            if deploy_root.exists():
+                shutil.rmtree(deploy_root, ignore_errors=True)
+            staging_root.replace(deploy_root)
         except Exception:
-            shutil.rmtree(deploy_root, ignore_errors=True)
+            shutil.rmtree(staging_root, ignore_errors=True)
             raise
 
-        beamignore = deploy_context / ".beamignore"
-        beamignore.write_text(
-            "\n".join([
-                "**/.git/**",
-                "**/.github/**",
-                "**/__pycache__/**",
-                "**/*.pyc",
-                "**/*.pyo",
-                "**/tests/**",
-                "**/test/**",
-                "**/docs/**",
-                "**/examples/**",
-                "**/example/**",
-                "**/demo/**",
-                "**/demos/**",
-                "**/assets/videos/**",
-                "**/assets/video/**",
-                "**/assets/demos/**",
-                "**/assets/demo/**",
-                "**/assets/examples/**",
-                "**/assets/example/**",
-                "**/blender-*-windows-x64/**",
-            ]) + "\n",
-            encoding="utf-8",
-        )
-        return deploy_root, deploy_context, excluded
+        return deploy_root, deploy_context, excluded, False
 
     @staticmethod
     def _beam_deployment(db, build, deployment):
@@ -731,7 +780,7 @@ class RuntimeBuildExecutionService:
         deploy_root = None
         home = None
         try:
-            deploy_root, context, excluded = RuntimeBuildExecutionService._prepare_beam_deploy_context(
+            deploy_root, context, excluded, reused_context = RuntimeBuildExecutionService._prepare_beam_deploy_context(
                 source_context
             )
             dockerfile = context / "Dockerfile"
@@ -742,177 +791,200 @@ class RuntimeBuildExecutionService:
             app_file = deploy_root / "tryon_beam_app.py"
             shutil.copy2(source_app, app_file)
 
-            # Beam injects its task-queue runner into the custom image and that
-            # runner imports betterproto before our handler/on_start executes.
-            # Harden only Beam's temporary Docker context so Modal, RunPod and
-            # the persisted runtime export remain byte-for-byte untouched.
-            docker_text = dockerfile.read_text(encoding="utf-8").rstrip()
+            if not reused_context:
+                # Beam injects its task-queue runner into the custom image and that
+                # runner imports betterproto before our handler/on_start executes.
+                # Harden only Beam's temporary Docker context so Modal, RunPod and
+                # the persisted runtime export remain byte-for-byte untouched.
+                docker_text = dockerfile.read_text(encoding="utf-8").rstrip()
 
-            # Beam aborts an individual image-build instruction after roughly
-            # five minutes. The exported runtime installs all ComfyUI
-            # requirements in one RUN, which can exceed that limit even when
-            # the installation itself is healthy. Split only that Beam copy
-            # into cacheable batches; the persisted runtime, Modal and RunPod
-            # remain untouched.
-            monolithic_comfy_install = (
-                "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > "
-                "/tmp/runtime-constraints.txt && sed -Ei "
-                "'s/^transformers.*$/transformers>=4.50.3,<5/I; "
-                "/^(torch|torchvision|torchaudio|xformers|triton|"
-                "onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' "
-                "/app/ComfyUI/requirements.txt && python -m pip install "
-                "--constraint /tmp/runtime-constraints.txt "
-                "-r /app/ComfyUI/requirements.txt"
-            )
-            split_comfy_install = "\n".join([
-                "# Beam-only: split ComfyUI dependencies into cacheable batches.",
-                "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && "
-                "sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; "
-                "/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)"
-                "([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt",
-                "RUN /opt/conda/bin/python - <<'PY'\n"
-                "from pathlib import Path\n"
-                "src = Path('/app/ComfyUI/requirements.txt')\n"
-                "items = [line for line in src.read_text().splitlines() "
-                "if line.strip() and not line.lstrip().startswith('#')]\n"
-                "groups = [items[i::4] for i in range(4)]\n"
-                "for index, group in enumerate(groups, 1):\n"
-                "    Path(f'/tmp/comfy-requirements-{index}.txt').write_text("
-                "'\\n'.join(group) + ('\\n' if group else ''))\n"
-                "PY",
-                "RUN if [ -s /tmp/comfy-requirements-1.txt ]; then "
-                "/opt/conda/bin/python -m pip install --constraint "
-                "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-1.txt; fi",
-                "RUN if [ -s /tmp/comfy-requirements-2.txt ]; then "
-                "/opt/conda/bin/python -m pip install --constraint "
-                "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-2.txt; fi",
-                "RUN if [ -s /tmp/comfy-requirements-3.txt ]; then "
-                "/opt/conda/bin/python -m pip install --constraint "
-                "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-3.txt; fi",
-                "RUN if [ -s /tmp/comfy-requirements-4.txt ]; then "
-                "/opt/conda/bin/python -m pip install --constraint "
-                "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-4.txt; fi",
-                'RUN /opt/conda/bin/python -c "import base64; exec(base64.b64decode(\'aW1wb3J0IHJlCmltcG9ydCBzdWJwcm9jZXNzCmltcG9ydCBzeXMKcmVzdWx0ID0gc3VicHJvY2Vzcy5ydW4oW3N5cy5leGVjdXRhYmxlLCAnLW0nLCAncGlwJywgJ2NoZWNrJ10sIHRleHQ9VHJ1ZSwgc3Rkb3V0PXN1YnByb2Nlc3MuUElQRSwgc3RkZXJyPXN1YnByb2Nlc3MuU1RET1VUKQpvdXRwdXQgPSByZXN1bHQuc3Rkb3V0IG9yICcnCmlmIG91dHB1dDoKICAgIHByaW50KG91dHB1dCwgZW5kPScnIGlmIG91dHB1dC5lbmRzd2l0aCgnXG4nKSBlbHNlICdcbicpCnVuZXhwZWN0ZWQgPSBbbGluZS5zdHJpcCgpIGZvciBsaW5lIGluIG91dHB1dC5zcGxpdGxpbmVzKCkgaWYgbGluZS5zdHJpcCgpIGFuZCBsaW5lLnN0cmlwKCkgIT0gJ05vIGJyb2tlbiByZXF1aXJlbWVudHMgZm91bmQuJyBhbmQgbm90IHJlLmZ1bGxtYXRjaChyJ2RlY29yZCg/OlxzK1teIF0rKT8gaXMgbm90IHN1cHBvcnRlZCBvbiB0aGlzIHBsYXRmb3JtJywgbGluZS5zdHJpcCgpLCBmbGFncz1yZS5JR05PUkVDQVNFKV0KaWYgcmVzdWx0LnJldHVybmNvZGUgYW5kIHVuZXhwZWN0ZWQ6CiAgICBwcmludCgnW2JlYW0tYnVpbGRdIHBpcCBjaGVjayBkZXRlY3RlZCB1bnN1cHBvcnRlZCBjb25mbGljdHM6JywgZmlsZT1zeXMuc3RkZXJyKQogICAgZm9yIGxpbmUgaW4gdW5leHBlY3RlZDoKICAgICAgICBwcmludChmJyAgLSB7bGluZX0nLCBmaWxlPXN5cy5zdGRlcnIpCiAgICByYWlzZSBTeXN0ZW1FeGl0KHJlc3VsdC5yZXR1cm5jb2RlKQppZiByZXN1bHQucmV0dXJuY29kZToKICAgIHByaW50KCdbYmVhbS1idWlsZF0gSWdub3Jpbmcga25vd24gZGVjb3JkIHBsYXRmb3JtIG1ldGFkYXRhIHdhcm5pbmcgb25seS4nKQplbHNlOgogICAgcHJpbnQoJ1tiZWFtLWJ1aWxkXSBwaXAgY2hlY2sgT0snKQo=\'))"',
-            ])
-            if monolithic_comfy_install not in docker_text:
-                raise ValueError(
-                    "No se encontró la instalación monolítica de requisitos de "
-                    "ComfyUI en el Dockerfile temporal de Beam; se aborta para "
-                    "no alterar una estructura desconocida."
+                # Beam aborts an individual image-build instruction after roughly
+                # five minutes. The exported runtime installs all ComfyUI
+                # requirements in one RUN, which can exceed that limit even when
+                # the installation itself is healthy. Split only that Beam copy
+                # into cacheable batches; the persisted runtime, Modal and RunPod
+                # remain untouched.
+                monolithic_comfy_install = (
+                    "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > "
+                    "/tmp/runtime-constraints.txt && sed -Ei "
+                    "'s/^transformers.*$/transformers>=4.50.3,<5/I; "
+                    "/^(torch|torchvision|torchaudio|xformers|triton|"
+                    "onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' "
+                    "/app/ComfyUI/requirements.txt && python -m pip install "
+                    "--constraint /tmp/runtime-constraints.txt "
+                    "-r /app/ComfyUI/requirements.txt"
                 )
-            docker_text = docker_text.replace(
-                monolithic_comfy_install, split_comfy_install, 1
-            )
-
-            # The exported runtime also installs every custom-node requirements
-            # file inside one shell loop. Beam treats that complete loop as one
-            # image-build instruction, so a slow package (notably SAM 2 from
-            # comfyui-impact-pack) can terminate the whole layer. Replace only
-            # Beam's temporary copy with one cacheable RUN per custom node.
-            # Custom nodes are materialized inside the Docker image, not in the
-            # temporary Windows deploy context. Discover and install them only
-            # during the Beam image build. This branch is Beam-only and leaves
-            # the persisted runtime, Modal and RunPod untouched.
-            custom_install_pattern = re.compile(
-                r"^RUN find /app/ComfyUI/custom_nodes -type f -name requirements\.txt "
-                r"-print \| sort \| while IFS= read -r req; do .*?; done$",
-                re.MULTILINE,
-            )
-            # Build one Docker RUN per custom-node requirements file from the
-            # already-created Beam-only temporary context. This is intentionally
-            # generated here (after copytree), so each node becomes an independent
-            # cacheable layer instead of one 20+ minute shell loop.
-            custom_nodes_root = context / "custom_nodes"
-            requirement_files = []
-            if custom_nodes_root.is_dir():
-                requirement_files = sorted(
-                    path for path in custom_nodes_root.rglob("requirements.txt")
-                    if path.is_file()
-                )
-
-            general_requirements = []
-            impact_requirements = None
-            for requirement_path in requirement_files:
-                relative = requirement_path.relative_to(context).as_posix()
-                if relative.lower() == "custom_nodes/comfyui-impact-pack/requirements.txt":
-                    impact_requirements = relative
-                else:
-                    general_requirements.append(relative)
-
-            custom_install_lines = [
-                "# Beam-only: one cacheable dependency layer per custom node.",
-            ]
-            for relative in general_requirements:
-                image_path = "/app/ComfyUI/" + relative
-                custom_install_lines.append(
-                    "RUN req='" + image_path + "'; "
-                    "echo '[runtime] Installing' \"$req\"; "
-                    "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
-                    "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" \"$req\"; "
+                split_comfy_install = "\n".join([
+                    "# Beam-only: split ComfyUI dependencies into cacheable batches.",
+                    "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && "
+                    "sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; "
+                    "/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)"
+                    "([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt",
+                    "RUN /opt/conda/bin/python - <<'PY'\n"
+                    "from pathlib import Path\n"
+                    "src = Path('/app/ComfyUI/requirements.txt')\n"
+                    "items = [line for line in src.read_text().splitlines() "
+                    "if line.strip() and not line.lstrip().startswith('#')]\n"
+                    "groups = [items[i::4] for i in range(4)]\n"
+                    "for index, group in enumerate(groups, 1):\n"
+                    "    Path(f'/tmp/comfy-requirements-{index}.txt').write_text("
+                    "'\\n'.join(group) + ('\\n' if group else ''))\n"
+                    "PY",
+                    "RUN if [ -s /tmp/comfy-requirements-1.txt ]; then "
                     "/opt/conda/bin/python -m pip install --constraint "
-                    "/tmp/runtime-constraints.txt -r \"$req\""
-                )
-
-            if impact_requirements:
-                impact_image_path = "/app/ComfyUI/" + impact_requirements
-                custom_install_lines.extend([
-                    "# Beam-only: install Impact Pack without SAM2 separately.",
-                    "RUN req='" + impact_image_path + "'; "
-                    "echo '[runtime] Installing Impact Pack'; "
-                    "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
-                    "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" \"$req\"; "
-                    "grep -v 'github.com/facebookresearch/sam2' \"$req\" > "
-                    "/tmp/impact-pack-no-sam2.txt; "
-                    "if [ -s /tmp/impact-pack-no-sam2.txt ]; then "
+                    "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-1.txt; fi",
+                    "RUN if [ -s /tmp/comfy-requirements-2.txt ]; then "
                     "/opt/conda/bin/python -m pip install --constraint "
-                    "/tmp/runtime-constraints.txt -r /tmp/impact-pack-no-sam2.txt; fi",
-                    "# Beam-only: install SAM2 without its optional CUDA extension.",
-                    "RUN req='" + impact_image_path + "'; "
-                    "if grep -q 'github.com/facebookresearch/sam2' \"$req\"; then "
-                    "sam2_req=$(grep 'github.com/facebookresearch/sam2' \"$req\" | head -n 1); "
-                    "SAM2_BUILD_CUDA=0 /opt/conda/bin/python -m pip install "
-                    "--no-build-isolation --constraint /tmp/runtime-constraints.txt "
-                    "\"$sam2_req\"; "
-                    "/opt/conda/bin/python -c \"import sam2; "
-                    "print('Beam SAM2 dependency OK')\"; fi",
+                    "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-2.txt; fi",
+                    "RUN if [ -s /tmp/comfy-requirements-3.txt ]; then "
+                    "/opt/conda/bin/python -m pip install --constraint "
+                    "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-3.txt; fi",
+                    "RUN if [ -s /tmp/comfy-requirements-4.txt ]; then "
+                    "/opt/conda/bin/python -m pip install --constraint "
+                    "/tmp/runtime-constraints.txt -r /tmp/comfy-requirements-4.txt; fi",
+                    'RUN /opt/conda/bin/python -c "import base64; exec(base64.b64decode(\'aW1wb3J0IHJlCmltcG9ydCBzdWJwcm9jZXNzCmltcG9ydCBzeXMKcmVzdWx0ID0gc3VicHJvY2Vzcy5ydW4oW3N5cy5leGVjdXRhYmxlLCAnLW0nLCAncGlwJywgJ2NoZWNrJ10sIHRleHQ9VHJ1ZSwgc3Rkb3V0PXN1YnByb2Nlc3MuUElQRSwgc3RkZXJyPXN1YnByb2Nlc3MuU1RET1VUKQpvdXRwdXQgPSByZXN1bHQuc3Rkb3V0IG9yICcnCmlmIG91dHB1dDoKICAgIHByaW50KG91dHB1dCwgZW5kPScnIGlmIG91dHB1dC5lbmRzd2l0aCgnXG4nKSBlbHNlICdcbicpCnVuZXhwZWN0ZWQgPSBbbGluZS5zdHJpcCgpIGZvciBsaW5lIGluIG91dHB1dC5zcGxpdGxpbmVzKCkgaWYgbGluZS5zdHJpcCgpIGFuZCBsaW5lLnN0cmlwKCkgIT0gJ05vIGJyb2tlbiByZXF1aXJlbWVudHMgZm91bmQuJyBhbmQgbm90IHJlLmZ1bGxtYXRjaChyJ2RlY29yZCg/OlxzK1teIF0rKT8gaXMgbm90IHN1cHBvcnRlZCBvbiB0aGlzIHBsYXRmb3JtJywgbGluZS5zdHJpcCgpLCBmbGFncz1yZS5JR05PUkVDQVNFKV0KaWYgcmVzdWx0LnJldHVybmNvZGUgYW5kIHVuZXhwZWN0ZWQ6CiAgICBwcmludCgnW2JlYW0tYnVpbGRdIHBpcCBjaGVjayBkZXRlY3RlZCB1bnN1cHBvcnRlZCBjb25mbGljdHM6JywgZmlsZT1zeXMuc3RkZXJyKQogICAgZm9yIGxpbmUgaW4gdW5leHBlY3RlZDoKICAgICAgICBwcmludChmJyAgLSB7bGluZX0nLCBmaWxlPXN5cy5zdGRlcnIpCiAgICByYWlzZSBTeXN0ZW1FeGl0KHJlc3VsdC5yZXR1cm5jb2RlKQppZiByZXN1bHQucmV0dXJuY29kZToKICAgIHByaW50KCdbYmVhbS1idWlsZF0gSWdub3Jpbmcga25vd24gZGVjb3JkIHBsYXRmb3JtIG1ldGFkYXRhIHdhcm5pbmcgb25seS4nKQplbHNlOgogICAgcHJpbnQoJ1tiZWFtLWJ1aWxkXSBwaXAgY2hlY2sgT0snKQo=\'))"',
                 ])
-
-            # If the export has no custom-node requirements, remove the original
-            # monolithic installer rather than failing deployment. The runtime may
-            # legitimately contain nodes without Python dependencies.
-            if not requirement_files:
-                custom_install_lines.append(
-                    "RUN echo '[runtime] No custom-node requirements detected.'"
+                if monolithic_comfy_install not in docker_text:
+                    raise ValueError(
+                        "No se encontró la instalación monolítica de requisitos de "
+                        "ComfyUI en el Dockerfile temporal de Beam; se aborta para "
+                        "no alterar una estructura desconocida."
+                    )
+                docker_text = docker_text.replace(
+                    monolithic_comfy_install, split_comfy_install, 1
                 )
 
-            split_custom_install = "\n".join(custom_install_lines)
-            docker_text, custom_install_count = custom_install_pattern.subn(
-                split_custom_install, docker_text, count=1
-            )
-            if custom_install_count != 1:
-                raise ValueError(
-                    "No se encontró la instrucción Docker esperada para instalar "
-                    "requisitos de custom nodes en la copia temporal de Beam. "
-                    "El runtime exportado no se modificó."
+                # The exported runtime also installs every custom-node requirements
+                # file inside one shell loop. Beam treats that complete loop as one
+                # image-build instruction, so a slow package (notably SAM 2 from
+                # comfyui-impact-pack) can terminate the whole layer. Replace only
+                # Beam's temporary copy with one cacheable RUN per custom node.
+                # Custom nodes are materialized inside the Docker image, not in the
+                # temporary Windows deploy context. Discover and install them only
+                # during the Beam image build. This branch is Beam-only and leaves
+                # the persisted runtime, Modal and RunPod untouched.
+                custom_install_pattern = re.compile(
+                    r"^RUN find /app/ComfyUI/custom_nodes -type f -name requirements\.txt "
+                    r"-print \| sort \| while IFS= read -r req; do .*?; done$",
+                    re.MULTILINE,
                 )
+                # Build one Docker RUN per custom-node requirements file from the
+                # already-created Beam-only temporary context. This is intentionally
+                # generated here (after copytree), so each node becomes an independent
+                # cacheable layer instead of one 20+ minute shell loop.
+                custom_nodes_root = context / "custom_nodes"
+                requirement_files = []
+                if custom_nodes_root.is_dir():
+                    requirement_files = sorted(
+                        path for path in custom_nodes_root.rglob("requirements.txt")
+                        if path.is_file()
+                    )
 
-            # Beam injects its task-queue runner into the custom image and that
-            # runner imports betterproto before our handler/on_start executes.
-            docker_text += (
-                "\n\n# Beam-only Beta9 runner dependency and exact fail-fast validation.\n"
-                "RUN /opt/conda/bin/python -m pip uninstall -y "
-                "betterproto betterproto-beta9 || true\n"
-                "RUN /opt/conda/bin/python -m pip install --no-cache-dir "
-                "'betterproto-beta9==2.0.1' 'cloudpickle>=2.2,<4' "
-                "'watchdog>=3,<7'\n"
-                "RUN /opt/conda/bin/python -c \"import importlib; "
-                "[importlib.import_module(name) for name in ("
-                "'betterproto.grpcstub.grpcio_client','cloudpickle',"
-                "'watchdog.events')]; "
-                "print('Beam minimal runner dependencies OK')\"\n"
-                'RUN /opt/conda/bin/python -c "import base64; exec(base64.b64decode(\'aW1wb3J0IHJlCmltcG9ydCBzdWJwcm9jZXNzCmltcG9ydCBzeXMKcmVzdWx0ID0gc3VicHJvY2Vzcy5ydW4oW3N5cy5leGVjdXRhYmxlLCAnLW0nLCAncGlwJywgJ2NoZWNrJ10sIHRleHQ9VHJ1ZSwgc3Rkb3V0PXN1YnByb2Nlc3MuUElQRSwgc3RkZXJyPXN1YnByb2Nlc3MuU1RET1VUKQpvdXRwdXQgPSByZXN1bHQuc3Rkb3V0IG9yICcnCmlmIG91dHB1dDoKICAgIHByaW50KG91dHB1dCwgZW5kPScnIGlmIG91dHB1dC5lbmRzd2l0aCgnXG4nKSBlbHNlICdcbicpCnVuZXhwZWN0ZWQgPSBbbGluZS5zdHJpcCgpIGZvciBsaW5lIGluIG91dHB1dC5zcGxpdGxpbmVzKCkgaWYgbGluZS5zdHJpcCgpIGFuZCBsaW5lLnN0cmlwKCkgIT0gJ05vIGJyb2tlbiByZXF1aXJlbWVudHMgZm91bmQuJyBhbmQgbm90IHJlLmZ1bGxtYXRjaChyJ2RlY29yZCg/OlxzK1teIF0rKT8gaXMgbm90IHN1cHBvcnRlZCBvbiB0aGlzIHBsYXRmb3JtJywgbGluZS5zdHJpcCgpLCBmbGFncz1yZS5JR05PUkVDQVNFKV0KaWYgcmVzdWx0LnJldHVybmNvZGUgYW5kIHVuZXhwZWN0ZWQ6CiAgICBwcmludCgnW2JlYW0tYnVpbGRdIHBpcCBjaGVjayBkZXRlY3RlZCB1bnN1cHBvcnRlZCBjb25mbGljdHM6JywgZmlsZT1zeXMuc3RkZXJyKQogICAgZm9yIGxpbmUgaW4gdW5leHBlY3RlZDoKICAgICAgICBwcmludChmJyAgLSB7bGluZX0nLCBmaWxlPXN5cy5zdGRlcnIpCiAgICByYWlzZSBTeXN0ZW1FeGl0KHJlc3VsdC5yZXR1cm5jb2RlKQppZiByZXN1bHQucmV0dXJuY29kZToKICAgIHByaW50KCdbYmVhbS1idWlsZF0gSWdub3Jpbmcga25vd24gZGVjb3JkIHBsYXRmb3JtIG1ldGFkYXRhIHdhcm5pbmcgb25seS4nKQplbHNlOgogICAgcHJpbnQoJ1tiZWFtLWJ1aWxkXSBwaXAgY2hlY2sgT0snKQo=\'))"'
-            )
-            dockerfile.write_text(docker_text, encoding="utf-8")
+                general_requirements = []
+                impact_requirements = None
+                for requirement_path in requirement_files:
+                    relative = requirement_path.relative_to(context).as_posix()
+                    if relative.lower() == "custom_nodes/comfyui-impact-pack/requirements.txt":
+                        impact_requirements = relative
+                    else:
+                        general_requirements.append(relative)
+
+                custom_install_lines = [
+                    "# Beam-only: one cacheable dependency layer per custom node.",
+                ]
+                for relative in general_requirements:
+                    image_path = "/app/ComfyUI/" + relative
+                    custom_install_lines.append(
+                        "RUN req='" + image_path + "'; "
+                        "echo '[runtime] Installing' \"$req\"; "
+                        "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
+                        "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" \"$req\"; "
+                        "/opt/conda/bin/python -m pip install --constraint "
+                        "/tmp/runtime-constraints.txt -r \"$req\""
+                    )
+
+                if impact_requirements:
+                    impact_image_path = "/app/ComfyUI/" + impact_requirements
+                    custom_install_lines.extend([
+                        "# Beam-only: install Impact Pack without SAM2 separately.",
+                        "RUN req='" + impact_image_path + "'; "
+                        "echo '[runtime] Installing Impact Pack'; "
+                        "sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|"
+                        "onnxruntime-gpu|flash-attn)([< >=!~ ;]|\\$)/Id\" \"$req\"; "
+                        "grep -v 'github.com/facebookresearch/sam2' \"$req\" > "
+                        "/tmp/impact-pack-no-sam2.txt; "
+                        "if [ -s /tmp/impact-pack-no-sam2.txt ]; then "
+                        "/opt/conda/bin/python -m pip install --constraint "
+                        "/tmp/runtime-constraints.txt -r /tmp/impact-pack-no-sam2.txt; fi",
+                        "# Beam-only: install SAM2 without its optional CUDA extension.",
+                        "RUN req='" + impact_image_path + "'; "
+                        "if grep -q 'github.com/facebookresearch/sam2' \"$req\"; then "
+                        "sam2_req=$(grep 'github.com/facebookresearch/sam2' \"$req\" | head -n 1); "
+                        "SAM2_BUILD_CUDA=0 /opt/conda/bin/python -m pip install "
+                        "--no-build-isolation --constraint /tmp/runtime-constraints.txt "
+                        "\"$sam2_req\"; "
+                        "/opt/conda/bin/python -c \"import sam2; "
+                        "print('Beam SAM2 dependency OK')\"; fi",
+                    ])
+
+                # If the export has no custom-node requirements, remove the original
+                # monolithic installer rather than failing deployment. The runtime may
+                # legitimately contain nodes without Python dependencies.
+                if not requirement_files:
+                    custom_install_lines.append(
+                        "RUN echo '[runtime] No custom-node requirements detected.'"
+                    )
+
+                split_custom_install = "\n".join(custom_install_lines)
+                docker_text, custom_install_count = custom_install_pattern.subn(
+                    split_custom_install, docker_text, count=1
+                )
+                if custom_install_count != 1:
+                    raise ValueError(
+                        "No se encontró la instrucción Docker esperada para instalar "
+                        "requisitos de custom nodes en la copia temporal de Beam. "
+                        "El runtime exportado no se modificó."
+                    )
+
+                # Beam injects its task-queue runner into the custom image and that
+                # runner imports betterproto before our handler/on_start executes.
+                docker_text += (
+                    "\n\n# Beam-only Beta9 runner dependency and exact fail-fast validation.\n"
+                    "RUN /opt/conda/bin/python -m pip uninstall -y "
+                    "betterproto betterproto-beta9 || true\n"
+                    "RUN /opt/conda/bin/python -m pip install --no-cache-dir "
+                    "'betterproto-beta9==2.0.1' 'cloudpickle>=2.2,<4' "
+                    "'watchdog>=3,<7'\n"
+                    "RUN /opt/conda/bin/python -c \"import importlib; "
+                    "[importlib.import_module(name) for name in ("
+                    "'betterproto.grpcstub.grpcio_client','cloudpickle',"
+                    "'watchdog.events')]; "
+                    "print('Beam minimal runner dependencies OK')\"\n"
+                    'RUN /opt/conda/bin/python -c "import base64; exec(base64.b64decode(\'aW1wb3J0IHJlCmltcG9ydCBzdWJwcm9jZXNzCmltcG9ydCBzeXMKcmVzdWx0ID0gc3VicHJvY2Vzcy5ydW4oW3N5cy5leGVjdXRhYmxlLCAnLW0nLCAncGlwJywgJ2NoZWNrJ10sIHRleHQ9VHJ1ZSwgc3Rkb3V0PXN1YnByb2Nlc3MuUElQRSwgc3RkZXJyPXN1YnByb2Nlc3MuU1RET1VUKQpvdXRwdXQgPSByZXN1bHQuc3Rkb3V0IG9yICcnCmlmIG91dHB1dDoKICAgIHByaW50KG91dHB1dCwgZW5kPScnIGlmIG91dHB1dC5lbmRzd2l0aCgnXG4nKSBlbHNlICdcbicpCnVuZXhwZWN0ZWQgPSBbbGluZS5zdHJpcCgpIGZvciBsaW5lIGluIG91dHB1dC5zcGxpdGxpbmVzKCkgaWYgbGluZS5zdHJpcCgpIGFuZCBsaW5lLnN0cmlwKCkgIT0gJ05vIGJyb2tlbiByZXF1aXJlbWVudHMgZm91bmQuJyBhbmQgbm90IHJlLmZ1bGxtYXRjaChyJ2RlY29yZCg/OlxzK1teIF0rKT8gaXMgbm90IHN1cHBvcnRlZCBvbiB0aGlzIHBsYXRmb3JtJywgbGluZS5zdHJpcCgpLCBmbGFncz1yZS5JR05PUkVDQVNFKV0KaWYgcmVzdWx0LnJldHVybmNvZGUgYW5kIHVuZXhwZWN0ZWQ6CiAgICBwcmludCgnW2JlYW0tYnVpbGRdIHBpcCBjaGVjayBkZXRlY3RlZCB1bnN1cHBvcnRlZCBjb25mbGljdHM6JywgZmlsZT1zeXMuc3RkZXJyKQogICAgZm9yIGxpbmUgaW4gdW5leHBlY3RlZDoKICAgICAgICBwcmludChmJyAgLSB7bGluZX0nLCBmaWxlPXN5cy5zdGRlcnIpCiAgICByYWlzZSBTeXN0ZW1FeGl0KHJlc3VsdC5yZXR1cm5jb2RlKQppZiByZXN1bHQucmV0dXJuY29kZToKICAgIHByaW50KCdbYmVhbS1idWlsZF0gSWdub3Jpbmcga25vd24gZGVjb3JkIHBsYXRmb3JtIG1ldGFkYXRhIHdhcm5pbmcgb25seS4nKQplbHNlOgogICAgcHJpbnQoJ1tiZWFtLWJ1aWxkXSBwaXAgY2hlY2sgT0snKQo=\'))"'
+                )
+                dockerfile.write_text(docker_text, encoding="utf-8")
+                (deploy_root / ".tryon-beam-context-ready.json").write_text(
+                    json.dumps(
+                        {
+                            "fingerprint": deploy_root.name,
+                            "excluded": excluded,
+                            "prepared_at": utc_now().isoformat(),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                RuntimeBuildExecutionService._update_deployment(
+                    db, build, deployment,
+                    phase="preparing-runtime", progress=40,
+                    message="Reutilizando imagen Beam ya preparada.",
+                    log=(
+                        "[beam] Contexto Docker persistente reutilizado. "
+                        "No se copiarán ni regenerarán las capas del runtime."
+                    ),
+                )
 
             deployment_name = str(
                 cfg.deployment_name or "tryon-generation-runtime"
@@ -956,8 +1028,14 @@ class RuntimeBuildExecutionService:
             RuntimeBuildExecutionService._update_deployment(
                 db, build, deployment,
                 phase="building-image", progress=45,
-                message="Contexto Beam mínimo listo; construyendo imagen Docker.",
+                message=(
+                    "Contexto Beam reutilizado; publicando configuración."
+                    if reused_context else
+                    "Contexto Beam mínimo listo; construyendo imagen Docker."
+                ),
                 log=(
+                    "[beam] Contexto Docker persistente reutilizado; Beam debe usar la imagen cacheada."
+                    if reused_context else
                     "[beam] Contexto mínimo creado conservando la estructura funcional del runtime. "
                     f"Se excluyeron {excluded['directories']} directorios y "
                     f"{excluded['files']} archivos prescindibles."
@@ -1082,8 +1160,8 @@ class RuntimeBuildExecutionService:
         finally:
             if home:
                 shutil.rmtree(home, ignore_errors=True)
-            if deploy_root:
-                shutil.rmtree(deploy_root, ignore_errors=True)
+            # deploy_root is a persistent Beam-only cache. It is deliberately
+            # preserved so configuration-only redeploys reuse the exact image.
 
     @staticmethod
     def cancel_deployment(db, build, deployment_id):
