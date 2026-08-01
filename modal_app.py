@@ -533,6 +533,7 @@ def _proxy_app():
     scaledown_window=SCALEDOWN_WINDOW,
     memory=CPU_MEMORY_REQUEST_MB,
     enable_memory_snapshot=True,
+    experimental_options={"enable_gpu_snapshot": True},
 )
 @modal.concurrent(max_inputs=GENERATION_CONCURRENCY)
 class ComfyUIServer:
