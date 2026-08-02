@@ -31,6 +31,7 @@ class RuntimeBuilderService:
     DEFAULT_RUNTIME_ENGINE_INSTALL_PATH = "/opt/comfyui-runtime-engine"
     DEFAULT_MODAL_RESIDENT_MODELS = (
         "diffusion_models/realDream_klein9BV1.safetensors",
+        "text_encoders/qwen_3_8b.safetensors",
     )
 
 
@@ -361,10 +362,24 @@ event_log = "/tmp/comfy-runtime-events.jsonl"
                         "weight_dtype": "default",
                     },
                 },
-                "runtime-resident-sink": {
+                "runtime-resident-clip": {
+                    "class_type": "CLIPLoader",
+                    "inputs": {
+                        "clip_name": "qwen_3_8b.safetensors",
+                        "type": "flux2",
+                        "device": "default",
+                    },
+                },
+                "runtime-resident-unet-sink": {
                     "class_type": "TryonSnapshotWarmupSink",
                     "inputs": {
                         "value": ["runtime-resident-unet", 0],
+                    },
+                },
+                "runtime-resident-clip-sink": {
+                    "class_type": "TryonSnapshotWarmupSink",
+                    "inputs": {
+                        "value": ["runtime-resident-clip", 0],
                     },
                 },
             },

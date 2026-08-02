@@ -7,9 +7,10 @@ def test_modal_engine_config_and_selective_warmup():
 
     assert 'gpu_enabled = true' in config
     assert '"diffusion_models/realDream_klein9BV1.safetensors"' in config
+    assert '"text_encoders/qwen_3_8b.safetensors"' in config
     assert 'model_roots = ["/models"]' in config
     assert "realDream_klein9BV1.safetensors" in warmup
-    assert "qwen_3_8b.safetensors" not in warmup
+    assert "qwen_3_8b.safetensors" in warmup
     assert "flux2-vae.safetensors" not in warmup
 
 

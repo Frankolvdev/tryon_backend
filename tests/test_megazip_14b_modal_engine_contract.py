@@ -5,6 +5,7 @@ def test_modal_runtime_engine_config_is_selective():
     content = RuntimeBuilderService._modal_runtime_engine_toml("/models")
     assert 'gpu_enabled = true' in content
     assert '"diffusion_models/realDream_klein9BV1.safetensors"' in content
+    assert '"text_encoders/qwen_3_8b.safetensors"' in content
     assert 'model_roots = ["/models"]' in content
     assert 'warmup_workflow = "/app/runtime/modal-snapshot-warmup.json"' in content
 
@@ -13,7 +14,7 @@ def test_modal_warmup_only_loads_resident_model():
     content = RuntimeBuilderService._modal_snapshot_warmup_workflow()
     assert "realDream_klein9BV1.safetensors" in content
     assert "TryonSnapshotWarmupSink" in content
-    assert "qwen_3_8b.safetensors" not in content
+    assert "qwen_3_8b.safetensors" in content
     assert "flux2-vae.safetensors" not in content
     assert "sam3.pt" not in content
 
