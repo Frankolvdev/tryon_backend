@@ -295,6 +295,7 @@ def generate_files(db: Session = Depends(get_db)):
     return RuntimeBuilderService.generate(
         get_or_create(db),
         modal_volume_name=modal_config.volume_name,
+        modal_resident_models=modal_config.snapshot_resident_models,
     )
 
 

@@ -1561,7 +1561,7 @@ class RuntimeBuildExecutionService:
             engine = ai_engine_settings_service.get(db)
             # The provider form is the deployment source of truth for the GPU.
             # Fall back to Motor IA only for installations created before this field existed.
-            selected_gpu = str(getattr(cfg, "gpu", "") or engine.modal_gpu or "L40S").strip()
+            selected_gpu = str(engine.modal_gpu or getattr(cfg, "gpu", "") or "L40S").strip()
             missing = []
             if not cfg.enabled: missing.append("activar Modal")
             if not cfg.token_id: missing.append("Token ID")
@@ -1650,7 +1650,7 @@ class RuntimeBuildExecutionService:
                 raise ValueError('El build debe finalizar correctamente antes de subirlo a Modal.')
             cfg=InfrastructureProviderService.get_modal(db)
             engine=ai_engine_settings_service.get(db)
-            selected_gpu=str(getattr(cfg, "gpu", "") or engine.modal_gpu or "L40S").strip()
+            selected_gpu=str(engine.modal_gpu or getattr(cfg, "gpu", "") or "L40S").strip()
             if not cfg.enabled or not cfg.token_id or not cfg.token_secret:
                 raise ValueError('Activa y configura Modal en Proveedores de infraestructura.')
             executable=shutil.which('modal')

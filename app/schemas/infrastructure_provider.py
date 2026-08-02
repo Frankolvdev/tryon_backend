@@ -10,6 +10,11 @@ class ModalProviderConfig(BaseModel):
     runtime_url: str = Field(default="", max_length=1000)
     volume_name: str = Field(default="tryon-models", min_length=1, max_length=120)
     gpu: str = Field(default="L40S", min_length=1, max_length=120)
+    snapshot_resident_models: list[str] = Field(default_factory=lambda: [
+        "diffusion_models/realDream_klein9BV1.safetensors",
+        "text_encoders/qwen_3_8b.safetensors",
+        "unet/Flux2-Klein-9B-True-v2-bf16.safetensors",
+    ])
     timeout_seconds: int = Field(default=900, ge=60, le=86400)
 
 
