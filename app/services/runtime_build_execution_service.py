@@ -1599,6 +1599,8 @@ class RuntimeBuildExecutionService:
                 [executable, "deploy", "--name", cfg.app_name, "--env", cfg.environment, str(app_file)], cwd=str(context),
                 env={**InfrastructureProviderService._modal_env(cfg),
                     "TRYON_MODAL_GPU": selected_gpu,
+                    "TRYON_MODAL_REGION_MODE": str(getattr(cfg, "region_mode", "automatic") or "automatic"),
+                    "TRYON_MODAL_REGION": str(getattr(cfg, "region", "") or ""),
                     "TRYON_MODAL_MIN_CONTAINERS": str(engine.modal_min_containers),
                     "TRYON_MODAL_MAX_CONTAINERS": str(engine.modal_max_containers),
                     "TRYON_MODAL_CONCURRENCY": str(engine.modal_concurrency),
@@ -1665,6 +1667,8 @@ class RuntimeBuildExecutionService:
             modal_env={
                 **InfrastructureProviderService._modal_env(cfg),
                 "TRYON_MODAL_GPU": selected_gpu,
+                "TRYON_MODAL_REGION_MODE": str(getattr(cfg, "region_mode", "automatic") or "automatic"),
+                "TRYON_MODAL_REGION": str(getattr(cfg, "region", "") or ""),
                 "TRYON_MODAL_MIN_CONTAINERS": str(engine.modal_min_containers),
                 "TRYON_MODAL_MAX_CONTAINERS": str(engine.modal_max_containers),
                 "TRYON_MODAL_CONCURRENCY": str(engine.modal_concurrency),

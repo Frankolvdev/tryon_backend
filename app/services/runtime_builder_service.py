@@ -32,7 +32,6 @@ class RuntimeBuilderService:
     DEFAULT_MODAL_RESIDENT_MODELS = (
         "diffusion_models/realDream_klein9BV1.safetensors",
         "text_encoders/qwen_3_8b.safetensors",
-        "unet/Flux2-Klein-9B-True-v2-bf16.safetensors",
     )
 
 
@@ -308,7 +307,7 @@ class RuntimeBuilderService:
     ) -> str:
         selected = tuple(
             str(item).strip().replace("\\", "/")
-            for item in (resident_models or RuntimeBuilderService.DEFAULT_MODAL_RESIDENT_MODELS)
+            for item in (RuntimeBuilderService.DEFAULT_MODAL_RESIDENT_MODELS if resident_models is None else resident_models)
             if str(item).strip()
         )
         residents = "\n".join(f'  "{item}",' for item in selected)
@@ -363,7 +362,7 @@ event_log = "/tmp/comfy-runtime-events.jsonl"
     ) -> str:
         selected = [
             str(item).strip().replace("\\", "/")
-            for item in (resident_models or RuntimeBuilderService.DEFAULT_MODAL_RESIDENT_MODELS)
+            for item in (RuntimeBuilderService.DEFAULT_MODAL_RESIDENT_MODELS if resident_models is None else resident_models)
             if str(item).strip()
         ]
         workflow: dict[str, dict[str, Any]] = {}
@@ -445,6 +444,9 @@ def _resolve_modal_gpu(value: str) -> str:
 
 
 GPU = _resolve_modal_gpu(os.getenv("TRYON_MODAL_GPU", "L40S"))
+REGION_MODE = os.getenv("TRYON_MODAL_REGION_MODE", "automatic").strip().lower()
+REGION_VALUE = os.getenv("TRYON_MODAL_REGION", "").strip()
+REGION = None if REGION_MODE != "fixed" or not REGION_VALUE else REGION_VALUE
 MIN_CONTAINERS = int(os.getenv("TRYON_MODAL_MIN_CONTAINERS", "0"))
 MAX_CONTAINERS = int(os.getenv("TRYON_MODAL_MAX_CONTAINERS", "3"))
 GENERATION_CONCURRENCY = int(os.getenv("TRYON_MODAL_CONCURRENCY", "1"))
@@ -1144,18 +1146,23 @@ def _run_snapshot_model_warmup() -> None:
         )
 
 
-@app.cls(
-    image=image,
-    gpu=GPU,
-    min_containers=MIN_CONTAINERS,
-    max_containers=MAX_CONTAINERS,
-    volumes={{VOLUME_PATH: models_volume}},
-    timeout=EXECUTION_TIMEOUT,
-    scaledown_window=SCALEDOWN_WINDOW,
-    memory=CPU_MEMORY_REQUEST_MB,
-    enable_memory_snapshot=True,
-    experimental_options={{"enable_gpu_snapshot": True}},
-)
+MODAL_CLASS_OPTIONS = {{
+    "image": image,
+    "gpu": GPU,
+    "min_containers": MIN_CONTAINERS,
+    "max_containers": MAX_CONTAINERS,
+    "volumes": {{VOLUME_PATH: models_volume}},
+    "timeout": EXECUTION_TIMEOUT,
+    "scaledown_window": SCALEDOWN_WINDOW,
+    "memory": CPU_MEMORY_REQUEST_MB,
+    "enable_memory_snapshot": True,
+    "experimental_options": {{"enable_gpu_snapshot": True}},
+}}
+if REGION is not None:
+    MODAL_CLASS_OPTIONS["region"] = REGION
+
+
+@app.cls(**MODAL_CLASS_OPTIONS)
 @modal.concurrent(max_inputs=GENERATION_CONCURRENCY)
 class ComfyUIServer:
     def _start_process(self) -> None:
