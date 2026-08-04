@@ -3,9 +3,11 @@ from pydantic import BaseModel
 
 class FinancialProtectionRuleDiagnostic(BaseModel):
     pricing_rule_id: int
-    generation_module_id: int
-    module_key: str
-    module_name: str
+    rule_title: str | None = None
+    generation_module_id: int | None = None
+    module_key: str | None = None
+    module_name: str | None = None
+    module_is_active: bool | None = None
     desired_profit_usd: float
     is_limiting: bool = False
 

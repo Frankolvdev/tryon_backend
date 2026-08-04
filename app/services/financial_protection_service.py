@@ -37,17 +37,17 @@ class FinancialProtectionService:
             override = rule_overrides.get(rule.id, {})
             active = bool(override.get("is_active", rule.is_active))
             module_id = override.get("generation_module_id", rule.generation_module_id)
-            if not active or module_id is None:
+            if not active:
                 continue
-            module = db.get(GenerationModule, module_id)
-            if module is None or not module.is_active:
-                continue
+            module = db.get(GenerationModule, module_id) if module_id is not None else None
             profit = max(float(override.get("desired_profit_usd", rule.desired_profit_usd or 0)), 0.0)
             rows.append(FinancialProtectionRuleDiagnostic(
                 pricing_rule_id=rule.id,
-                generation_module_id=module.id,
-                module_key=module.key,
-                module_name=module.name,
+                rule_title=rule.title,
+                generation_module_id=module.id if module is not None else None,
+                module_key=module.key if module is not None else None,
+                module_name=module.name if module is not None else rule.title,
+                module_is_active=bool(module.is_active) if module is not None else None,
                 desired_profit_usd=round(profit, 9),
             ))
         if rows:
