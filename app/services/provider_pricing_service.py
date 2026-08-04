@@ -22,6 +22,12 @@ class ProviderPricingService:
     def upsert(self, db: Session, data: ProviderGpuPriceUpsert) -> ProviderGpuPriceResponse:
         provider = data.provider.strip().lower()
         gpu_key = data.gpu_key.strip()
+        from app.services.financial_protection_service import financial_protection_service
+        financial_protection_service.assert_gpu_price_change(
+            db, provider=provider, gpu_key=gpu_key,
+            cost=float(data.cost_usd_per_second) if data.is_active else None,
+            action="save GPU price",
+        )
         row = db.scalar(
             select(ProviderGpuPrice).where(
                 ProviderGpuPrice.provider == provider,
@@ -46,6 +52,10 @@ class ProviderPricingService:
         row = db.get(ProviderGpuPrice, price_id)
         if row is None:
             raise NotFoundException("Provider GPU price not found.")
+        from app.services.financial_protection_service import financial_protection_service
+        financial_protection_service.assert_gpu_price_change(
+            db, provider=row.provider, gpu_key=row.gpu_key, cost=None, action="delete GPU price"
+        )
         db.delete(row)
         db.commit()
 

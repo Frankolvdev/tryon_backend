@@ -14,7 +14,7 @@ class SubscriptionCheckoutRequest(BaseModel):
     plan_key: str = Field(min_length=2, max_length=100)
     success_url: HttpUrl
     cancel_url: HttpUrl
-    allow_promotion_codes: bool = True
+    allow_promotion_codes: bool = False
 
 
 class SubscriptionCheckoutResponse(BaseModel):

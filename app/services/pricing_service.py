@@ -223,21 +223,28 @@ class PricingService:
             desired_profit_percent=legacy_percent,
             desired_profit_usd=data.desired_profit_usd,
         )
-        rule = pricing_rule_repository.create(db, data={
-            "title": data.title.strip(),
-            "operation_type": data.operation_type.value,
-            "item_type": data.item_type.value,
-            "quality_mode": data.quality_mode.value,
-            "generation_module_id": data.generation_module_id,
-            "tokens_cost": preview.required_tokens,
-            "estimated_gpu_seconds": data.initial_estimated_duration_seconds,
-            "estimated_gpu_cost_cents": round(legacy_cost * 100),
-            "margin_percent": round(legacy_percent),
-            "desired_profit_usd": Decimal(str(data.desired_profit_usd)),
-            "initial_estimated_duration_seconds": data.initial_estimated_duration_seconds,
-            "technical_margin_seconds": data.technical_margin_seconds,
-            "is_active": data.is_active,
-        })
+        rule = PricingRule(
+            title=data.title.strip(),
+            operation_type=data.operation_type.value,
+            item_type=data.item_type.value,
+            quality_mode=data.quality_mode.value,
+            generation_module_id=data.generation_module_id,
+            tokens_cost=preview.required_tokens,
+            estimated_gpu_seconds=data.initial_estimated_duration_seconds,
+            estimated_gpu_cost_cents=round(legacy_cost * 100),
+            margin_percent=round(legacy_percent),
+            desired_profit_usd=Decimal(str(data.desired_profit_usd)),
+            initial_estimated_duration_seconds=data.initial_estimated_duration_seconds,
+            technical_margin_seconds=data.technical_margin_seconds,
+            is_active=data.is_active,
+        )
+        db.add(rule)
+        db.flush()
+        from app.services.financial_protection_service import financial_protection_service
+        report = financial_protection_service.report(db)
+        financial_protection_service.assert_report_safe(report, action="create pricing rule")
+        db.commit()
+        db.refresh(rule)
         return self._to_response(db, rule)
 
     def update_rule(self, db: Session, rule_id: int, data: PricingRuleUpdate) -> PricingRuleResponse:
@@ -259,6 +266,10 @@ class PricingService:
             update_data["margin_percent"] = round(data.desired_profit_percent)
         if data.initial_estimated_duration_seconds is not None:
             update_data["estimated_gpu_seconds"] = data.initial_estimated_duration_seconds
+        from app.services.financial_protection_service import financial_protection_service
+        financial_protection_service.assert_rule_change(
+            db, rule.id, update_data, action="update pricing rule"
+        )
         rule = pricing_rule_repository.update(db, db_obj=rule, data=update_data)
         return self._to_response(db, rule)
 
@@ -344,12 +355,34 @@ class PricingService:
         plans = subscription_plan_repository.list_all_filtered(db, skip=0, limit=10000)
         packages = token_package_repository.list_all(db)
         currency = self._currency(db)
+        from app.services.financial_protection_service import financial_protection_service
         for plan in plans:
             amount, _ = self.price_for_tokens(db, plan.tokens_per_period)
-            plan.price_amount = Decimal(str(amount)); plan.currency = currency; db.add(plan)
+            try:
+                metadata = json.loads(plan.metadata_json or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            protected = financial_protection_service.protected_price(
+                db, nominal_price_usd=amount,
+                requested_discount_percent=float(metadata.get("requested_discount_percent") or 0),
+            )
+            metadata["effective_discount_percent"] = protected.effective_discount_percent
+            metadata["financial_protection_snapshot"] = protected.model_dump()
+            plan.price_amount = Decimal(str(protected.final_price_usd))
+            plan.currency = currency
+            plan.metadata_json = json.dumps(metadata, ensure_ascii=False)
+            db.add(plan)
         for package in packages:
             amount, _ = self.price_for_tokens(db, package.tokens_amount)
-            package.price_cents = int(round(amount * 100)); package.currency = currency.lower(); db.add(package)
+            protected = financial_protection_service.protected_price(
+                db, nominal_price_usd=amount,
+                requested_discount_percent=float(package.requested_discount_percent or 0),
+            )
+            package.nominal_price_cents = int(round(protected.nominal_price_usd * 100))
+            package.price_cents = int(round(protected.final_price_usd * 100))
+            package.effective_discount_percent = protected.effective_discount_percent
+            package.currency = currency.lower()
+            db.add(package)
         db.commit()
         return {"plans_updated": len(plans), "packages_updated": len(packages), "currency": currency, "token_value_usd": self._token_value(db)}
 

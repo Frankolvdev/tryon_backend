@@ -40,6 +40,7 @@ class TokenPackageCreate(BaseModel):
     currency: str = "usd"
     stripe_price_id: str | None = None
     is_active: bool = True
+    requested_discount_percent: float = Field(default=0, ge=0, le=100)
 
 
 class TokenPackageUpdate(BaseModel):
@@ -50,6 +51,7 @@ class TokenPackageUpdate(BaseModel):
     currency: str | None = None
     stripe_price_id: str | None = None
     is_active: bool | None = None
+    requested_discount_percent: float | None = Field(default=None, ge=0, le=100)
 
 
 class TokenPackageResponse(BaseModel):
@@ -61,6 +63,11 @@ class TokenPackageResponse(BaseModel):
     calculated_price_cents: int
     commercial_token_value: float
     price_is_automatic: bool = True
+    nominal_price_cents: int
+    requested_discount_percent: float
+    effective_discount_percent: float
+    discount_amount_cents: int
+    protected_discount_percent: float
     currency: str
     stripe_price_id: str | None
     is_active: bool

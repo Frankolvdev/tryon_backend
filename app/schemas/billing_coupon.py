@@ -49,7 +49,7 @@ class BillingCouponCreate(BaseModel):
     valid_until: datetime | None = None
 
     is_active: bool = True
-    applies_to: Literal["all", "plans", "token_packages"] = "all"
+    applies_to: Literal["token_packages", "free_token_purchase"] = "token_packages"
     eligible_item_ids: list[int] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -121,7 +121,7 @@ class BillingCouponUpdate(BaseModel):
     valid_from: datetime | None = None
     valid_until: datetime | None = None
     is_active: bool | None = None
-    applies_to: Literal["all", "plans", "token_packages"] | None = None
+    applies_to: Literal["token_packages", "free_token_purchase"] | None = None
     eligible_item_ids: list[int] | None = None
     metadata: dict[str, Any] | None = None
 
@@ -154,7 +154,7 @@ class BillingCouponResponse(BaseModel):
     valid_until: datetime | None
     is_active: bool
 
-    applies_to: Literal["all", "plans", "token_packages"]
+    applies_to: Literal["token_packages", "free_token_purchase"]
     eligible_item_ids: list[int]
     metadata: dict[str, Any]
 
@@ -181,7 +181,7 @@ class BillingCouponSyncResponse(BaseModel):
 class BillingCouponValidationRequest(BaseModel):
     code: str = Field(min_length=2, max_length=100)
     purchase_amount: Decimal | None = Field(default=None, ge=0)
-    purchase_type: Literal["plan", "token_package"] | None = None
+    purchase_type: Literal["token_package", "free_token_purchase"] | None = None
     item_id: int | None = Field(default=None, ge=1)
 
 

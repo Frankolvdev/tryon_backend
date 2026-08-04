@@ -18,9 +18,11 @@ from app.schemas.pricing import (
 )
 from app.schemas.simulated_engine import CommercialRepriceResponse
 from app.schemas.provider_pricing import ProviderGpuPriceResponse, ProviderGpuPriceUpsert, AppliedPricingRuleResponse
+from app.schemas.financial_protection import FinancialProtectionReport, FinancialProtectionSettingsUpdate, ProtectedCommercialPrice
 from app.services.audit_service import audit_service
 from app.services.pricing_service import pricing_service
 from app.services.provider_pricing_service import provider_pricing_service
+from app.services.financial_protection_service import financial_protection_service
 
 router = APIRouter()
 
@@ -87,6 +89,33 @@ def update_execution_billing_policy(
     )
     return result
 
+
+
+
+@router.get("/financial-protection", response_model=FinancialProtectionReport)
+def get_financial_protection(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return financial_protection_service.report(db)
+
+
+@router.patch("/financial-protection", response_model=FinancialProtectionReport)
+def update_financial_protection(
+    data: FinancialProtectionSettingsUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = financial_protection_service.update_settings(db, data)
+    audit_service.create_log(
+        db, actor_user_id=current_admin.id, action="admin_financial_protection_updated",
+        entity_type="financial_protection", entity_id=None,
+        description=f"Protected discount updated to {result.protected_discount_percent}%.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
 
 @router.post("/commercial-price-preview", response_model=CommercialPricePreviewResponse)
 def preview_commercial_price(

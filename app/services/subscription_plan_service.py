@@ -19,6 +19,7 @@ from app.schemas.subscription_plan import (
     SubscriptionPlanUpdate,
 )
 from app.services.integration_service import integration_service
+from app.services.financial_protection_service import financial_protection_service
 from app.services.pricing_service import pricing_service
 from app.services.stripe_client_service import stripe_client_service
 
@@ -60,8 +61,11 @@ class SubscriptionPlanService:
         db: Session,
         plan: SubscriptionPlan,
     ) -> SubscriptionPlanResponse:
-        calculated_price, _ = pricing_service.price_for_tokens(
-            db, plan.tokens_per_period
+        nominal_price, _ = pricing_service.price_for_tokens(db, plan.tokens_per_period)
+        metadata = self._parse_dict(plan.metadata_json)
+        requested_discount = float(metadata.get("requested_discount_percent") or 0)
+        protected_price = financial_protection_service.protected_price(
+            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount
         )
         return SubscriptionPlanResponse(
             id=plan.id,
@@ -71,7 +75,12 @@ class SubscriptionPlanService:
             billing_interval=plan.billing_interval,
             currency=plan.currency,
             price_amount=plan.price_amount,
-            calculated_price_amount=Decimal(str(calculated_price)),
+            calculated_price_amount=Decimal(str(protected_price.final_price_usd)),
+            nominal_price_amount=Decimal(str(protected_price.nominal_price_usd)),
+            requested_discount_percent=Decimal(str(protected_price.requested_discount_percent)),
+            effective_discount_percent=Decimal(str(protected_price.effective_discount_percent)),
+            discount_amount=Decimal(str(protected_price.discount_amount_usd)),
+            protected_discount_percent=Decimal(str(protected_price.protected_discount_percent)),
             commercial_token_value=Decimal(str(pricing_service._token_value(db))),
             price_is_automatic=True,
             tokens_per_period=plan.tokens_per_period,
@@ -202,9 +211,14 @@ class SubscriptionPlanService:
                 "Subscription plan key already exists."
             )
 
-        calculated_price, calculated_currency = pricing_service.price_for_tokens(
-            db, data.tokens_per_period
+        nominal_price, calculated_currency = pricing_service.price_for_tokens(db, data.tokens_per_period)
+        protected_price = financial_protection_service.protected_price(
+            db, nominal_price_usd=nominal_price, requested_discount_percent=float(data.requested_discount_percent)
         )
+        metadata = dict(data.metadata or {})
+        metadata["requested_discount_percent"] = protected_price.requested_discount_percent
+        metadata["effective_discount_percent"] = protected_price.effective_discount_percent
+        metadata["financial_protection_snapshot"] = protected_price.model_dump()
         plan = subscription_plan_repository.create(
             db,
             data={
@@ -213,14 +227,14 @@ class SubscriptionPlanService:
                 "description": data.description,
                 "billing_interval": data.billing_interval.value,
                 "currency": calculated_currency,
-                "price_amount": Decimal(str(calculated_price)),
+                "price_amount": Decimal(str(protected_price.final_price_usd)),
                 "tokens_per_period": data.tokens_per_period,
                 "max_generations_per_period": (
                     data.max_generations_per_period
                 ),
                 "priority": data.priority,
                 "features_json": self._serialize_json(data.features),
-                "metadata_json": self._serialize_json(data.metadata),
+                "metadata_json": self._serialize_json(metadata),
                 "is_public": data.is_public,
                 "is_active": data.is_active,
                 "sort_order": data.sort_order,
@@ -266,10 +280,13 @@ class SubscriptionPlanService:
             final_data["currency"] = update_data["currency"].upper()
 
         final_tokens = int(final_data.get("tokens_per_period", plan.tokens_per_period))
-        calculated_price, calculated_currency = pricing_service.price_for_tokens(
-            db, final_tokens
+        nominal_price, calculated_currency = pricing_service.price_for_tokens(db, final_tokens)
+        current_metadata = self._parse_dict(plan.metadata_json)
+        requested_discount = float(update_data.get("requested_discount_percent", current_metadata.get("requested_discount_percent", 0)) or 0)
+        protected_price = financial_protection_service.protected_price(
+            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount
         )
-        final_data["price_amount"] = Decimal(str(calculated_price))
+        final_data["price_amount"] = Decimal(str(protected_price.final_price_usd))
         final_data["currency"] = calculated_currency
 
         if "features" in update_data:
@@ -277,10 +294,11 @@ class SubscriptionPlanService:
                 update_data["features"]
             )
 
-        if "metadata" in update_data:
-            final_data["metadata_json"] = self._serialize_json(
-                update_data["metadata"]
-            )
+        merged_metadata = dict((update_data.get("metadata") or {}) if "metadata" in update_data else current_metadata)
+        merged_metadata["requested_discount_percent"] = protected_price.requested_discount_percent
+        merged_metadata["effective_discount_percent"] = protected_price.effective_discount_percent
+        merged_metadata["financial_protection_snapshot"] = protected_price.model_dump()
+        final_data["metadata_json"] = self._serialize_json(merged_metadata)
 
         updated = subscription_plan_repository.update(
             db,

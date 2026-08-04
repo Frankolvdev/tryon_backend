@@ -15,7 +15,8 @@ class TokenPurchaseCheckoutRequest(BaseModel):
     tokens_amount: int | None = Field(default=None, ge=1)
     success_url: HttpUrl
     cancel_url: HttpUrl
-    allow_promotion_codes: bool = True
+    allow_promotion_codes: bool = False
+    coupon_code: str | None = Field(default=None, min_length=2, max_length=100)
 
     @model_validator(mode="after")
     def validate_purchase_source(self):

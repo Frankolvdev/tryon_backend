@@ -11,14 +11,16 @@ from app.repositories.token_transaction_repository import token_transaction_repo
 from app.repositories.user_repository import user_repository
 from app.schemas.token import TokenPackageCreate, TokenPackageResponse, TokenPackageUpdate
 from app.services.pricing_service import pricing_service
+from app.services.financial_protection_service import financial_protection_service
 
 
 class TokenService:
     def _package_response(self, db: Session, package: TokenPackage) -> TokenPackageResponse:
-        calculated_price, currency = pricing_service.price_for_tokens(
-            db, package.tokens_amount
+        nominal_price, currency = pricing_service.price_for_tokens(db, package.tokens_amount)
+        protected_price = financial_protection_service.protected_price(
+            db, nominal_price_usd=nominal_price, requested_discount_percent=float(package.requested_discount_percent or 0)
         )
-        calculated_cents = int(round(calculated_price * 100))
+        calculated_cents = int(round(protected_price.final_price_usd * 100))
         return TokenPackageResponse(
             id=package.id,
             name=package.name,
@@ -28,6 +30,11 @@ class TokenService:
             calculated_price_cents=calculated_cents,
             commercial_token_value=pricing_service._token_value(db),
             price_is_automatic=True,
+            nominal_price_cents=int(round(protected_price.nominal_price_usd * 100)),
+            requested_discount_percent=protected_price.requested_discount_percent,
+            effective_discount_percent=protected_price.effective_discount_percent,
+            discount_amount_cents=int(round(protected_price.discount_amount_usd * 100)),
+            protected_discount_percent=protected_price.protected_discount_percent,
             currency=currency.lower(),
             stripe_price_id=package.stripe_price_id,
             is_active=package.is_active,
@@ -54,14 +61,18 @@ class TokenService:
         db: Session,
         data: TokenPackageCreate,
     ) -> TokenPackageResponse:
-        calculated_price, currency = pricing_service.price_for_tokens(
-            db, data.tokens_amount
+        nominal_price, currency = pricing_service.price_for_tokens(db, data.tokens_amount)
+        protected_price = financial_protection_service.protected_price(
+            db, nominal_price_usd=nominal_price, requested_discount_percent=data.requested_discount_percent
         )
         package = token_package_repository.create(
             db,
             data={
-                **data.model_dump(exclude={"price_cents", "currency"}),
-                "price_cents": int(round(calculated_price * 100)),
+                **data.model_dump(exclude={"price_cents", "currency", "requested_discount_percent"}),
+                "price_cents": int(round(protected_price.final_price_usd * 100)),
+                "nominal_price_cents": int(round(protected_price.nominal_price_usd * 100)),
+                "requested_discount_percent": protected_price.requested_discount_percent,
+                "effective_discount_percent": protected_price.effective_discount_percent,
                 "currency": currency.lower(),
             },
         )
@@ -83,10 +94,15 @@ class TokenService:
             exclude={"price_cents", "currency"},
         )
         final_tokens = int(update_data.get("tokens_amount", package_obj.tokens_amount))
-        calculated_price, currency = pricing_service.price_for_tokens(
-            db, final_tokens
+        requested_discount = float(update_data.pop("requested_discount_percent", package_obj.requested_discount_percent or 0) or 0)
+        nominal_price, currency = pricing_service.price_for_tokens(db, final_tokens)
+        protected_price = financial_protection_service.protected_price(
+            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount
         )
-        update_data["price_cents"] = int(round(calculated_price * 100))
+        update_data["price_cents"] = int(round(protected_price.final_price_usd * 100))
+        update_data["nominal_price_cents"] = int(round(protected_price.nominal_price_usd * 100))
+        update_data["requested_discount_percent"] = protected_price.requested_discount_percent
+        update_data["effective_discount_percent"] = protected_price.effective_discount_percent
         update_data["currency"] = currency.lower()
         package = token_package_repository.update(
             db,

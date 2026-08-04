@@ -25,6 +25,7 @@ class SubscriptionPlanCreate(BaseModel):
     )
 
     price_amount: Decimal | None = Field(default=None, ge=0)
+    requested_discount_percent: Decimal = Field(default=0, ge=0, le=100)
 
     tokens_per_period: int = Field(default=0, ge=0)
     max_generations_per_period: int | None = Field(default=None, ge=1)
@@ -63,6 +64,7 @@ class SubscriptionPlanUpdate(BaseModel):
     billing_interval: BillingInterval | None = None
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     price_amount: Decimal | None = Field(default=None, ge=0)
+    requested_discount_percent: Decimal | None = Field(default=None, ge=0, le=100)
 
     tokens_per_period: int | None = Field(default=None, ge=0)
     max_generations_per_period: int | None = Field(default=None, ge=1)
@@ -113,6 +115,11 @@ class SubscriptionPlanResponse(BaseModel):
     calculated_price_amount: Decimal
     commercial_token_value: Decimal
     price_is_automatic: bool = True
+    nominal_price_amount: Decimal
+    requested_discount_percent: Decimal
+    effective_discount_percent: Decimal
+    discount_amount: Decimal
+    protected_discount_percent: Decimal
 
     tokens_per_period: int
     max_generations_per_period: int | None

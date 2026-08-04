@@ -357,9 +357,7 @@ class SubscriptionService:
                 ],
                 success_url=str(data.success_url),
                 cancel_url=str(data.cancel_url),
-                allow_promotion_codes=(
-                    data.allow_promotion_codes
-                ),
+                allow_promotion_codes=False,
                 metadata={
                     "type": "subscription_checkout",
                     "internal_user_id": str(user.id),

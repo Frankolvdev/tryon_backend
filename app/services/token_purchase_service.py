@@ -46,6 +46,7 @@ from app.services.billing_customer_service import (
     billing_customer_service,
 )
 from app.services.integration_service import integration_service
+from app.services.billing_coupon_service import billing_coupon_service
 from app.services.pricing_service import pricing_service
 from app.services.stripe_client_service import (
     stripe_client_service,
@@ -323,9 +324,8 @@ class TokenPurchaseService:
                 getattr(token_package, "bonus_tokens", 0) or 0
             )
             currency = token_package.currency.upper()
-            amount = (
-                Decimal(token_package.price_cents) / Decimal("100")
-            ).quantize(Decimal("0.01"))
+            amount = (Decimal(token_package.price_cents) / Decimal("100")).quantize(Decimal("0.01"))
+            nominal_amount = (Decimal(token_package.nominal_price_cents or token_package.price_cents) / Decimal("100")).quantize(Decimal("0.01"))
             product_name = token_package.name
             product_description = (
                 token_package.description.strip()
@@ -349,9 +349,9 @@ class TokenPurchaseService:
                 pricing_service.price_for_tokens(db, tokens_amount)
             )
             amount = Decimal(str(calculated_amount)).quantize(
-                Decimal("0.01"),
-                rounding=ROUND_HALF_UP,
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
             )
+            nominal_amount = amount
 
             if amount <= Decimal("0.00"):
                 raise ConflictException(
@@ -372,6 +372,26 @@ class TokenPurchaseService:
                     pricing_service._token_value(db)
                 ),
             }
+
+        if data.coupon_code:
+            validation = billing_coupon_service.validate_code(
+                db, code=data.coupon_code, purchase_amount=amount, nominal_amount=nominal_amount,
+                purchase_type="token_package" if token_package else "free_token_purchase",
+                item_id=token_package.id if token_package else None,
+            )
+            if not validation.valid or validation.final_amount is None:
+                raise ConflictException(validation.message)
+            purchase_metadata["coupon_code"] = data.coupon_code.upper()
+            purchase_metadata["coupon_financial_snapshot"] = {
+                "discount_amount": str(validation.discount_amount or 0),
+                "requested_discount_percent": str(validation.requested_discount_percent or 0),
+                "effective_discount_percent": str(validation.effective_discount_percent or 0),
+                "protected_discount_percent": str(validation.protected_discount_percent or 0),
+                "nominal_amount": str(nominal_amount),
+                "pre_coupon_amount": str(amount),
+                "final_amount": str(validation.final_amount),
+            }
+            amount = validation.final_amount
 
         customer = billing_customer_service.get_or_create_stripe_customer(
             db,
@@ -451,7 +471,7 @@ class TokenPurchaseService:
                 success_url=str(data.success_url),
                 cancel_url=str(data.cancel_url),
                 metadata=metadata,
-                allow_promotion_codes=data.allow_promotion_codes,
+                allow_promotion_codes=False,
                 client_reference_id=str(purchase.id),
                 idempotency_key=f"token-purchase-checkout-{purchase.id}",
             )

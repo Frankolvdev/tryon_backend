@@ -267,6 +267,11 @@ class GenerationModuleService:
         module.outputs = [self._output_model(module.id, item) for item in data.outputs]
         module.steps = [self._step_model(module.id, item) for item in data.steps]
         self._bind_pricing_rule(db, module_id=module.id, pricing_rule_id=data.pricing_rule_id)
+        db.flush()
+        from app.services.financial_protection_service import financial_protection_service
+        financial_protection_service.assert_report_safe(
+            financial_protection_service.report(db), action="create generation module"
+        )
         db.commit()
         return self.get_response(db, module_id=module.id)
 
@@ -306,6 +311,11 @@ class GenerationModuleService:
             module.steps = [self._step_model(module.id, item) for item in data.steps]
 
         db.add(module)
+        db.flush()
+        from app.services.financial_protection_service import financial_protection_service
+        financial_protection_service.assert_report_safe(
+            financial_protection_service.report(db), action="update generation module"
+        )
         db.commit()
         return self.get_response(db, module_id=module.id)
 

@@ -22,6 +22,7 @@ from app.schemas.billing_coupon import (
 )
 from app.services.integration_service import integration_service
 from app.services.stripe_client_service import stripe_client_service
+from app.services.financial_protection_service import financial_protection_service
 
 
 class BillingCouponService:
@@ -74,7 +75,7 @@ class BillingCouponService:
             valid_from=coupon.valid_from,
             valid_until=coupon.valid_until,
             is_active=coupon.is_active,
-            applies_to=self._parse(coupon.metadata_json).get("applies_to", "all"),
+            applies_to=(self._parse(coupon.metadata_json).get("applies_to") if self._parse(coupon.metadata_json).get("applies_to") in {"token_packages", "free_token_purchase"} else "token_packages"),
             eligible_item_ids=self._parse(coupon.metadata_json).get("eligible_item_ids", []),
             metadata=self._parse(coupon.metadata_json),
             created_at=coupon.created_at,
@@ -143,6 +144,10 @@ class BillingCouponService:
         if existing:
             raise ConflictException(
                 "Coupon code already exists."
+            )
+        if data.discount_type == CouponDiscountType.PERCENTAGE:
+            financial_protection_service.protected_price(
+                db, nominal_price_usd=1.0, requested_discount_percent=float(data.percentage_off or 0)
             )
 
         coupon = billing_coupon_repository.create(
@@ -384,6 +389,7 @@ class BillingCouponService:
         *,
         code: str,
         purchase_amount: Decimal | None = None,
+        nominal_amount: Decimal | None = None,
         purchase_type: str | None = None,
         item_id: int | None = None,
     ) -> BillingCouponValidationResponse:
@@ -447,11 +453,11 @@ class BillingCouponService:
             )
 
         metadata = self._parse(coupon.metadata_json)
-        applies_to = metadata.get("applies_to", "all")
+        applies_to = metadata.get("applies_to", "token_packages")
         eligible_item_ids = metadata.get("eligible_item_ids", [])
-        requested_scope = {"plan": "plans", "token_package": "token_packages"}.get(purchase_type)
+        requested_scope = {"token_package": "token_packages", "free_token_purchase": "free_token_purchase"}.get(purchase_type)
 
-        if requested_scope and applies_to not in ("all", requested_scope):
+        if requested_scope and applies_to != requested_scope:
             return BillingCouponValidationResponse(valid=False, coupon=self._response(coupon), message="Coupon does not apply to this purchase type.")
 
         if item_id is not None and eligible_item_ids and item_id not in eligible_item_ids:
@@ -465,16 +471,35 @@ class BillingCouponService:
 
         discount_amount = None
         final_amount = purchase_amount
-        if purchase_amount is not None:
+        requested_percent = None
+        effective_percent = None
+        protected_percent = Decimal(str(financial_protection_service.get_settings(db).protected_discount_percent))
+        if purchase_amount is not None and purchase_amount > 0:
+            nominal = nominal_amount if nominal_amount is not None and nominal_amount > 0 else purchase_amount
             if coupon.discount_type == CouponDiscountType.PERCENTAGE.value:
-                discount_amount = (purchase_amount * (coupon.percentage_off or Decimal("0")) / Decimal("100"))
+                coupon_discount = purchase_amount * Decimal(str(coupon.percentage_off or 0)) / Decimal("100")
             else:
-                discount_amount = min(purchase_amount, coupon.amount_off or Decimal("0"))
-            final_amount = max(Decimal("0"), purchase_amount - discount_amount)
+                coupon_discount = min(purchase_amount, coupon.amount_off or Decimal("0"))
+            requested_final = max(Decimal("0"), purchase_amount - coupon_discount)
+            requested_percent = ((nominal - requested_final) / nominal * Decimal("100"))
+            try:
+                protected = financial_protection_service.protected_price(
+                    db, nominal_price_usd=float(nominal), requested_discount_percent=float(requested_percent)
+                )
+            except ConflictException as exc:
+                return BillingCouponValidationResponse(
+                    valid=False, coupon=self._response(coupon), message=str(exc),
+                    requested_discount_percent=requested_percent, protected_discount_percent=protected_percent,
+                )
+            effective_percent = Decimal(str(protected.effective_discount_percent))
+            final_amount = Decimal(str(protected.final_price_usd)).quantize(Decimal("0.01"))
+            discount_amount = max(Decimal("0"), purchase_amount - final_amount).quantize(Decimal("0.01"))
 
         return BillingCouponValidationResponse(
             valid=True, coupon=self._response(coupon), message="Coupon is valid.",
             discount_amount=discount_amount, final_amount=final_amount,
+            requested_discount_percent=requested_percent, effective_discount_percent=effective_percent,
+            protected_discount_percent=protected_percent,
         )
 
 
