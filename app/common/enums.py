@@ -126,6 +126,7 @@ class SettingCategory(str, Enum):
     BACKUPS = "backups"
     SECURITY = "security"
     FRONTEND = "frontend"
+    INTEGRATIONS = "integrations"
     SYSTEM = "system"
 
 
