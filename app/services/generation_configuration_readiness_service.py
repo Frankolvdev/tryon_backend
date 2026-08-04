@@ -69,11 +69,10 @@ class GenerationConfigurationReadinessService:
         if module is None or not module.is_active:
             self._fail(["generation_module.active"])
 
-        rule = (
-            pricing_rule_repository.get_by_id(db, module.pricing_rule_id)
-            if module.pricing_rule_id
-            else None
-        )
+        # GenerationModule does not own a pricing_rule_id column. The binding
+        # is stored on PricingRule.generation_module_id and must be resolved
+        # through the repository.
+        rule = pricing_rule_repository.get_for_generation_module(db, module.id)
         if rule is None:
             missing.append("pricing_rule")
         else:
