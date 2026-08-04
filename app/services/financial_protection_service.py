@@ -89,8 +89,27 @@ class FinancialProtectionService:
         diagnostics = self._profit_diagnostics(db, rule_overrides=rule_overrides)
         enriched = self._profit_per_token_diagnostics(db) if not rule_overrides else []
         warnings: list[str] = []
-        limiting = min(enriched, key=lambda item: item[1]) if enriched else None
-        safe_profit = limiting[0].desired_profit_usd if limiting else None
+
+        # The limiting rule is ALWAYS the active rule with the smallest
+        # desired_profit_usd. Estimated tokens are used only after selecting
+        # that rule, to scale its protected profit across a commercial product.
+        # They must never decide which rule is the highest-risk rule.
+        limiting_diagnostic = (
+            min(diagnostics, key=lambda item: item.desired_profit_usd)
+            if diagnostics
+            else None
+        )
+        enriched_by_rule_id = {item[0].pricing_rule_id: item for item in enriched}
+        limiting = (
+            enriched_by_rule_id.get(limiting_diagnostic.pricing_rule_id)
+            if limiting_diagnostic is not None
+            else None
+        )
+        safe_profit = (
+            limiting_diagnostic.desired_profit_usd
+            if limiting_diagnostic is not None
+            else None
+        )
         safe_profit_per_token = limiting[1] if limiting else None
         highest = self._highest_active_discount(db)
         status = "protected"
@@ -107,10 +126,10 @@ class FinancialProtectionService:
             highest_active_discount_percent=round(highest,6),
             available_discount_percentage_points=round(max(0.0,100.0-highest),6),
             status=status,
-            limiting_pricing_rule_id=limiting[0].pricing_rule_id if limiting else None,
-            limiting_generation_module_id=limiting[0].generation_module_id if limiting else None,
-            limiting_module_key=limiting[0].module_key if limiting else None,
-            limiting_module_name=limiting[0].module_name if limiting else None,
+            limiting_pricing_rule_id=limiting_diagnostic.pricing_rule_id if limiting_diagnostic else None,
+            limiting_generation_module_id=limiting_diagnostic.generation_module_id if limiting_diagnostic else None,
+            limiting_module_key=limiting_diagnostic.module_key if limiting_diagnostic else None,
+            limiting_module_name=limiting_diagnostic.module_name if limiting_diagnostic else None,
             diagnostics=diagnostics,warnings=warnings,
         )
 
