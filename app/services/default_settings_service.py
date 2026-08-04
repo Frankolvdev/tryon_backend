@@ -206,6 +206,28 @@ class DefaultSettingsService:
                 sort_order=20,
             ),
 
+            SystemSettingCreate(
+                category=SettingCategory.PRICING,
+                key="commercial_execution_billing_policy",
+                label="Execution Billing Policy",
+                description="Controls infrastructure and profit charges by execution outcome.",
+                value_type=SettingValueType.JSON,
+                value={
+                    "completed": {"charge_infrastructure": True, "apply_profit": True},
+                    "cancelled": {"charge_infrastructure": True, "apply_profit": False},
+                    "failed_workflow_or_user": {"charge_infrastructure": True, "apply_profit": False},
+                    "failed_platform_or_provider": {"charge_infrastructure": False, "apply_profit": False},
+                },
+                default_value={
+                    "completed": {"charge_infrastructure": True, "apply_profit": True},
+                    "cancelled": {"charge_infrastructure": True, "apply_profit": False},
+                    "failed_workflow_or_user": {"charge_infrastructure": True, "apply_profit": False},
+                    "failed_platform_or_provider": {"charge_infrastructure": False, "apply_profit": False},
+                },
+                is_public=False,
+                sort_order=30,
+            ),
+
             # SIMULATED AI ENGINE
             SystemSettingCreate(category=SettingCategory.SYSTEM, key="ai_execution_mode", label="AI Execution Mode", description="Select simulated, ComfyUI local, RunPod serverless or automatic routing.", value_type=SettingValueType.STRING, value="simulated", default_value="simulated", is_public=False, sort_order=210),
             SystemSettingCreate(category=SettingCategory.SYSTEM, key="simulated_engine_enabled", label="Simulated Engine Enabled", description="Enable the no-GPU simulated execution engine.", value_type=SettingValueType.BOOLEAN, value=True, default_value=True, is_public=False, sort_order=220),

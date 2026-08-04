@@ -15,6 +15,24 @@ class CommercialSettingsUpdate(BaseModel):
     currency: str = Field(min_length=3, max_length=3)
 
 
+
+
+class BillingPolicyEntry(BaseModel):
+    charge_infrastructure: bool
+    apply_profit: bool
+
+
+class ExecutionBillingPolicy(BaseModel):
+    completed: BillingPolicyEntry
+    cancelled: BillingPolicyEntry
+    failed_workflow_or_user: BillingPolicyEntry
+    failed_platform_or_provider: BillingPolicyEntry
+
+
+class ExecutionBillingPolicyUpdate(ExecutionBillingPolicy):
+    pass
+
+
 class CommercialPricePreviewRequest(BaseModel):
     average_execution_cost_usd: float = Field(default=0, ge=0)
     desired_profit_percent: float = Field(default=0, ge=0, le=10000)

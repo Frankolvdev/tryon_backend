@@ -638,10 +638,32 @@ class GenerationModuleRuntimeService:
         profit_usd = float(getattr(rule, "desired_profit_usd", 0) or 0)
         actual_seconds = round(item.real_provider_duration_ms / 1000, 3)
         billable_seconds = round(actual_seconds + scaledown_seconds + margin_seconds, 3)
-        infrastructure_cost = (billable_seconds * gpu_cost) if gpu_cost is not None else None
-        final_price = (infrastructure_cost + profit_usd) if infrastructure_cost is not None else None
+        raw_infrastructure_cost = (billable_seconds * gpu_cost) if gpu_cost is not None else None
+        billing_policy = pricing_service.get_execution_billing_policy(db)
+        failure_origin = None
+        if item.status == "completed":
+            policy_key = "completed"
+        elif item.status == "cancelled":
+            policy_key = "cancelled"
+        else:
+            explicit_origin = str(provider_metrics.get("failure_origin") or runtime_metrics.get("failure_origin") or "").strip().lower()
+            runtime_reached = bool(runtime_exact_ms > 0 or runtime_metrics.get("termination_status") == "failed")
+            failure_origin = (
+                "workflow_or_user"
+                if explicit_origin in {"workflow", "user", "workflow_or_user"} or (not explicit_origin and runtime_reached)
+                else "platform_or_provider"
+            )
+            policy_key = (
+                "failed_workflow_or_user"
+                if failure_origin == "workflow_or_user"
+                else "failed_platform_or_provider"
+            )
+        policy = getattr(billing_policy, policy_key)
+        infrastructure_cost = raw_infrastructure_cost if policy.charge_infrastructure else 0.0
+        applied_profit_usd = profit_usd if policy.apply_profit else 0.0
+        final_price = (infrastructure_cost + applied_profit_usd) if raw_infrastructure_cost is not None else None
         token_value = pricing_service.get_commercial_settings(db).token_value_usd
-        final_tokens = max(1, math.ceil(final_price / token_value)) if final_price is not None else item.tokens_charged
+        final_tokens = max(0, math.ceil(final_price / token_value)) if final_price is not None else item.tokens_charged
         extra = refunded = 0
         if item.user_id is not None and final_price is not None:
             extra, refunded = generation_module_billing_service.reconcile(
@@ -670,8 +692,14 @@ class GenerationModuleRuntimeService:
             "configured_scaledown_seconds": scaledown_seconds,
             "technical_margin_seconds": margin_seconds,
             "billable_seconds": billable_seconds,
+            "raw_infrastructure_cost_usd": round(raw_infrastructure_cost, 9) if raw_infrastructure_cost is not None else None,
             "infrastructure_cost_usd": round(infrastructure_cost, 9) if infrastructure_cost is not None else None,
             "desired_profit_usd": profit_usd,
+            "applied_profit_usd": applied_profit_usd,
+            "profit_applied": bool(policy.apply_profit),
+            "infrastructure_charge_applied": bool(policy.charge_infrastructure),
+            "billing_policy_key": policy_key,
+            "failure_origin": failure_origin,
             "final_price_usd": round(final_price, 9) if final_price is not None else None,
             "token_value_usd": token_value,
             "estimated_tokens_before_execution": initial_estimated_tokens,

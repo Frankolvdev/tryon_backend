@@ -10,6 +10,8 @@ from app.schemas.pricing import (
     CommercialPricePreviewResponse,
     CommercialSettingsResponse,
     CommercialSettingsUpdate,
+    ExecutionBillingPolicy,
+    ExecutionBillingPolicyUpdate,
     PricingRuleCreate,
     PricingRuleResponse,
     PricingRuleUpdate,
@@ -49,6 +51,37 @@ def update_commercial_settings(
             f"Commercial settings updated: 1 token = {result.token_value_usd} "
             f"{result.currency}."
         ),
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+
+
+@router.get("/execution-billing-policy", response_model=ExecutionBillingPolicy)
+def get_execution_billing_policy(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return pricing_service.get_execution_billing_policy(db)
+
+
+@router.patch("/execution-billing-policy", response_model=ExecutionBillingPolicy)
+def update_execution_billing_policy(
+    data: ExecutionBillingPolicyUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = pricing_service.update_execution_billing_policy(db, data)
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_execution_billing_policy_updated",
+        entity_type="execution_billing_policy",
+        entity_id=None,
+        description="Execution billing policy updated.",
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )

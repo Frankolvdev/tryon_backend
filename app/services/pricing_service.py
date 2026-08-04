@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from decimal import Decimal
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.common.enums import PricingOperationType, QualityMode, TryOnItemType
 from app.common.exceptions import NotFoundException
 from app.models.generation_module import GenerationModule
+from app.models.system_setting import SystemSetting
 from app.models.pricing_rule import PricingRule
 from app.repositories.pricing_rule_repository import pricing_rule_repository
 from app.repositories.system_setting_repository import system_setting_repository
@@ -17,6 +19,8 @@ from app.schemas.pricing import (
     CommercialPricePreviewResponse,
     CommercialSettingsResponse,
     CommercialSettingsUpdate,
+    ExecutionBillingPolicy,
+    ExecutionBillingPolicyUpdate,
     PricingRuleCreate,
     PricingRuleResponse,
     PricingRuleUpdate,
@@ -30,6 +34,13 @@ TOKEN_VALUE_KEY = "commercial_token_value_usd"
 CURRENCY_KEY = "commercial_currency"
 DEFAULT_TOKEN_VALUE_USD = 0.10
 DEFAULT_CURRENCY = "USD"
+BILLING_POLICY_KEY = "commercial_execution_billing_policy"
+DEFAULT_EXECUTION_BILLING_POLICY = {
+    "completed": {"charge_infrastructure": True, "apply_profit": True},
+    "cancelled": {"charge_infrastructure": True, "apply_profit": False},
+    "failed_workflow_or_user": {"charge_infrastructure": True, "apply_profit": False},
+    "failed_platform_or_provider": {"charge_infrastructure": False, "apply_profit": False},
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +62,51 @@ class PricingService:
     def _currency(self, db: Session) -> str:
         setting = system_setting_repository.get_by_key(db, CURRENCY_KEY)
         return str(setting.value_string if setting else DEFAULT_CURRENCY).upper()
+
+    def _billing_policy_setting(self, db: Session) -> SystemSetting:
+        setting = system_setting_repository.get_by_key(db, BILLING_POLICY_KEY)
+        if setting:
+            return setting
+        setting = SystemSetting(
+            category="pricing",
+            key=BILLING_POLICY_KEY,
+            label="Execution billing policy",
+            description="Controls infrastructure and profit charges by execution outcome.",
+            value_type="json",
+            value_json=json.dumps(DEFAULT_EXECUTION_BILLING_POLICY),
+            default_value_json=json.dumps(DEFAULT_EXECUTION_BILLING_POLICY),
+            is_public=False,
+            is_editable=True,
+            is_sensitive=False,
+            requires_restart=False,
+            sort_order=30,
+        )
+        db.add(setting)
+        db.commit()
+        db.refresh(setting)
+        return setting
+
+    def get_execution_billing_policy(self, db: Session) -> ExecutionBillingPolicy:
+        setting = self._billing_policy_setting(db)
+        try:
+            raw = json.loads(setting.value_json or "{}")
+        except (TypeError, ValueError):
+            raw = {}
+        merged = {
+            key: {**value, **(raw.get(key) or {})}
+            for key, value in DEFAULT_EXECUTION_BILLING_POLICY.items()
+        }
+        return ExecutionBillingPolicy.model_validate(merged)
+
+    def update_execution_billing_policy(
+        self, db: Session, data: ExecutionBillingPolicyUpdate
+    ) -> ExecutionBillingPolicy:
+        setting = self._billing_policy_setting(db)
+        payload = data.model_dump()
+        system_setting_repository.update(
+            db, db_obj=setting, data={"value_json": json.dumps(payload)}
+        )
+        return ExecutionBillingPolicy.model_validate(payload)
 
     def price_for_tokens(self, db: Session, tokens: int) -> tuple[float, str]:
         amount = max(int(tokens), 0) * self._token_value(db)
