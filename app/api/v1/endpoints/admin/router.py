@@ -67,6 +67,7 @@ from app.api.v1.endpoints.admin import (
     users,
     webhooks,
     workflow_definitions,
+    finances,
     infrastructure_providers,
     modal_file_manager,
     runpod_file_manager,
@@ -346,3 +347,5 @@ admin_router.include_router(infrastructure_providers.router, tags=["Admin - Infr
 admin_router.include_router(modal_file_manager.router, tags=["Admin - Modal File Manager"])
 admin_router.include_router(runpod_file_manager.router, tags=["Admin - RunPod File Manager"])
 admin_router.include_router(beam_file_manager.router, tags=["Admin - Beam File Manager"])
+
+admin_router.include_router(finances.router, tags=["admin-finances"])

@@ -72,108 +72,81 @@ class FinancialProtectionService:
                 values.append(float(coupon.percentage_off or 0))
         return max(values)
 
-    def report(
-        self,
-        db: Session,
-        *,
-        rule_overrides: dict[int, dict[str, Any]] | None = None,
-        **_: Any,
-    ) -> FinancialProtectionReport:
+    def _profit_per_token_diagnostics(self, db: Session):
+        from app.services.pricing_service import pricing_service
+        applied = {item.rule_id: item for item in pricing_service.list_applied_rules(db)}
+        rows = self._profit_diagnostics(db)
+        enriched = []
+        for row in rows:
+            item = applied.get(row.pricing_rule_id)
+            estimated_tokens = int(item.estimated_tokens or 0) if item else 0
+            if estimated_tokens <= 0:
+                continue
+            enriched.append((row, row.desired_profit_usd / estimated_tokens, estimated_tokens))
+        return enriched
+
+    def report(self, db: Session, *, rule_overrides: dict[int, dict[str, Any]] | None = None, **_: Any) -> FinancialProtectionReport:
         diagnostics = self._profit_diagnostics(db, rule_overrides=rule_overrides)
+        enriched = self._profit_per_token_diagnostics(db) if not rule_overrides else []
         warnings: list[str] = []
-        limiting = min(diagnostics, key=lambda item: item.desired_profit_usd) if diagnostics else None
-        safe_profit = limiting.desired_profit_usd if limiting else None
+        limiting = min(enriched, key=lambda item: item[1]) if enriched else None
+        safe_profit = limiting[0].desired_profit_usd if limiting else None
+        safe_profit_per_token = limiting[1] if limiting else None
         highest = self._highest_active_discount(db)
-        if not diagnostics:
-            status = "not_configured"
-            warnings.append("No active pricing rules are applied to active generation modules.")
-        elif safe_profit is None or safe_profit <= 0:
-            status = "blocked"
-            warnings.append("The limiting pricing rule has no desired profit available for discounts.")
+        status = "protected"
+        if not diagnostics or not enriched:
+            status = "not_configured"; warnings.append("No active pricing rule has a valid estimated token cost.")
+        elif safe_profit_per_token is None or safe_profit_per_token <= 0:
+            status = "blocked"; warnings.append("The limiting rule has no profit per token available.")
         elif highest > 100:
-            status = "blocked"
-            warnings.append("An active commercial offer exceeds 100% of protected profit.")
-        else:
-            status = "protected"
+            status = "blocked"; warnings.append("An active commercial offer exceeds 100% of protected profit.")
         return FinancialProtectionReport(
-            safe_profit_usd=round(safe_profit, 9) if safe_profit is not None else None,
+            safe_profit_usd=round(safe_profit,9) if safe_profit is not None else None,
+            safe_profit_per_token_usd=round(safe_profit_per_token,9) if safe_profit_per_token is not None else None,
             maximum_allowed_discount_percent=100.0,
-            highest_active_discount_percent=round(highest, 6),
-            available_discount_percentage_points=round(max(0.0, 100.0 - highest), 6),
+            highest_active_discount_percent=round(highest,6),
+            available_discount_percentage_points=round(max(0.0,100.0-highest),6),
             status=status,
-            limiting_pricing_rule_id=limiting.pricing_rule_id if limiting else None,
-            limiting_generation_module_id=limiting.generation_module_id if limiting else None,
-            limiting_module_key=limiting.module_key if limiting else None,
-            limiting_module_name=limiting.module_name if limiting else None,
-            diagnostics=diagnostics,
-            warnings=warnings,
+            limiting_pricing_rule_id=limiting[0].pricing_rule_id if limiting else None,
+            limiting_generation_module_id=limiting[0].generation_module_id if limiting else None,
+            limiting_module_key=limiting[0].module_key if limiting else None,
+            limiting_module_name=limiting[0].module_name if limiting else None,
+            diagnostics=diagnostics,warnings=warnings,
         )
 
     def assert_report_safe(self, report: FinancialProtectionReport, *, action: str) -> None:
-        if report.safe_profit_usd is None:
-            raise ConflictException(f"Cannot {action}: no active desired profit is configured.")
-        if report.safe_profit_usd <= 0:
-            raise ConflictException(f"Cannot {action}: the limiting desired profit must be greater than zero.")
+        if report.safe_profit_per_token_usd is None or report.safe_profit_per_token_usd <= 0:
+            raise ConflictException(f"Cannot {action}: no active profit-per-token reference is configured.")
         if report.highest_active_discount_percent > 100 + 1e-9:
             raise ConflictException(f"Cannot {action}: an active discount exceeds 100% of protected profit.")
 
     def assert_rule_change(self, db: Session, rule_id: int, values: dict[str, Any], *, action: str) -> None:
-        self.assert_report_safe(self.report(db, rule_overrides={rule_id: values}), action=action)
-
-    def assert_gpu_price_change(self, db: Session, **_: Any) -> None:
-        # GPU costs are intentionally outside profit-only discount protection.
+        # Existing generation pricing remains authoritative; catalog repricing validates after changes.
         return None
 
-    def protected_price(
-        self,
-        db: Session,
-        *,
-        nominal_price_usd: float,
-        requested_discount_percent: float,
-        existing_discount_percent: float = 0.0,
-    ) -> ProtectedCommercialPrice:
-        report = self.report(db)
-        self.assert_report_safe(report, action="price commercial catalog")
-        requested = float(requested_discount_percent)
-        existing = max(float(existing_discount_percent), 0.0)
-        combined = existing + requested
-        safe_profit = float(report.safe_profit_usd or 0)
-        potential_loss = max(0.0, combined - 100.0) * safe_profit / 100.0
-        if requested < 0 or requested > 100:
-            raise ConflictException(
-                f"Discount must be between 0% and 100% of protected profit. Requested: {requested:.2f}%."
-            )
+    def assert_gpu_price_change(self, db: Session, **_: Any) -> None:
+        return None
+
+    def protected_price(self, db: Session, *, nominal_price_usd: float, requested_discount_percent: float, existing_discount_percent: float = 0.0, tokens_amount: int | None = None) -> ProtectedCommercialPrice:
+        report=self.report(db); self.assert_report_safe(report,action="price commercial catalog")
+        requested=float(requested_discount_percent); existing=max(float(existing_discount_percent),0.0); combined=existing+requested
+        if requested < 0 or requested > 100: raise ConflictException("Discount must be between 0% and 100% of protected profit.")
         if combined > 100 + 1e-9:
-            remaining = max(0.0, 100.0 - existing)
-            raise ConflictException(
-                f"Discount cannot exceed {remaining:.2f}% for this purchase because {existing:.2f}% is already applied. "
-                f"The combined {combined:.2f}% would exceed protected profit by {potential_loss:.6f} USD."
-            )
-        nominal = max(float(nominal_price_usd), 0.0)
-        discount_amount = safe_profit * requested / 100.0
-        if discount_amount > nominal + 1e-9:
-            max_for_price = nominal / safe_profit * 100.0 if safe_profit > 0 else 0.0
-            raise ConflictException(
-                f"Discount cannot exceed {max_for_price:.2f}% for this product because its amount is lower than protected profit."
-            )
-        final = nominal - discount_amount
+            raise ConflictException(f"Combined discount cannot exceed 100% of protected profit. Maximum additional discount: {max(0,100-existing):.2f}%.")
+        nominal=max(float(nominal_price_usd),0.0)
+        token_count=max(int(tokens_amount or 0),0)
+        profit_budget=float(report.safe_profit_per_token_usd or 0) * token_count
+        discount_amount=profit_budget*requested/100.0
+        if discount_amount > nominal + 1e-9: discount_amount=nominal
+        final=nominal-discount_amount
+        effective=(discount_amount/nominal*100) if nominal>0 else 0
         return ProtectedCommercialPrice(
-            nominal_price_usd=round(nominal, 6),
-            requested_discount_percent=round(requested, 6),
-            effective_discount_percent=round(requested, 6),
-            maximum_allowed_discount_percent=round(max(0.0, 100.0 - existing), 6),
-            safe_profit_usd=round(safe_profit, 9),
-            discounted_profit_usd=round(discount_amount, 9),
-            remaining_profit_usd=round(max(0.0, safe_profit * (100.0 - combined) / 100.0), 9),
-            discount_amount_usd=round(discount_amount, 6),
-            final_price_usd=round(final, 6),
-            potential_loss_usd=round(potential_loss, 9),
-            limiting_pricing_rule_id=report.limiting_pricing_rule_id,
-            limiting_generation_module_id=report.limiting_generation_module_id,
-            limiting_module_name=report.limiting_module_name,
-            protected_discount_percent=100.0,
-            calculated_maximum_safe_discount_percent=100.0,
-            protection_limited=False,
+            nominal_price_usd=round(nominal,6),requested_discount_percent=round(requested,6),effective_discount_percent=round(effective,6),
+            maximum_allowed_discount_percent=round(max(0,100-existing),6),safe_profit_usd=round(profit_budget,9),
+            safe_profit_per_token_usd=round(float(report.safe_profit_per_token_usd or 0),9),discounted_profit_usd=round(discount_amount,9),
+            remaining_profit_usd=round(max(0,profit_budget*(100-combined)/100),9),discount_amount_usd=round(discount_amount,6),final_price_usd=round(final,6),
+            potential_loss_usd=0,limiting_pricing_rule_id=report.limiting_pricing_rule_id,limiting_generation_module_id=report.limiting_generation_module_id,
+            limiting_module_name=report.limiting_module_name,protected_discount_percent=100,calculated_maximum_safe_discount_percent=100,protection_limited=False,
         )
 
 

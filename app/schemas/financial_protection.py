@@ -12,6 +12,7 @@ class FinancialProtectionRuleDiagnostic(BaseModel):
 
 class FinancialProtectionReport(BaseModel):
     safe_profit_usd: float | None = None
+    safe_profit_per_token_usd: float | None = None
     maximum_allowed_discount_percent: float = 100.0
     highest_active_discount_percent: float = 0.0
     available_discount_percentage_points: float = 100.0
@@ -30,6 +31,7 @@ class ProtectedCommercialPrice(BaseModel):
     effective_discount_percent: float
     maximum_allowed_discount_percent: float
     safe_profit_usd: float
+    safe_profit_per_token_usd: float = 0
     discounted_profit_usd: float
     remaining_profit_usd: float
     discount_amount_usd: float

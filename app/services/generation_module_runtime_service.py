@@ -34,6 +34,7 @@ from app.services.generation_module_security_service import generation_module_se
 from app.services.generation_configuration_readiness_service import generation_configuration_readiness_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.generation_module_billing_service import generation_module_billing_service
+from app.services.generation_finance_service import generation_finance_service
 from app.services.ai_engine_settings_service import ai_engine_settings_service
 from app.services.provider_pricing_service import provider_pricing_service
 from app.repositories.pricing_rule_repository import pricing_rule_repository
@@ -709,6 +710,12 @@ class GenerationModuleRuntimeService:
             "termination_status": item.status,
             "pricing_rule_id": item.pricing_rule_id,
         }
+        generation_finance_service.finalize(
+            db, execution_id=str(item.id), module_id=item.module_id, module_key=item.module_key,
+            user_id=item.user_id, status=item.status, infrastructure_cost_usd=infrastructure_cost,
+            billing_breakdown=item.billing_breakdown,
+        )
+        db.commit()
 
 
     @staticmethod

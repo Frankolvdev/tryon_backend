@@ -1066,6 +1066,8 @@ class SubscriptionService:
             description=(
                 f"Tokens incluidos en el plan {plan.name}"
             ),
+            monetary_value_usd=float(plan.price_amount),
+            lot_metadata={"subscription_id": subscription.id, "plan_id": plan.id, "invoice_reference": reference_id, "currency": plan.currency},
         )
 
         granted_invoice_ids.append(reference_id)

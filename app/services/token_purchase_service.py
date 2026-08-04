@@ -629,6 +629,8 @@ class TokenPurchaseService:
             description=(
                 f"Token purchase #{purchase.id}"
             ),
+            monetary_value_usd=float(purchase.amount),
+            lot_metadata={"purchase_id": purchase.id, "token_package_id": purchase.token_package_id, "currency": purchase.currency},
         )
 
         purchase.status = TokenPurchaseStatus.CREDITED.value

@@ -69,7 +69,7 @@ class SubscriptionPlanService:
         metadata = self._parse_dict(plan.metadata_json)
         requested_discount = float(metadata.get("requested_discount_percent") or 0)
         protected_price = financial_protection_service.protected_price(
-            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount
+            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount, tokens_amount=plan.tokens_per_period
         )
         return SubscriptionPlanResponse(
             id=plan.id,
@@ -221,7 +221,7 @@ class SubscriptionPlanService:
 
         nominal_price, calculated_currency = pricing_service.price_for_tokens(db, data.tokens_per_period)
         protected_price = financial_protection_service.protected_price(
-            db, nominal_price_usd=nominal_price, requested_discount_percent=float(data.requested_discount_percent)
+            db, nominal_price_usd=nominal_price, requested_discount_percent=float(data.requested_discount_percent), tokens_amount=data.tokens_per_period
         )
         metadata = dict(data.metadata or {})
         metadata["requested_discount_percent"] = protected_price.requested_discount_percent
@@ -292,7 +292,7 @@ class SubscriptionPlanService:
         current_metadata = self._parse_dict(plan.metadata_json)
         requested_discount = float(update_data.get("requested_discount_percent", current_metadata.get("requested_discount_percent", 0)) or 0)
         protected_price = financial_protection_service.protected_price(
-            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount
+            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount, tokens_amount=final_tokens
         )
         final_data["price_amount"] = Decimal(str(protected_price.final_price_usd))
         final_data["currency"] = calculated_currency

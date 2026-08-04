@@ -12,13 +12,14 @@ from app.repositories.user_repository import user_repository
 from app.schemas.token import TokenPackageCreate, TokenPackageResponse, TokenPackageUpdate
 from app.services.pricing_service import pricing_service
 from app.services.financial_protection_service import financial_protection_service
+from app.services.token_value_ledger_service import token_value_ledger_service
 
 
 class TokenService:
     def _package_response(self, db: Session, package: TokenPackage) -> TokenPackageResponse:
         nominal_price, currency = pricing_service.price_for_tokens(db, package.tokens_amount)
         protected_price = financial_protection_service.protected_price(
-            db, nominal_price_usd=nominal_price, requested_discount_percent=float(package.requested_discount_percent or 0)
+            db, nominal_price_usd=nominal_price, requested_discount_percent=float(package.requested_discount_percent or 0), tokens_amount=package.tokens_amount
         )
         calculated_cents = int(round(protected_price.final_price_usd * 100))
         return TokenPackageResponse(
@@ -63,7 +64,7 @@ class TokenService:
     ) -> TokenPackageResponse:
         nominal_price, currency = pricing_service.price_for_tokens(db, data.tokens_amount)
         protected_price = financial_protection_service.protected_price(
-            db, nominal_price_usd=nominal_price, requested_discount_percent=data.requested_discount_percent
+            db, nominal_price_usd=nominal_price, requested_discount_percent=data.requested_discount_percent, tokens_amount=data.tokens_amount
         )
         package = token_package_repository.create(
             db,
@@ -97,7 +98,7 @@ class TokenService:
         requested_discount = float(update_data.pop("requested_discount_percent", package_obj.requested_discount_percent or 0) or 0)
         nominal_price, currency = pricing_service.price_for_tokens(db, final_tokens)
         protected_price = financial_protection_service.protected_price(
-            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount
+            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount, tokens_amount=final_tokens
         )
         update_data["price_cents"] = int(round(protected_price.final_price_usd * 100))
         update_data["nominal_price_cents"] = int(round(protected_price.nominal_price_usd * 100))
@@ -149,6 +150,9 @@ class TokenService:
         reference_id: str | None = None,
         description: str | None = None,
         commit: bool = True,
+        monetary_value_usd: float = 0.0,
+        lot_metadata: dict | None = None,
+        create_value_lot: bool = True,
     ) -> User:
         if amount <= 0:
             raise ConflictException("Credit amount must be greater than zero.")
@@ -176,11 +180,15 @@ class TokenService:
 
         db.add(user)
         db.add(transaction)
+        db.flush()
+        if create_value_lot:
+            token_value_ledger_service.create_lot(
+                db, user_id=user.id, tokens=amount, source=source, reference_id=reference_id,
+                amount_paid_usd=monetary_value_usd, metadata=lot_metadata,
+            )
         if commit:
             db.commit()
             db.refresh(user)
-        else:
-            db.flush()
 
         return user
 
@@ -194,6 +202,7 @@ class TokenService:
         reference_id: str | None = None,
         description: str | None = None,
         commit: bool = True,
+        allocation_reference: str | None = None,
     ) -> User:
         if amount <= 0:
             raise ConflictException("Debit amount must be greater than zero.")
@@ -224,11 +233,15 @@ class TokenService:
 
         db.add(user)
         db.add(transaction)
+        db.flush()
+        if allocation_reference:
+            token_value_ledger_service.allocate(
+                db, user_id=user.id, execution_id=allocation_reference, tokens=amount,
+                token_transaction_id=transaction.id,
+            )
         if commit:
             db.commit()
             db.refresh(user)
-        else:
-            db.flush()
 
         return user
 

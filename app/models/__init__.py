@@ -98,6 +98,9 @@ from app.models.token_purchase import TokenPurchase
 from app.models.token_transaction import (
     TokenTransaction,
 )
+from app.models.token_value_lot import TokenValueLot
+from app.models.token_consumption_allocation import TokenConsumptionAllocation
+from app.models.generation_financial_record import GenerationFinancialRecord
 from app.models.tryon_job import TryOnJob
 from app.models.user import User
 from app.models.user_account_security import (
@@ -189,6 +192,9 @@ __all__ = [
     "TokenPackage",
     "TokenPurchase",
     "TokenTransaction",
+    "TokenValueLot",
+    "TokenConsumptionAllocation",
+    "GenerationFinancialRecord",
     "TryOnJob",
     "User",
     "UserAccountSecurity",

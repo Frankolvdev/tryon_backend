@@ -364,7 +364,7 @@ class PricingService:
                 metadata = {}
             protected = financial_protection_service.protected_price(
                 db, nominal_price_usd=amount,
-                requested_discount_percent=float(metadata.get("requested_discount_percent") or 0),
+                requested_discount_percent=float(metadata.get("requested_discount_percent") or 0), tokens_amount=plan.tokens_per_period,
             )
             metadata["effective_discount_percent"] = protected.effective_discount_percent
             metadata["financial_protection_snapshot"] = protected.model_dump()
@@ -376,7 +376,7 @@ class PricingService:
             amount, _ = self.price_for_tokens(db, package.tokens_amount)
             protected = financial_protection_service.protected_price(
                 db, nominal_price_usd=amount,
-                requested_discount_percent=float(package.requested_discount_percent or 0),
+                requested_discount_percent=float(package.requested_discount_percent or 0), tokens_amount=package.tokens_amount,
             )
             package.nominal_price_cents = int(round(protected.nominal_price_usd * 100))
             package.price_cents = int(round(protected.final_price_usd * 100))

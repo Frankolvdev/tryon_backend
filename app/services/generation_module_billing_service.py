@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.token_transaction_repository import token_transaction_repository
 from app.services.token_service import token_service
+from app.services.token_value_ledger_service import token_value_ledger_service
 
 
 class GenerationModuleBillingService:
@@ -25,6 +26,7 @@ class GenerationModuleBillingService:
             source=self.debit_source,
             reference_id=execution_id,
             description=f"Generation module '{module_key}' execution",
+            allocation_reference=execution_id,
         )
 
     def refund(self, db: Session, *, user_id: int, execution_id: str, module_key: str, tokens: int, reason: str) -> bool:
@@ -35,6 +37,7 @@ class GenerationModuleBillingService:
         )
         if existing:
             return False
+        token_value_ledger_service.restore(db, execution_id=execution_id, tokens=tokens)
         token_service.credit_tokens(
             db,
             user_id=user_id,
@@ -42,6 +45,7 @@ class GenerationModuleBillingService:
             source=self.refund_source,
             reference_id=execution_id,
             description=f"Refund for generation module '{module_key}': {reason}",
+            create_value_lot=False,
         )
         return True
 
@@ -67,6 +71,7 @@ class GenerationModuleBillingService:
                     db, user_id=user_id, amount=extra, source=source,
                     reference_id=execution_id,
                     description=f"Final generation cost adjustment for '{module_key}': {reason}",
+                    allocation_reference=execution_id,
                 )
                 return extra, 0
         elif final < previous:
@@ -76,10 +81,12 @@ class GenerationModuleBillingService:
                 db, user_id=user_id, source=source, reference_id=execution_id
             )
             if not existing:
+                token_value_ledger_service.restore(db, execution_id=execution_id, tokens=refund)
                 token_service.credit_tokens(
                     db, user_id=user_id, amount=refund, source=source,
                     reference_id=execution_id,
                     description=f"Unused generation estimate returned for '{module_key}': {reason}",
+                    create_value_lot=False,
                 )
                 return 0, refund
         return 0, 0
