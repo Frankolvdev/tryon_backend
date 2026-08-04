@@ -68,6 +68,10 @@ class GenerationModuleExecutionResponse(BaseModel):
     real_provider_duration_ms: int | None = None
     estimated_duration_seconds: float | None = None
     estimated_duration_source: str | None = None
+    estimated_billable_seconds: float | None = None
+    estimated_infrastructure_cost_usd: float | None = None
+    estimated_final_price_usd: float | None = None
+    estimated_tokens_before_execution: int | None = None
     billing_breakdown: dict[str, Any] = Field(default_factory=dict)
     recovery_count: int = 0
     recovered_at: datetime | None = None

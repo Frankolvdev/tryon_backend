@@ -83,6 +83,54 @@ class GenerationModuleRuntimeService:
         if user_id is not None and (pricing is None or not pricing.is_active):
             raise AppException("The generation module has no active pricing rule.")
         tokens = int(pricing.required_tokens) if pricing and user_id is not None else 0
+        applied_pricing = (
+            pricing_service.get_applied_rule_for_module(db, module.id)
+            if pricing is not None
+            else None
+        )
+        estimated_duration_seconds = (
+            float(pricing.estimated_duration_seconds)
+            if pricing is not None and pricing.estimated_duration_seconds is not None
+            else None
+        )
+        estimated_duration_source = (
+            str(pricing.estimated_duration_source)
+            if pricing is not None and pricing.estimated_duration_source
+            else None
+        )
+        estimated_billable_seconds = (
+            float(pricing.estimated_billable_seconds)
+            if pricing is not None and pricing.estimated_billable_seconds is not None
+            else None
+        )
+        estimated_infrastructure_cost_usd = (
+            float(applied_pricing.estimated_infrastructure_cost_usd)
+            if applied_pricing is not None
+            and applied_pricing.estimated_infrastructure_cost_usd is not None
+            else None
+        )
+        estimated_final_price_usd = (
+            float(applied_pricing.estimated_final_price_usd)
+            if applied_pricing is not None
+            and applied_pricing.estimated_final_price_usd is not None
+            else (float(pricing.final_price_usd) if pricing is not None else None)
+        )
+        estimated_tokens_before_execution = (
+            int(pricing.required_tokens) if pricing is not None else None
+        )
+        estimated_pricing_snapshot = {
+            "finalized": False,
+            "pricing_rule_id": (pricing.id if pricing else None),
+            "provider": (pricing.provider if pricing else None),
+            "gpu_key": (pricing.gpu_key if pricing else None),
+            "estimated_duration_seconds": estimated_duration_seconds,
+            "estimated_duration_source": estimated_duration_source,
+            "estimated_billable_seconds": estimated_billable_seconds,
+            "estimated_infrastructure_cost_usd": estimated_infrastructure_cost_usd,
+            "estimated_final_price_usd": estimated_final_price_usd,
+            "token_value_usd": (float(pricing.token_value_usd) if pricing else None),
+            "estimated_tokens_before_execution": estimated_tokens_before_execution,
+        }
         if user_id is not None and tokens > 0:
             generation_module_billing_service.charge(
                 db, user_id=user_id, execution_id=str(execution_id), module_key=module.key, tokens=tokens
@@ -96,6 +144,13 @@ class GenerationModuleRuntimeService:
             currency=(pricing.currency if pricing else None),
             commercial_price=(pricing.final_price_usd if pricing else None),
             provider_endpoint_id=module.endpoint,
+            estimated_duration_seconds=estimated_duration_seconds,
+            estimated_duration_source=estimated_duration_source,
+            estimated_billable_seconds=estimated_billable_seconds,
+            estimated_infrastructure_cost_usd=estimated_infrastructure_cost_usd,
+            estimated_final_price_usd=estimated_final_price_usd,
+            estimated_tokens_before_execution=estimated_tokens_before_execution,
+            billing_breakdown=estimated_pricing_snapshot,
         )
         with self._lock:
             self._items[execution.id] = execution
@@ -597,7 +652,15 @@ class GenerationModuleRuntimeService:
             item.tokens_charged = final_tokens
             item.tokens_refunded = refunded > 0
         item.commercial_price = round(final_price, 9) if final_price is not None else item.commercial_price
+        estimated_snapshot = dict(item.billing_breakdown or {})
+        initial_estimated_tokens = int(
+            estimated_snapshot.get("estimated_tokens_before_execution")
+            or item.estimated_tokens_before_execution
+            or (item.tokens_charged - extra + refunded)
+            or 0
+        )
         item.billing_breakdown = {
+            **estimated_snapshot,
             "finalized": True,
             "provider": provider,
             "gpu_key": gpu_key,
@@ -611,7 +674,7 @@ class GenerationModuleRuntimeService:
             "desired_profit_usd": profit_usd,
             "final_price_usd": round(final_price, 9) if final_price is not None else None,
             "token_value_usd": token_value,
-            "estimated_tokens_before_execution": item.tokens_charged - extra + refunded,
+            "estimated_tokens_before_execution": initial_estimated_tokens,
             "final_tokens": final_tokens,
             "extra_tokens_debited": extra,
             "tokens_refunded": refunded,
