@@ -252,7 +252,7 @@ def delete_subscription_plan(
 
     plan_key = plan.key
 
-    subscription_plan_service.delete_plan(
+    was_archived = subscription_plan_service.delete_plan(
         db,
         plan_id=plan_id,
     )
@@ -260,10 +260,19 @@ def delete_subscription_plan(
     audit_service.create_log(
         db,
         actor_user_id=current_admin.id,
-        action="admin_subscription_plan_deleted",
+        action=(
+            "admin_subscription_plan_archived"
+            if was_archived
+            else "admin_subscription_plan_deleted"
+        ),
         entity_type="subscription_plan",
         entity_id=str(plan_id),
-        description=f"Deleted subscription plan {plan_key}.",
+        description=(
+            f"Archived subscription plan {plan_key} because it has "
+            "subscription history."
+            if was_archived
+            else f"Deleted subscription plan {plan_key}."
+        ),
         ip_address=(
             request.client.host
             if request.client
@@ -273,7 +282,12 @@ def delete_subscription_plan(
     )
 
     return SuccessResponse(
-        message="Subscription plan deleted successfully.",
+        message=(
+            "Subscription plan archived successfully because it has "
+            "subscription history."
+            if was_archived
+            else "Subscription plan deleted successfully."
+        ),
     )
 
 

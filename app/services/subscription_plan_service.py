@@ -10,6 +10,9 @@ from app.models.subscription_plan import SubscriptionPlan
 from app.repositories.subscription_plan_repository import (
     subscription_plan_repository,
 )
+from app.repositories.user_subscription_repository import (
+    user_subscription_repository,
+)
 from app.schemas.subscription_plan import (
     SubscriptionPlanCreate,
     SubscriptionPlanListResponse,
@@ -358,7 +361,13 @@ class SubscriptionPlanService:
         db: Session,
         *,
         plan_id: int,
-    ) -> None:
+    ) -> bool:
+        """Remove a plan safely.
+
+        Returns True when the plan had historical subscriptions and was
+        archived (soft-deleted), or False when it was physically deleted.
+        Historical subscription rows must keep their plan reference intact.
+        """
         plan = self.get_plan(db, plan_id)
 
         if plan.stripe_price_id:
@@ -383,10 +392,27 @@ class SubscriptionPlanService:
             except Exception:
                 pass
 
+        subscription_count = user_subscription_repository.count_filtered(
+            db,
+            plan_id=plan.id,
+        )
+
+        if subscription_count > 0:
+            subscription_plan_repository.update(
+                db,
+                db_obj=plan,
+                data={
+                    "is_active": False,
+                    "is_public": False,
+                },
+            )
+            return True
+
         subscription_plan_repository.delete(
             db,
             db_obj=plan,
         )
+        return False
 
     def _amount_to_cents(self, value: Decimal) -> int:
         normalized = value.quantize(
