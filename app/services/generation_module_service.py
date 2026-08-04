@@ -94,10 +94,16 @@ class GenerationModuleService:
         pricing = None
         if rule is not None:
             quote = pricing_service._to_response(db, rule)
+            applied = pricing_service.get_applied_rule_for_module(db, module.id)
             pricing = GenerationModulePricingResponse(
-                id=quote.id, required_tokens=quote.required_tokens,
-                final_price_usd=quote.final_price_usd, token_value_usd=quote.token_value_usd,
-                currency=quote.currency, is_active=quote.is_active,
+                id=quote.id, required_tokens=(applied.estimated_tokens if applied and applied.estimated_tokens is not None else quote.required_tokens),
+                final_price_usd=(applied.estimated_final_price_usd if applied and applied.estimated_final_price_usd is not None else quote.final_price_usd),
+                token_value_usd=quote.token_value_usd, currency=quote.currency, is_active=quote.is_active,
+                estimated_duration_seconds=(applied.estimated_duration_seconds if applied else quote.initial_estimated_duration_seconds),
+                estimated_duration_source=(applied.estimate_source if applied else "initial"),
+                estimated_billable_seconds=(applied.estimated_billable_seconds if applied else None),
+                provider=(applied.provider if applied else module.default_execution_engine),
+                gpu_key=(applied.gpu_key if applied else None),
             )
         return GenerationModuleResponse(
             id=module.id,

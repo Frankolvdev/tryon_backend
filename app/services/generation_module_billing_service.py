@@ -45,5 +45,44 @@ class GenerationModuleBillingService:
         )
         return True
 
+    def reconcile(
+        self, db: Session, *, user_id: int, execution_id: str, module_key: str,
+        previously_charged: int, final_tokens: int, reason: str,
+    ) -> tuple[int, int]:
+        """Synchronously reconcile the upfront estimate before the result is exposed.
+
+        Returns ``(extra_debited, refunded)`` and is idempotent through unique
+        token transaction source/reference pairs.
+        """
+        previous = max(int(previously_charged), 0)
+        final = max(int(final_tokens), 0)
+        if final > previous:
+            extra = final - previous
+            source = "generation_module_adjustment"
+            existing = token_transaction_repository.get_by_source_reference(
+                db, user_id=user_id, source=source, reference_id=execution_id
+            )
+            if not existing:
+                token_service.debit_tokens(
+                    db, user_id=user_id, amount=extra, source=source,
+                    reference_id=execution_id,
+                    description=f"Final generation cost adjustment for '{module_key}': {reason}",
+                )
+                return extra, 0
+        elif final < previous:
+            refund = previous - final
+            source = "generation_module_price_refund"
+            existing = token_transaction_repository.get_by_source_reference(
+                db, user_id=user_id, source=source, reference_id=execution_id
+            )
+            if not existing:
+                token_service.credit_tokens(
+                    db, user_id=user_id, amount=refund, source=source,
+                    reference_id=execution_id,
+                    description=f"Unused generation estimate returned for '{module_key}': {reason}",
+                )
+                return 0, refund
+        return 0, 0
+
 
 generation_module_billing_service = GenerationModuleBillingService()

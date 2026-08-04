@@ -393,15 +393,22 @@ class ModalPipelineAdapterService:
         progress_callback: Callable[[float, str, dict[str, Any] | None], None] | None = None,
         cancellation_callback: Callable[[], bool] | None = None,
         submitted_callback: Callable[[str], None] | None = None,
+        existing_call_id: str | None = None,
     ) -> dict[str, Any]:
         if cancellation_callback and cancellation_callback():
             raise InterruptedError("Modal execution cancelled before dispatch.")
         if progress_callback:
             progress_callback(2.0, "Submitting Modal FunctionCall.", {"provider_status": "DISPATCHING"})
         started = time.monotonic()
-        call_id = self.submit_pipeline(config, payload=payload)
-        if submitted_callback:
-            submitted_callback(call_id)
+        call_id = str(existing_call_id or "").strip()
+        resumed = bool(call_id)
+        if resumed:
+            self._call(config, call_id, refresh=True)
+            logger.warning("[backend-modal-resume] execution_id=%s call_id=%s", payload.get("execution_id"), call_id)
+        else:
+            call_id = self.submit_pipeline(config, payload=payload)
+            if submitted_callback:
+                submitted_callback(call_id)
         if cancellation_callback and cancellation_callback():
             cancellation = self.cancel_call(config, call_id=call_id)
             raise InterruptedError(
@@ -448,6 +455,7 @@ class ModalPipelineAdapterService:
                     "execution_time_ms": elapsed_ms,
                     "runtime_url": None,
                     "provider_job_id": call_id,
+                    "resumed": resumed,
                 }
             time.sleep(poll_interval)
             poll_interval = min(6.0, poll_interval + 0.5)

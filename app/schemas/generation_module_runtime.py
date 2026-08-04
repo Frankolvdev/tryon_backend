@@ -59,8 +59,15 @@ class GenerationModuleExecutionResponse(BaseModel):
     queue_position: int | None = None
     provider_status: str | None = None
     provider_job_id: str | None = None
+    provider_submitted_at: datetime | None = None
     provider_endpoint_id: str | None = None
     dispatch_attempts: int = 0
     heartbeat_at: datetime | None = None
     runtime_metrics: dict[str, Any] = Field(default_factory=dict)
     provider_metrics: dict[str, Any] = Field(default_factory=dict)
+    real_provider_duration_ms: int | None = None
+    estimated_duration_seconds: float | None = None
+    estimated_duration_source: str | None = None
+    billing_breakdown: dict[str, Any] = Field(default_factory=dict)
+    recovery_count: int = 0
+    recovered_at: datetime | None = None

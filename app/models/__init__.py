@@ -67,6 +67,7 @@ from app.models.operational_event import (
 )
 from app.models.oauth_account import OAuthAccount
 from app.models.pricing_rule import PricingRule
+from app.models.provider_gpu_price import ProviderGpuPrice
 from app.models.rate_limit_policy import (
     RateLimitPolicy,
 )

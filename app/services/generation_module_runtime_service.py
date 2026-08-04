@@ -6,7 +6,7 @@ import io
 import json
 import threading
 import time
-import time
+import math
 import tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import AppException, NotFoundException
 from app.common.generation_module_enums import GenerationExecutionEngine, GenerationModuleStepType
 from app.common.time import utc_now
+from app.common.generation_execution_state_machine import transition_execution
 from app.db.database import SessionLocal
 from app.schemas.generation_module_runtime import (
     GenerationModuleExecutionCreate,
@@ -32,6 +33,10 @@ from app.services.generation_module_file_materializer_service import generation_
 from app.services.generation_module_security_service import generation_module_security_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.generation_module_billing_service import generation_module_billing_service
+from app.services.ai_engine_settings_service import ai_engine_settings_service
+from app.services.provider_pricing_service import provider_pricing_service
+from app.repositories.pricing_rule_repository import pricing_rule_repository
+from app.services.pricing_service import pricing_service
 from app.services.generation_module_result_service import generation_module_result_service
 from app.services.storage_service import storage_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
@@ -211,6 +216,7 @@ class GenerationModuleRuntimeService:
             item.cancel_requested = True
             item.provider_status = "CANCEL_REQUESTED"
             item.heartbeat_at = utc_now()
+            item.provider_metrics["cancel_requested_at"] = item.heartbeat_at.isoformat()
             item.logs.append(GenerationModuleExecutionLog(
                 timestamp=item.heartbeat_at,
                 level="warning",
@@ -265,12 +271,17 @@ class GenerationModuleRuntimeService:
                 )
 
             db = SessionLocal()
+            cancellation_started = time.monotonic()
             try:
                 config = infrastructure_provider_service.get_modal(db)
                 cancellation = modal_pipeline_adapter_service.cancel_call(
                     config, call_id=call_id
                 )
             finally:
+                cancellation_time_ms = int((time.monotonic() - cancellation_started) * 1000)
+                with self._lock:
+                    tracked = self._items[execution_id]
+                    tracked.provider_metrics["cancellation_time_ms"] = cancellation_time_ms
                 db.close()
 
             cancellation_errors = cancellation.get("errors") or []
@@ -350,41 +361,21 @@ class GenerationModuleRuntimeService:
             ))
             snapshot = item.model_copy(deep=True)
         generation_module_execution_store_service.save(snapshot)
-        self._refund_confirmed_cancellation(execution_id)
+        db = SessionLocal()
+        try:
+            with self._lock:
+                billing_item = self._items[execution_id]
+                if billing_item.started_at:
+                    billing_item.duration_ms = int((cancelled_at - billing_item.started_at).total_seconds() * 1000)
+            self._finalize_dynamic_billing(db, billing_item)
+            generation_module_execution_store_service.save(billing_item.model_copy(deep=True))
+        finally:
+            db.close()
         return self.get(execution_id)
 
     def _refund_confirmed_cancellation(self, execution_id: UUID) -> None:
-        with self._lock:
-            item = self._items[execution_id]
-            if item.tokens_refunded or item.user_id is None or item.tokens_charged <= 0:
-                return
-            user_id = item.user_id
-            module_key = item.module_key
-            tokens = item.tokens_charged
-        db = SessionLocal()
-        try:
-            refunded = generation_module_billing_service.refund(
-                db,
-                user_id=user_id,
-                execution_id=str(execution_id),
-                module_key=module_key,
-                tokens=tokens,
-                reason="cancelled after provider cancellation handling",
-            )
-            if refunded:
-                with self._lock:
-                    item = self._items[execution_id]
-                    if item.tokens_refunded:
-                        return
-                    item.tokens_refunded = True
-                    item.logs.append(GenerationModuleExecutionLog(
-                        timestamp=utc_now(),
-                        message=f"{tokens} tokens refunded after cancellation was finalized locally.",
-                    ))
-                    snapshot = item.model_copy(deep=True)
-                generation_module_execution_store_service.save(snapshot)
-        finally:
-            db.close()
+        """Deprecated: dynamic billing now charges actual provider consumption."""
+        return None
 
     def delete(self, execution_id: UUID) -> None:
         item = self.get(execution_id)
@@ -411,15 +402,17 @@ class GenerationModuleRuntimeService:
         }
 
     def _run(self, execution_id: UUID, module: dict[str, Any]) -> None:
-        started = utc_now()
+        resumed_at = utc_now()
         db = SessionLocal()
         with self._lock:
             item = self._items[execution_id]
-            item.status = "running"; item.started_at = started
+            started = item.started_at or resumed_at
+            transition_execution(item, "running")
+            item.started_at = started
             item.queue_position = None
             item.provider_status = ("running_local" if item.engine == GenerationExecutionEngine.LOCAL_DOCKER else ("dispatching_to_runpod" if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS else ("dispatching_to_modal" if item.engine == GenerationExecutionEngine.MODAL else ("dispatching_to_beam" if item.engine == GenerationExecutionEngine.BEAM else "running_simulation"))))
             item.heartbeat_at = started
-            item.logs.append(GenerationModuleExecutionLog(timestamp=started, message="Execution started by the unified provider worker."))
+            item.logs.append(GenerationModuleExecutionLog(timestamp=resumed_at, message=("Execution resumed by the unified provider worker." if item.provider_job_id else "Execution started by the unified provider worker.")))
             running_snapshot = item.model_copy(deep=True)
         generation_module_execution_store_service.save(running_snapshot)
         try:
@@ -502,31 +495,93 @@ class GenerationModuleRuntimeService:
                 item.heartbeat_at = finished
                 item.provider_status = "COMPLETED" if item.status == "completed" else item.status.upper()
                 self._provider_refs.pop(execution_id, None)
-                should_refund = item.status in {"failed", "cancelled"} and item.user_id is not None and item.tokens_charged > 0
-                refund_reason = item.error or item.status
-            if should_refund:
-                try:
-                    refunded = generation_module_billing_service.refund(
-                        db, user_id=item.user_id, execution_id=str(item.id), module_key=item.module_key,
-                        tokens=item.tokens_charged, reason=refund_reason,
-                    )
-                    if refunded:
-                        with self._lock:
-                            if not item.tokens_refunded:
-                                item.tokens_refunded = True
-                                item.logs.append(GenerationModuleExecutionLog(
-                                    timestamp=utc_now(), message=f"{item.tokens_charged} tokens refunded automatically."
-                                ))
-                except Exception as refund_error:
-                    db.rollback()
-                    with self._lock:
-                        item.logs.append(GenerationModuleExecutionLog(
-                            timestamp=utc_now(), level="error", message=f"Automatic token refund failed: {refund_error}"
-                        ))
+            try:
+                with self._lock:
+                    billing_item = self._items[execution_id]
+                self._finalize_dynamic_billing(db, billing_item)
+            except Exception as billing_error:
+                db.rollback()
+                with self._lock:
+                    item.logs.append(GenerationModuleExecutionLog(
+                        timestamp=utc_now(), level="error",
+                        message=f"Dynamic billing finalization failed without changing the execution result: {billing_error}",
+                    ))
             with self._lock:
                 final_snapshot = item.model_copy(deep=True)
             db.close()
             generation_module_execution_store_service.save(final_snapshot)
+
+
+    def _finalize_dynamic_billing(self, db: Session, item: GenerationModuleExecutionResponse) -> None:
+        """Create an immutable per-execution billing snapshot.
+
+        This runs synchronously before the final execution snapshot is exposed,
+        including recovered, failed and cancelled provider calls.
+        """
+        if item.billing_breakdown.get("finalized"):
+            return
+        provider = item.engine.value if hasattr(item.engine, "value") else str(item.engine)
+        rule = pricing_rule_repository.get_by_id(db, item.pricing_rule_id) if item.pricing_rule_id else None
+        completed_step_ms = sum(max(int(step.duration_ms or 0), 0) for step in item.steps)
+        elapsed_ms = int(
+            completed_step_ms
+            or (item.runtime_metrics or {}).get("execution_time_ms")
+            or (item.runtime_metrics or {}).get("duration_ms")
+            or (item.provider_metrics or {}).get("pipeline_duration_ms")
+            or (item.provider_metrics or {}).get("execution_time_ms")
+            or item.real_provider_duration_ms
+            or item.duration_ms
+            or 0
+        )
+        if item.started_at and item.finished_at:
+            elapsed_ms = max(elapsed_ms, int((item.finished_at - item.started_at).total_seconds() * 1000))
+        item.real_provider_duration_ms = max(elapsed_ms, 0)
+
+        gpu_key = None
+        scaledown_seconds = 0
+        if provider == GenerationExecutionEngine.MODAL.value:
+            engine_settings = ai_engine_settings_service.get(db)
+            gpu_key = engine_settings.modal_gpu
+            scaledown_seconds = int(engine_settings.modal_scaledown_window_seconds)
+        gpu_cost = provider_pricing_service.get_cost(db, provider=provider, gpu_key=gpu_key)
+        margin_seconds = int(getattr(rule, "technical_margin_seconds", 0) or 0)
+        profit_usd = float(getattr(rule, "desired_profit_usd", 0) or 0)
+        actual_seconds = round(item.real_provider_duration_ms / 1000, 3)
+        billable_seconds = round(actual_seconds + scaledown_seconds + margin_seconds, 3)
+        infrastructure_cost = (billable_seconds * gpu_cost) if gpu_cost is not None else None
+        final_price = (infrastructure_cost + profit_usd) if infrastructure_cost is not None else None
+        token_value = pricing_service.get_commercial_settings(db).token_value_usd
+        final_tokens = max(1, math.ceil(final_price / token_value)) if final_price is not None else item.tokens_charged
+        extra = refunded = 0
+        if item.user_id is not None and final_price is not None:
+            extra, refunded = generation_module_billing_service.reconcile(
+                db, user_id=item.user_id, execution_id=str(item.id), module_key=item.module_key,
+                previously_charged=item.tokens_charged, final_tokens=final_tokens,
+                reason=f"{item.status} after {actual_seconds:.3f}s provider time",
+            )
+            item.tokens_charged = final_tokens
+            item.tokens_refunded = refunded > 0
+        item.commercial_price = round(final_price, 9) if final_price is not None else item.commercial_price
+        item.billing_breakdown = {
+            "finalized": True,
+            "provider": provider,
+            "gpu_key": gpu_key,
+            "gpu_cost_usd_per_second": gpu_cost,
+            "real_provider_seconds": actual_seconds,
+            "configured_scaledown_seconds": scaledown_seconds,
+            "technical_margin_seconds": margin_seconds,
+            "billable_seconds": billable_seconds,
+            "infrastructure_cost_usd": round(infrastructure_cost, 9) if infrastructure_cost is not None else None,
+            "desired_profit_usd": profit_usd,
+            "final_price_usd": round(final_price, 9) if final_price is not None else None,
+            "token_value_usd": token_value,
+            "estimated_tokens_before_execution": item.tokens_charged - extra + refunded,
+            "final_tokens": final_tokens,
+            "extra_tokens_debited": extra,
+            "tokens_refunded": refunded,
+            "termination_status": item.status,
+            "pricing_rule_id": item.pricing_rule_id,
+        }
 
 
     @staticmethod
@@ -552,6 +607,7 @@ class GenerationModuleRuntimeService:
                 "provider_job_id": call_id,
             }
             item.provider_job_id = call_id
+            item.provider_submitted_at = item.provider_submitted_at or utc_now()
             item.provider_status = "IN_QUEUE"
             item.heartbeat_at = utc_now()
             item.logs.append(GenerationModuleExecutionLog(
@@ -615,6 +671,7 @@ class GenerationModuleRuntimeService:
             ),
             cancellation_callback=lambda: self.get(execution_id).cancel_requested,
             submitted_callback=lambda call_id: self._modal_submitted(execution_id, call_id),
+            existing_call_id=current.provider_job_id,
         )
         output = result.get("output")
         if not isinstance(output, dict):
@@ -661,6 +718,8 @@ class GenerationModuleRuntimeService:
                 "provider": "modal",
                 "execution_time_ms": result.get("execution_time_ms"),
                 "runtime_url": result.get("runtime_url"),
+                "provider_job_id": result.get("provider_job_id") or item.provider_job_id,
+                "resumed_after_backend_restart": bool(result.get("resumed")),
             }
             item.status = "completed"
             item.progress = 100

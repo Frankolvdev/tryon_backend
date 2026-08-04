@@ -82,11 +82,22 @@ class GenerationJobOrchestratorService:
             if item.status == "queued":
                 generation_job_queue_service.enqueue(item.id, engine=item.engine)
             elif item.status == "running":
-                item.status = "queued"
-                item.progress = min(item.progress, 5)
-                item.logs.append(self._runtime.recovery_log())
-                generation_module_execution_store_service.save(item)
-                generation_job_queue_service.enqueue(item.id, engine=item.engine)
+                # Only Modal can be resumed safely from its durable FunctionCall ID.
+                # Never turn a running execution back into queued: that caused a
+                # second provider job to be created after every backend restart.
+                if item.engine == GenerationExecutionEngine.MODAL and item.provider_job_id:
+                    item.recovery_count += 1
+                    item.recovered_at = utc_now()
+                    item.logs.append(self._runtime.recovery_log())
+                    generation_module_execution_store_service.save(item)
+                    generation_job_queue_service.enqueue(item.id, engine=item.engine)
+                else:
+                    item.status = "failed"
+                    item.error = "Execution could not be resumed safely after backend restart; no retry was created."
+                    item.finished_at = utc_now()
+                    item.provider_status = "RECOVERY_FAILED"
+                    item.logs.append(GenerationModuleExecutionLog(timestamp=item.finished_at, level="error", message=item.error))
+                    generation_module_execution_store_service.save(item)
 
     def _fail_orphaned_job(self, execution_id: UUID | None, error: Exception) -> None:
         if execution_id is None:
@@ -123,7 +134,7 @@ class GenerationJobOrchestratorService:
             try:
                 execution_id = UUID(raw_id)
                 current = generation_module_execution_store_service.get(execution_id)
-                if current is None or current.status != "queued" or current.cancel_requested:
+                if current is None or current.status not in {"queued", "running"} or current.cancel_requested:
                     continue
                 db = SessionLocal()
                 try:

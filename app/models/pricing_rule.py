@@ -1,6 +1,7 @@
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.common.enums import PricingOperationType, QualityMode, TryOnItemType
@@ -47,6 +48,9 @@ class PricingRule(Base):
     estimated_gpu_seconds: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     estimated_gpu_cost_cents: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     margin_percent: Mapped[int] = mapped_column(Integer, default=70, nullable=False)
+    desired_profit_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=0, nullable=False)
+    initial_estimated_duration_seconds: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    technical_margin_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
 

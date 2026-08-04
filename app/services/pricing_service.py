@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 import math
 from dataclasses import dataclass
+from decimal import Decimal
+from statistics import mean
 
 from sqlalchemy.orm import Session
 
@@ -17,6 +21,10 @@ from app.schemas.pricing import (
     PricingRuleResponse,
     PricingRuleUpdate,
 )
+from app.schemas.provider_pricing import AppliedPricingRuleResponse
+from app.services.ai_engine_settings_service import ai_engine_settings_service
+from app.services.generation_module_execution_store_service import generation_module_execution_store_service
+from app.services.provider_pricing_service import provider_pricing_service
 
 TOKEN_VALUE_KEY = "commercial_token_value_usd"
 CURRENCY_KEY = "commercial_currency"
@@ -26,17 +34,12 @@ DEFAULT_CURRENCY = "USD"
 
 @dataclass(frozen=True, slots=True)
 class PricingExecutionQuote:
-    """Immutable pricing snapshot used when creating an execution job.
-
-    The public PricingRuleResponse intentionally exposes commercial values only.
-    Job creation additionally needs the persisted technical estimates from the
-    selected rule, so this internal quote keeps both concerns separated.
-    """
-
     rule_id: int
     required_tokens: int
     estimated_gpu_seconds: int
     estimated_gpu_cost_cents: int
+    desired_profit_usd: float = 0
+    technical_margin_seconds: int = 0
 
 
 class PricingService:
@@ -50,33 +53,19 @@ class PricingService:
         return str(setting.value_string if setting else DEFAULT_CURRENCY).upper()
 
     def price_for_tokens(self, db: Session, tokens: int) -> tuple[float, str]:
-        normalized_tokens = max(int(tokens), 0)
-        amount = normalized_tokens * self._token_value(db)
-        return round(amount, 2), self._currency(db)
+        amount = max(int(tokens), 0) * self._token_value(db)
+        return round(amount, 6), self._currency(db)
 
     def get_commercial_settings(self, db: Session) -> CommercialSettingsResponse:
-        return CommercialSettingsResponse(
-            token_value_usd=self._token_value(db),
-            currency=self._currency(db),
-        )
+        return CommercialSettingsResponse(token_value_usd=self._token_value(db), currency=self._currency(db))
 
-    def update_commercial_settings(
-        self, db: Session, data: CommercialSettingsUpdate
-    ) -> CommercialSettingsResponse:
+    def update_commercial_settings(self, db: Session, data: CommercialSettingsUpdate) -> CommercialSettingsResponse:
         token_setting = system_setting_repository.get_by_key(db, TOKEN_VALUE_KEY)
         currency_setting = system_setting_repository.get_by_key(db, CURRENCY_KEY)
-
         if not token_setting or not currency_setting:
-            raise NotFoundException(
-                "Commercial settings are missing. Seed default system settings first."
-            )
-
-        system_setting_repository.update(
-            db, db_obj=token_setting, data={"value_float": float(data.token_value_usd)}
-        )
-        system_setting_repository.update(
-            db, db_obj=currency_setting, data={"value_string": data.currency.upper()}
-        )
+            raise NotFoundException("Commercial settings are missing. Seed default system settings first.")
+        system_setting_repository.update(db, db_obj=token_setting, data={"value_float": float(data.token_value_usd)})
+        system_setting_repository.update(db, db_obj=currency_setting, data={"value_string": data.currency.upper()})
         return self.get_commercial_settings(db)
 
     def preview(
@@ -84,34 +73,39 @@ class PricingService:
         db: Session,
         *,
         average_execution_cost_usd: float,
-        desired_profit_percent: float,
+        desired_profit_percent: float = 0,
+        desired_profit_usd: float | None = None,
     ) -> CommercialPricePreviewResponse:
+        cost = max(float(average_execution_cost_usd), 0)
+        if desired_profit_usd is None:
+            profit_usd = cost * max(float(desired_profit_percent), 0) / 100
+        else:
+            profit_usd = max(float(desired_profit_usd), 0)
+        target_price = cost + profit_usd
         token_value = self._token_value(db)
-        target_price = average_execution_cost_usd * (1 + desired_profit_percent / 100)
         required_tokens = max(1, math.ceil(target_price / token_value))
         final_price = required_tokens * token_value
-        effective_margin = (
-            ((final_price - average_execution_cost_usd) / average_execution_cost_usd) * 100
-            if average_execution_cost_usd > 0
-            else 0.0
-        )
+        effective_margin = ((final_price - cost) / cost * 100) if cost > 0 else 0.0
         return CommercialPricePreviewResponse(
-            average_execution_cost_usd=round(average_execution_cost_usd, 6),
-            desired_profit_percent=round(desired_profit_percent, 4),
-            token_value_usd=round(token_value, 6),
+            average_execution_cost_usd=round(cost, 9),
+            desired_profit_percent=round(float(desired_profit_percent or 0), 6),
+            desired_profit_usd=round(profit_usd, 9),
+            token_value_usd=round(token_value, 9),
             currency=self._currency(db),
-            final_price_usd=round(final_price, 6),
+            final_price_usd=round(final_price, 9),
             required_tokens=required_tokens,
-            effective_margin_percent=round(effective_margin, 4),
+            effective_margin_percent=round(effective_margin, 6),
         )
 
     def _to_response(self, db: Session, rule: PricingRule) -> PricingRuleResponse:
         average_cost = float(rule.estimated_gpu_cost_cents or 0) / 100
-        desired_profit = float(rule.margin_percent or 0)
+        legacy_percent = float(rule.margin_percent or 0)
+        desired_profit_usd = float(rule.desired_profit_usd or 0)
         preview = self.preview(
             db,
             average_execution_cost_usd=average_cost,
-            desired_profit_percent=desired_profit,
+            desired_profit_percent=legacy_percent,
+            desired_profit_usd=desired_profit_usd,
         )
         return PricingRuleResponse(
             id=rule.id,
@@ -120,8 +114,11 @@ class PricingService:
             item_type=rule.item_type,
             quality_mode=rule.quality_mode,
             generation_module_id=rule.generation_module_id,
+            desired_profit_usd=desired_profit_usd,
+            initial_estimated_duration_seconds=max(int(rule.initial_estimated_duration_seconds or 30), 1),
+            technical_margin_seconds=max(int(rule.technical_margin_seconds or 0), 0),
             average_execution_cost_usd=average_cost,
-            desired_profit_percent=desired_profit,
+            desired_profit_percent=legacy_percent,
             final_price_usd=preview.final_price_usd,
             required_tokens=preview.required_tokens,
             effective_margin_percent=preview.effective_margin_percent,
@@ -132,9 +129,7 @@ class PricingService:
             updated_at=rule.updated_at,
         )
 
-    def _get_active_tryon_rule(
-        self, db: Session, *, item_type: TryOnItemType, quality_mode: QualityMode
-    ) -> PricingRule:
+    def _get_active_tryon_rule(self, db: Session, *, item_type: TryOnItemType, quality_mode: QualityMode) -> PricingRule:
         rule = pricing_rule_repository.get_active_rule(
             db,
             operation_type=PricingOperationType.TRYON.value,
@@ -145,125 +140,160 @@ class PricingService:
             raise NotFoundException("No active pricing rule found for this operation.")
         return rule
 
-    def get_tryon_price(
-        self, db: Session, *, item_type: TryOnItemType, quality_mode: QualityMode
-    ) -> PricingRuleResponse:
-        rule = self._get_active_tryon_rule(
-            db, item_type=item_type, quality_mode=quality_mode
-        )
-        return self._to_response(db, rule)
+    def get_tryon_price(self, db: Session, *, item_type: TryOnItemType, quality_mode: QualityMode) -> PricingRuleResponse:
+        return self._to_response(db, self._get_active_tryon_rule(db, item_type=item_type, quality_mode=quality_mode))
 
-    def get_tryon_execution_quote(
-        self, db: Session, *, item_type: TryOnItemType, quality_mode: QualityMode
-    ) -> PricingExecutionQuote:
-        rule = self._get_active_tryon_rule(
-            db, item_type=item_type, quality_mode=quality_mode
-        )
-        commercial_price = self._to_response(db, rule)
+    def get_tryon_execution_quote(self, db: Session, *, item_type: TryOnItemType, quality_mode: QualityMode) -> PricingExecutionQuote:
+        rule = self._get_active_tryon_rule(db, item_type=item_type, quality_mode=quality_mode)
+        response = self._to_response(db, rule)
         return PricingExecutionQuote(
             rule_id=rule.id,
-            required_tokens=commercial_price.required_tokens,
-            estimated_gpu_seconds=max(int(rule.estimated_gpu_seconds or 0), 0),
-            estimated_gpu_cost_cents=max(
-                int(rule.estimated_gpu_cost_cents or 0), 0
-            ),
+            required_tokens=response.required_tokens,
+            estimated_gpu_seconds=max(int(rule.initial_estimated_duration_seconds or rule.estimated_gpu_seconds or 0), 0),
+            estimated_gpu_cost_cents=max(int(rule.estimated_gpu_cost_cents or 0), 0),
+            desired_profit_usd=float(rule.desired_profit_usd or 0),
+            technical_margin_seconds=max(int(rule.technical_margin_seconds or 0), 0),
         )
 
     def list_rules(self, db: Session) -> list[PricingRuleResponse]:
         return [self._to_response(db, rule) for rule in pricing_rule_repository.list_all(db)]
 
     def create_rule(self, db: Session, data: PricingRuleCreate) -> PricingRuleResponse:
+        legacy_cost = float(data.average_execution_cost_usd or 0)
+        legacy_percent = float(data.desired_profit_percent or 0)
         preview = self.preview(
             db,
-            average_execution_cost_usd=data.average_execution_cost_usd,
-            desired_profit_percent=data.desired_profit_percent,
+            average_execution_cost_usd=legacy_cost,
+            desired_profit_percent=legacy_percent,
+            desired_profit_usd=data.desired_profit_usd,
         )
-        rule = pricing_rule_repository.create(
-            db,
-            data={
-                "title": data.title.strip(),
-                "operation_type": data.operation_type.value,
-                "item_type": data.item_type.value,
-                "quality_mode": data.quality_mode.value,
-                "generation_module_id": data.generation_module_id,
-                "tokens_cost": preview.required_tokens,
-                "estimated_gpu_seconds": 0,
-                "estimated_gpu_cost_cents": round(data.average_execution_cost_usd * 100),
-                "margin_percent": round(data.desired_profit_percent),
-                "is_active": data.is_active,
-            },
-        )
+        rule = pricing_rule_repository.create(db, data={
+            "title": data.title.strip(),
+            "operation_type": data.operation_type.value,
+            "item_type": data.item_type.value,
+            "quality_mode": data.quality_mode.value,
+            "generation_module_id": data.generation_module_id,
+            "tokens_cost": preview.required_tokens,
+            "estimated_gpu_seconds": data.initial_estimated_duration_seconds,
+            "estimated_gpu_cost_cents": round(legacy_cost * 100),
+            "margin_percent": round(legacy_percent),
+            "desired_profit_usd": Decimal(str(data.desired_profit_usd)),
+            "initial_estimated_duration_seconds": data.initial_estimated_duration_seconds,
+            "technical_margin_seconds": data.technical_margin_seconds,
+            "is_active": data.is_active,
+        })
         return self._to_response(db, rule)
 
-    def update_rule(
-        self, db: Session, rule_id: int, data: PricingRuleUpdate
-    ) -> PricingRuleResponse:
+    def update_rule(self, db: Session, rule_id: int, data: PricingRuleUpdate) -> PricingRuleResponse:
         rule = pricing_rule_repository.get_by_id(db, rule_id)
         if not rule:
             raise NotFoundException("Pricing rule not found.")
-
-        average_cost = (
-            data.average_execution_cost_usd
-            if data.average_execution_cost_usd is not None
-            else float(rule.estimated_gpu_cost_cents or 0) / 100
-        )
-        desired_profit = (
-            data.desired_profit_percent
-            if data.desired_profit_percent is not None
-            else float(rule.margin_percent or 0)
-        )
-        preview = self.preview(
-            db,
-            average_execution_cost_usd=average_cost,
-            desired_profit_percent=desired_profit,
-        )
-        update_data = {
-            "estimated_gpu_cost_cents": round(average_cost * 100),
-            "margin_percent": round(desired_profit),
-            "tokens_cost": preview.required_tokens,
-        }
+        update_data = {}
+        for field in ("desired_profit_usd", "initial_estimated_duration_seconds", "technical_margin_seconds", "is_active"):
+            value = getattr(data, field)
+            if value is not None:
+                update_data[field] = Decimal(str(value)) if field == "desired_profit_usd" else value
         if data.title is not None:
             update_data["title"] = data.title.strip()
         if "generation_module_id" in data.model_fields_set:
             update_data["generation_module_id"] = data.generation_module_id
-        if data.is_active is not None:
-            update_data["is_active"] = data.is_active
+        if data.average_execution_cost_usd is not None:
+            update_data["estimated_gpu_cost_cents"] = round(data.average_execution_cost_usd * 100)
+        if data.desired_profit_percent is not None:
+            update_data["margin_percent"] = round(data.desired_profit_percent)
+        if data.initial_estimated_duration_seconds is not None:
+            update_data["estimated_gpu_seconds"] = data.initial_estimated_duration_seconds
         rule = pricing_rule_repository.update(db, db_obj=rule, data=update_data)
         return self._to_response(db, rule)
-
 
     def delete_rule(self, db: Session, rule_id: int) -> None:
         rule = pricing_rule_repository.get_by_id(db, rule_id)
         if not rule:
             raise NotFoundException("Pricing rule not found.")
-
         if rule.generation_module_id is not None:
             module = db.get(GenerationModule, rule.generation_module_id)
             if module is not None:
                 module.is_active = False
                 db.add(module)
-
         db.delete(rule)
         db.commit()
 
+    def _historical_duration(self, module_id: int, fallback: int) -> tuple[float, str]:
+        rows, _ = generation_module_execution_store_service.list(module_id=module_id, status="completed", skip=0, limit=20)
+        durations = sorted(
+            float((row.provider_metrics or {}).get("execution_time_ms") or row.duration_ms or 0) / 1000
+            for row in rows
+            if ((row.provider_metrics or {}).get("execution_time_ms") or row.duration_ms or 0) > 0
+        )
+        if len(durations) < 5:
+            return float(fallback), "initial"
+        trim = max(1, int(len(durations) * 0.1)) if len(durations) >= 10 else 0
+        values = durations[trim:len(durations)-trim] if trim else durations
+        return round(mean(values), 3), "historical_average"
+
+    def get_applied_rule_for_module(self, db: Session, module_id: int) -> AppliedPricingRuleResponse | None:
+        return next((item for item in self.list_applied_rules(db) if item.generation_module_id == module_id), None)
+
+    def list_applied_rules(self, db: Session) -> list[AppliedPricingRuleResponse]:
+        settings = ai_engine_settings_service.get(db)
+        token_value = self._token_value(db)
+        responses: list[AppliedPricingRuleResponse] = []
+        for rule in pricing_rule_repository.list_all(db):
+            if rule.generation_module_id is None:
+                continue
+            module = db.get(GenerationModule, rule.generation_module_id)
+            if module is None:
+                continue
+            provider = str(module.default_execution_engine or "").lower()
+            gpu_key = settings.modal_gpu if provider == "modal" else None
+            scaledown = settings.modal_scaledown_window_seconds if provider == "modal" else 0
+            gpu_cost = provider_pricing_service.get_cost(db, provider=provider, gpu_key=gpu_key)
+            duration, source = self._historical_duration(module.id, int(rule.initial_estimated_duration_seconds or 30))
+            billable = duration + scaledown + int(rule.technical_margin_seconds or 0)
+            infra = billable * gpu_cost if gpu_cost is not None else None
+            total = infra + float(rule.desired_profit_usd or 0) if infra is not None else None
+            tokens = max(1, math.ceil(total / token_value)) if total is not None else None
+            warnings = []
+            if gpu_key is None:
+                warnings.append("GPU selection is not yet configured for this provider.")
+            if gpu_cost is None:
+                warnings.append("GPU cost per second is missing.")
+            responses.append(AppliedPricingRuleResponse(
+                rule_id=rule.id,
+                rule_title=rule.title,
+                generation_module_id=module.id,
+                module_key=module.key,
+                module_name=module.name,
+                provider=provider,
+                gpu_key=gpu_key,
+                gpu_cost_usd_per_second=gpu_cost,
+                estimated_duration_seconds=duration,
+                estimate_source=source,
+                scaledown_seconds=scaledown,
+                technical_margin_seconds=int(rule.technical_margin_seconds or 0),
+                estimated_billable_seconds=round(billable, 3),
+                estimated_infrastructure_cost_usd=round(infra, 9) if infra is not None else None,
+                desired_profit_usd=float(rule.desired_profit_usd or 0),
+                estimated_final_price_usd=round(total, 9) if total is not None else None,
+                token_value_usd=token_value,
+                estimated_tokens=tokens,
+                configured=not warnings,
+                warnings=warnings,
+            ))
+        return responses
+
     def reprice_catalog(self, db: Session) -> dict[str, int | float | str]:
-        from decimal import Decimal
         from app.repositories.subscription_plan_repository import subscription_plan_repository
         from app.repositories.token_package_repository import token_package_repository
-
         plans = subscription_plan_repository.list_all_filtered(db, skip=0, limit=10000)
         packages = token_package_repository.list_all(db)
         currency = self._currency(db)
         for plan in plans:
             amount, _ = self.price_for_tokens(db, plan.tokens_per_period)
-            plan.price_amount = Decimal(str(amount))
-            plan.currency = currency
-            db.add(plan)
+            plan.price_amount = Decimal(str(amount)); plan.currency = currency; db.add(plan)
         for package in packages:
             amount, _ = self.price_for_tokens(db, package.tokens_amount)
-            package.price_cents = int(round(amount * 100))
-            package.currency = currency.lower()
-            db.add(package)
+            package.price_cents = int(round(amount * 100)); package.currency = currency.lower(); db.add(package)
         db.commit()
         return {"plans_updated": len(plans), "packages_updated": len(packages), "currency": currency, "token_value_usd": self._token_value(db)}
 

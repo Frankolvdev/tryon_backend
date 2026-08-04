@@ -15,8 +15,10 @@ from app.schemas.pricing import (
     PricingRuleUpdate,
 )
 from app.schemas.simulated_engine import CommercialRepriceResponse
+from app.schemas.provider_pricing import ProviderGpuPriceResponse, ProviderGpuPriceUpsert, AppliedPricingRuleResponse
 from app.services.audit_service import audit_service
 from app.services.pricing_service import pricing_service
+from app.services.provider_pricing_service import provider_pricing_service
 
 router = APIRouter()
 
@@ -63,6 +65,7 @@ def preview_commercial_price(
         db,
         average_execution_cost_usd=data.average_execution_cost_usd,
         desired_profit_percent=data.desired_profit_percent,
+        desired_profit_usd=data.desired_profit_usd,
     )
 
 
@@ -108,3 +111,39 @@ def reprice_commercial_catalog(request: Request, db: Session = Depends(get_db), 
     result = pricing_service.reprice_catalog(db)
     audit_service.create_log(db, actor_user_id=current_admin.id, action="admin_commercial_catalog_repriced", entity_type="commercial_catalog", entity_id=None, description=f"Repriced {result['plans_updated']} plans and {result['packages_updated']} token packages.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
     return CommercialRepriceResponse(**result, message="Commercial catalog repriced successfully.")
+
+
+@router.get("/provider-gpu-prices", response_model=list[ProviderGpuPriceResponse])
+def list_provider_gpu_prices(
+    provider: str | None = None,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return provider_pricing_service.list_prices(db, provider=provider)
+
+
+@router.put("/provider-gpu-prices", response_model=ProviderGpuPriceResponse)
+def upsert_provider_gpu_price(
+    data: ProviderGpuPriceUpsert,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return provider_pricing_service.upsert(db, data)
+
+
+@router.delete("/provider-gpu-prices/{price_id}", response_model=SuccessResponse)
+def delete_provider_gpu_price(
+    price_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    provider_pricing_service.delete(db, price_id)
+    return SuccessResponse(message="Provider GPU price deleted successfully.")
+
+
+@router.get("/applied-pricing-rules", response_model=list[AppliedPricingRuleResponse])
+def list_applied_pricing_rules(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return pricing_service.list_applied_rules(db)

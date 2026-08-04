@@ -69,6 +69,11 @@ class GenerationModulePricingResponse(BaseModel):
     token_value_usd: float
     currency: str
     is_active: bool
+    estimated_duration_seconds: float | None = None
+    estimated_duration_source: str | None = None
+    estimated_billable_seconds: float | None = None
+    provider: str | None = None
+    gpu_key: str | None = None
 
 
 class GenerationModuleCreate(BaseModel):
