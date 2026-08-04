@@ -31,6 +31,7 @@ from app.services.comfyui_prompt_preprocessor_service import comfyui_prompt_prep
 from app.services.generation_module_service import generation_module_service
 from app.services.generation_module_file_materializer_service import generation_module_file_materializer_service
 from app.services.generation_module_security_service import generation_module_security_service
+from app.services.generation_configuration_readiness_service import generation_configuration_readiness_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.generation_module_billing_service import generation_module_billing_service
 from app.services.ai_engine_settings_service import ai_engine_settings_service
@@ -66,6 +67,14 @@ class GenerationModuleRuntimeService:
             raise AppException("The generation module is inactive.")
         self._validate_inputs(module.inputs, data.inputs)
         engine = data.engine or module.default_execution_engine
+        # Fail closed before charging tokens, persisting an execution, or
+        # dispatching provider work. Administrative tests use this same gate,
+        # but continue to skip token charging because user_id remains None.
+        generation_configuration_readiness_service.ensure_ready(
+            db,
+            module_id=module.id,
+            engine=engine,
+        )
         if user_id is not None:
             generation_module_security_service.ensure_user_can_start(self, user_id=user_id, engine=engine)
         now = utc_now()
