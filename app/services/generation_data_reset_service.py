@@ -4,7 +4,7 @@ import json
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Session
 
 from app.common.time import utc_now
@@ -58,11 +58,18 @@ class GenerationDataResetService:
                 continue
         for row in tryon_jobs:
             file_ids.update(v for v in (row.person_image_file_id, row.item_image_file_id, row.result_file_id) if v)
-        gallery_rows = db.query(UserGalleryItem).filter(
-            or_(UserGalleryItem.tryon_job_id.in_(tryon_ids) if tryon_ids else False,
-                UserGalleryItem.source_file_id.in_(file_ids) if file_ids else False,
-                UserGalleryItem.result_file_id.in_(file_ids) if file_ids else False)
-        ).all() if (tryon_ids or file_ids) else []
+        # The gallery module is optional in older or partially migrated installations.
+        # Never make the maintenance preview fail just because its table is absent.
+        gallery_table_available = inspect(db.get_bind()).has_table(UserGalleryItem.__tablename__)
+        gallery_rows = []
+        if gallery_table_available and (tryon_ids or file_ids):
+            gallery_rows = db.query(UserGalleryItem).filter(
+                or_(
+                    UserGalleryItem.tryon_job_id.in_(tryon_ids) if tryon_ids else False,
+                    UserGalleryItem.source_file_id.in_(file_ids) if file_ids else False,
+                    UserGalleryItem.result_file_id.in_(file_ids) if file_ids else False,
+                )
+            ).all()
         for row in gallery_rows:
             file_ids.update(v for v in (row.source_file_id, row.result_file_id) if v)
         active_exec = [row.public_id for row in executions if row.status.lower() in ACTIVE_STATUSES]
@@ -84,7 +91,8 @@ class GenerationDataResetService:
         return {
             "executions": executions, "tryon_jobs": tryon_jobs, "execution_ids": execution_ids,
             "tryon_ids": tryon_ids, "file_ids": file_ids, "gallery_rows": gallery_rows,
-            "allocations": allocations, "active_execution_ids": active_exec,
+            "allocations": allocations, "gallery_table_available": gallery_table_available,
+            "active_execution_ids": active_exec,
             "active_tryon_job_ids": active_tryon, "financial_count": financial_count,
             "token_transaction_count": token_tx_count, "external_job_count": external_count,
             "background_job_count": background_count,
@@ -107,6 +115,7 @@ class GenerationDataResetService:
                 "external_ai_jobs": ctx["external_job_count"],
                 "background_jobs": ctx["background_job_count"],
                 "gallery_items": len(ctx["gallery_rows"]),
+                "gallery_table_available": ctx["gallery_table_available"],
                 "storage_files": len(ctx["file_ids"]),
                 "tokens_to_restore": restored,
             },
