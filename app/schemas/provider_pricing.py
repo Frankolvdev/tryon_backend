@@ -33,6 +33,7 @@ class AppliedPricingRuleResponse(BaseModel):
     estimated_billable_seconds: float
     estimated_infrastructure_cost_usd: float | None
     desired_profit_usd: float
+    desired_profit_per_token_usd: float = 0
     estimated_final_price_usd: float | None
     token_value_usd: float
     estimated_tokens: int | None

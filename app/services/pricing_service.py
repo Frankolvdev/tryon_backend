@@ -50,6 +50,7 @@ class PricingExecutionQuote:
     estimated_gpu_seconds: int
     estimated_gpu_cost_cents: int
     desired_profit_usd: float = 0
+    desired_profit_per_token_usd: float = 0
     technical_margin_seconds: int = 0
 
 
@@ -112,6 +113,37 @@ class PricingService:
         amount = max(int(tokens), 0) * self._token_value(db)
         return round(amount, 6), self._currency(db)
 
+
+    def token_charge_for_infrastructure(
+        self,
+        db: Session,
+        *,
+        infrastructure_cost_usd: float,
+        desired_profit_per_token_usd: float,
+        apply_profit: bool = True,
+    ) -> tuple[int, float, float, float]:
+        """Return tokens, charged USD, configured profit and rounding surplus.
+
+        Infrastructure capacity per token is token_value - profit_per_token.
+        This removes circularity and guarantees the infrastructure cost is covered.
+        """
+        token_value = self._token_value(db)
+        profit_per_token = max(float(desired_profit_per_token_usd or 0), 0.0) if apply_profit else 0.0
+        if profit_per_token >= token_value:
+            from app.common.exceptions import ConflictException
+            raise ConflictException(
+                f"Desired profit per token must be lower than token value ({token_value:.9f} USD)."
+            )
+        infrastructure = max(float(infrastructure_cost_usd or 0), 0.0)
+        if infrastructure <= 0:
+            return 0, 0.0, 0.0, 0.0
+        capacity = token_value - profit_per_token
+        tokens = max(1, math.ceil(infrastructure / capacity))
+        charged = tokens * token_value
+        configured_profit = tokens * profit_per_token
+        rounding_surplus = max(0.0, charged - infrastructure - configured_profit)
+        return tokens, charged, configured_profit, rounding_surplus
+
     def get_commercial_settings(self, db: Session) -> CommercialSettingsResponse:
         return CommercialSettingsResponse(token_value_usd=self._token_value(db), currency=self._currency(db))
 
@@ -131,25 +163,24 @@ class PricingService:
         average_execution_cost_usd: float,
         desired_profit_percent: float = 0,
         desired_profit_usd: float | None = None,
+        desired_profit_per_token_usd: float = 0,
     ) -> CommercialPricePreviewResponse:
         cost = max(float(average_execution_cost_usd), 0)
-        if desired_profit_usd is None:
-            profit_usd = cost * max(float(desired_profit_percent), 0) / 100
-        else:
-            profit_usd = max(float(desired_profit_usd), 0)
-        target_price = cost + profit_usd
-        token_value = self._token_value(db)
-        required_tokens = max(1, math.ceil(target_price / token_value))
-        final_price = required_tokens * token_value
+        tokens, final_price, configured_profit, _rounding = self.token_charge_for_infrastructure(
+            db, infrastructure_cost_usd=cost,
+            desired_profit_per_token_usd=desired_profit_per_token_usd,
+            apply_profit=True,
+        )
         effective_margin = ((final_price - cost) / cost * 100) if cost > 0 else 0.0
         return CommercialPricePreviewResponse(
             average_execution_cost_usd=round(cost, 9),
             desired_profit_percent=round(float(desired_profit_percent or 0), 6),
-            desired_profit_usd=round(profit_usd, 9),
-            token_value_usd=round(token_value, 9),
+            desired_profit_usd=round(configured_profit, 9),
+            desired_profit_per_token_usd=round(float(desired_profit_per_token_usd or 0), 9),
+            token_value_usd=round(self._token_value(db), 9),
             currency=self._currency(db),
             final_price_usd=round(final_price, 9),
-            required_tokens=required_tokens,
+            required_tokens=tokens,
             effective_margin_percent=round(effective_margin, 6),
         )
 
@@ -157,11 +188,13 @@ class PricingService:
         average_cost = float(rule.estimated_gpu_cost_cents or 0) / 100
         legacy_percent = float(rule.margin_percent or 0)
         desired_profit_usd = float(rule.desired_profit_usd or 0)
+        desired_profit_per_token_usd = float(rule.desired_profit_per_token_usd or 0)
         preview = self.preview(
             db,
             average_execution_cost_usd=average_cost,
             desired_profit_percent=legacy_percent,
             desired_profit_usd=desired_profit_usd,
+            desired_profit_per_token_usd=desired_profit_per_token_usd,
         )
         return PricingRuleResponse(
             id=rule.id,
@@ -171,6 +204,7 @@ class PricingService:
             quality_mode=rule.quality_mode,
             generation_module_id=rule.generation_module_id,
             desired_profit_usd=desired_profit_usd,
+            desired_profit_per_token_usd=desired_profit_per_token_usd,
             initial_estimated_duration_seconds=max(int(rule.initial_estimated_duration_seconds or 30), 1),
             technical_margin_seconds=max(int(rule.technical_margin_seconds or 0), 0),
             average_execution_cost_usd=average_cost,
@@ -208,6 +242,7 @@ class PricingService:
             estimated_gpu_seconds=max(int(rule.initial_estimated_duration_seconds or rule.estimated_gpu_seconds or 0), 0),
             estimated_gpu_cost_cents=max(int(rule.estimated_gpu_cost_cents or 0), 0),
             desired_profit_usd=float(rule.desired_profit_usd or 0),
+            desired_profit_per_token_usd=float(rule.desired_profit_per_token_usd or 0),
             technical_margin_seconds=max(int(rule.technical_margin_seconds or 0), 0),
         )
 
@@ -222,6 +257,7 @@ class PricingService:
             average_execution_cost_usd=legacy_cost,
             desired_profit_percent=legacy_percent,
             desired_profit_usd=data.desired_profit_usd,
+            desired_profit_per_token_usd=data.desired_profit_per_token_usd,
         )
         rule = PricingRule(
             title=data.title.strip(),
@@ -233,7 +269,8 @@ class PricingService:
             estimated_gpu_seconds=data.initial_estimated_duration_seconds,
             estimated_gpu_cost_cents=round(legacy_cost * 100),
             margin_percent=round(legacy_percent),
-            desired_profit_usd=Decimal(str(data.desired_profit_usd)),
+            desired_profit_usd=Decimal(str(data.desired_profit_usd or 0)),
+            desired_profit_per_token_usd=Decimal(str(data.desired_profit_per_token_usd)),
             initial_estimated_duration_seconds=data.initial_estimated_duration_seconds,
             technical_margin_seconds=data.technical_margin_seconds,
             is_active=data.is_active,
@@ -252,10 +289,10 @@ class PricingService:
         if not rule:
             raise NotFoundException("Pricing rule not found.")
         update_data = {}
-        for field in ("desired_profit_usd", "initial_estimated_duration_seconds", "technical_margin_seconds", "is_active"):
+        for field in ("desired_profit_usd", "desired_profit_per_token_usd", "initial_estimated_duration_seconds", "technical_margin_seconds", "is_active"):
             value = getattr(data, field)
             if value is not None:
-                update_data[field] = Decimal(str(value)) if field == "desired_profit_usd" else value
+                update_data[field] = Decimal(str(value)) if field in {"desired_profit_usd", "desired_profit_per_token_usd"} else value
         if data.title is not None:
             update_data["title"] = data.title.strip()
         if "generation_module_id" in data.model_fields_set:
@@ -318,8 +355,17 @@ class PricingService:
             duration, source = self._historical_duration(module.id, int(rule.initial_estimated_duration_seconds or 30))
             billable = duration + scaledown + int(rule.technical_margin_seconds or 0)
             infra = billable * gpu_cost if gpu_cost is not None else None
-            total = infra + float(rule.desired_profit_usd or 0) if infra is not None else None
-            tokens = max(1, math.ceil(total / token_value)) if total is not None else None
+            profit_per_token = float(rule.desired_profit_per_token_usd or 0)
+            if infra is not None:
+                try:
+                    tokens, total, configured_profit, _rounding = self.token_charge_for_infrastructure(
+                        db, infrastructure_cost_usd=infra,
+                        desired_profit_per_token_usd=profit_per_token, apply_profit=True,
+                    )
+                except Exception:
+                    tokens = None; total = None; configured_profit = None
+            else:
+                tokens = None; total = None; configured_profit = None
             warnings = []
             if gpu_key is None:
                 warnings.append("GPU selection is not yet configured for this provider.")
@@ -340,7 +386,8 @@ class PricingService:
                 technical_margin_seconds=int(rule.technical_margin_seconds or 0),
                 estimated_billable_seconds=round(billable, 3),
                 estimated_infrastructure_cost_usd=round(infra, 9) if infra is not None else None,
-                desired_profit_usd=float(rule.desired_profit_usd or 0),
+                desired_profit_usd=float(configured_profit or 0),
+                desired_profit_per_token_usd=profit_per_token,
                 estimated_final_price_usd=round(total, 9) if total is not None else None,
                 token_value_usd=token_value,
                 estimated_tokens=tokens,

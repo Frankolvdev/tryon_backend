@@ -9,6 +9,7 @@ class FinancialProtectionRuleDiagnostic(BaseModel):
     module_name: str | None = None
     module_is_active: bool | None = None
     desired_profit_usd: float
+    desired_profit_per_token_usd: float = 0
     is_limiting: bool = False
 
 

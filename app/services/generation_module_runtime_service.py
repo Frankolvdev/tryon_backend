@@ -636,7 +636,7 @@ class GenerationModuleRuntimeService:
             scaledown_seconds = int(engine_settings.modal_scaledown_window_seconds)
         gpu_cost = provider_pricing_service.get_cost(db, provider=provider, gpu_key=gpu_key)
         margin_seconds = int(getattr(rule, "technical_margin_seconds", 0) or 0)
-        profit_usd = float(getattr(rule, "desired_profit_usd", 0) or 0)
+        profit_per_token_usd = float(getattr(rule, "desired_profit_per_token_usd", 0) or 0)
         actual_seconds = round(item.real_provider_duration_ms / 1000, 3)
         billable_seconds = round(actual_seconds + scaledown_seconds + margin_seconds, 3)
         raw_infrastructure_cost = (billable_seconds * gpu_cost) if gpu_cost is not None else None
@@ -661,10 +661,18 @@ class GenerationModuleRuntimeService:
             )
         policy = getattr(billing_policy, policy_key)
         infrastructure_cost = raw_infrastructure_cost if policy.charge_infrastructure else 0.0
-        applied_profit_usd = profit_usd if policy.apply_profit else 0.0
-        final_price = (infrastructure_cost + applied_profit_usd) if raw_infrastructure_cost is not None else None
         token_value = pricing_service.get_commercial_settings(db).token_value_usd
-        final_tokens = max(0, math.ceil(final_price / token_value)) if final_price is not None else item.tokens_charged
+        if raw_infrastructure_cost is not None:
+            final_tokens, final_price, applied_profit_usd, profit_rounding_surplus_usd = pricing_service.token_charge_for_infrastructure(
+                db, infrastructure_cost_usd=float(infrastructure_cost or 0),
+                desired_profit_per_token_usd=profit_per_token_usd,
+                apply_profit=bool(policy.apply_profit),
+            )
+        else:
+            final_tokens = item.tokens_charged
+            final_price = None
+            applied_profit_usd = 0.0
+            profit_rounding_surplus_usd = 0.0
         extra = refunded = 0
         if item.user_id is not None and final_price is not None:
             extra, refunded = generation_module_billing_service.reconcile(
@@ -695,8 +703,10 @@ class GenerationModuleRuntimeService:
             "billable_seconds": billable_seconds,
             "raw_infrastructure_cost_usd": round(raw_infrastructure_cost, 9) if raw_infrastructure_cost is not None else None,
             "infrastructure_cost_usd": round(infrastructure_cost, 9) if infrastructure_cost is not None else None,
-            "desired_profit_usd": profit_usd,
-            "applied_profit_usd": applied_profit_usd,
+            "desired_profit_per_token_usd": profit_per_token_usd,
+            "desired_profit_usd": round(applied_profit_usd, 9),
+            "applied_profit_usd": round(applied_profit_usd, 9),
+            "profit_rounding_surplus_usd": round(profit_rounding_surplus_usd, 9),
             "profit_applied": bool(policy.apply_profit),
             "infrastructure_charge_applied": bool(policy.charge_infrastructure),
             "billing_policy_key": policy_key,

@@ -22,7 +22,7 @@ class FinancialProtectionService:
 
     This service deliberately does not read or recalculate GPU prices, durations,
     scaledown windows, technical margins, infrastructure cost, or execution time.
-    The only financial input is PricingRule.desired_profit_usd.
+    The only financial input is PricingRule.desired_profit_per_token_usd.
     """
 
     def _profit_diagnostics(
@@ -40,7 +40,8 @@ class FinancialProtectionService:
             if not active:
                 continue
             module = db.get(GenerationModule, module_id) if module_id is not None else None
-            profit = max(float(override.get("desired_profit_usd", rule.desired_profit_usd or 0)), 0.0)
+            profit_per_token = max(float(override.get("desired_profit_per_token_usd", rule.desired_profit_per_token_usd or 0)), 0.0)
+            profit = profit_per_token
             rows.append(FinancialProtectionRuleDiagnostic(
                 pricing_rule_id=rule.id,
                 rule_title=rule.title,
@@ -48,10 +49,11 @@ class FinancialProtectionService:
                 module_key=module.key if module is not None else None,
                 module_name=module.name if module is not None else rule.title,
                 module_is_active=bool(module.is_active) if module is not None else None,
-                desired_profit_usd=round(profit, 9),
+                desired_profit_usd=0.0,
+                desired_profit_per_token_usd=round(profit_per_token, 9),
             ))
         if rows:
-            limiting = min(rows, key=lambda item: item.desired_profit_usd)
+            limiting = min(rows, key=lambda item: item.desired_profit_per_token_usd)
             for row in rows:
                 row.is_limiting = row.pricing_rule_id == limiting.pricing_rule_id
         return rows
@@ -73,17 +75,7 @@ class FinancialProtectionService:
         return max(values)
 
     def _profit_per_token_diagnostics(self, db: Session):
-        from app.services.pricing_service import pricing_service
-        applied = {item.rule_id: item for item in pricing_service.list_applied_rules(db)}
-        rows = self._profit_diagnostics(db)
-        enriched = []
-        for row in rows:
-            item = applied.get(row.pricing_rule_id)
-            estimated_tokens = int(item.estimated_tokens or 0) if item else 0
-            if estimated_tokens <= 0:
-                continue
-            enriched.append((row, row.desired_profit_usd / estimated_tokens, estimated_tokens))
-        return enriched
+        return [(row, row.desired_profit_per_token_usd, None) for row in self._profit_diagnostics(db)]
 
     def report(self, db: Session, *, rule_overrides: dict[int, dict[str, Any]] | None = None, **_: Any) -> FinancialProtectionReport:
         diagnostics = self._profit_diagnostics(db, rule_overrides=rule_overrides)
@@ -95,7 +87,7 @@ class FinancialProtectionService:
         # that rule, to scale its protected profit across a commercial product.
         # They must never decide which rule is the highest-risk rule.
         limiting_diagnostic = (
-            min(diagnostics, key=lambda item: item.desired_profit_usd)
+            min(diagnostics, key=lambda item: item.desired_profit_per_token_usd)
             if diagnostics
             else None
         )
@@ -106,7 +98,7 @@ class FinancialProtectionService:
             else None
         )
         safe_profit = (
-            limiting_diagnostic.desired_profit_usd
+            limiting_diagnostic.desired_profit_per_token_usd
             if limiting_diagnostic is not None
             else None
         )
@@ -114,7 +106,7 @@ class FinancialProtectionService:
         highest = self._highest_active_discount(db)
         status = "protected"
         if not diagnostics or not enriched:
-            status = "not_configured"; warnings.append("No active pricing rule has a valid estimated token cost.")
+            status = "not_configured"; warnings.append("No active pricing rule has a configured profit per token.")
         elif safe_profit_per_token is None or safe_profit_per_token <= 0:
             status = "blocked"; warnings.append("The limiting rule has no profit per token available.")
         elif highest > 100:

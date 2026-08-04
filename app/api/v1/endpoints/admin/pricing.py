@@ -111,6 +111,7 @@ def preview_commercial_price(
         average_execution_cost_usd=data.average_execution_cost_usd,
         desired_profit_percent=data.desired_profit_percent,
         desired_profit_usd=data.desired_profit_usd,
+        desired_profit_per_token_usd=data.desired_profit_per_token_usd,
     )
 
 

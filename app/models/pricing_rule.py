@@ -49,6 +49,7 @@ class PricingRule(Base):
     estimated_gpu_cost_cents: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     margin_percent: Mapped[int] = mapped_column(Integer, default=70, nullable=False)
     desired_profit_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=0, nullable=False)
+    desired_profit_per_token_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 9), nullable=True)
     initial_estimated_duration_seconds: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     technical_margin_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 

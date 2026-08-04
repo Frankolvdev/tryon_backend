@@ -14,7 +14,7 @@ from app.repositories.system_setting_repository import system_setting_repository
 from app.services.ai_engine_settings_service import ai_engine_settings_service
 from app.services.infrastructure_provider_service import infrastructure_provider_service
 from app.services.provider_pricing_service import provider_pricing_service
-from app.services.pricing_service import TOKEN_VALUE_KEY
+from app.services.pricing_service import TOKEN_VALUE_KEY, pricing_service
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,8 +84,10 @@ class GenerationConfigurationReadinessService:
                 missing.append("pricing_rule.initial_estimated_duration_seconds")
             if int(rule.technical_margin_seconds or 0) < 0:
                 missing.append("pricing_rule.technical_margin_seconds")
-            if Decimal(str(rule.desired_profit_usd or 0)) < 0:
-                missing.append("pricing_rule.desired_profit_usd")
+            profit_per_token = Decimal(str(rule.desired_profit_per_token_usd or 0))
+            token_value = Decimal(str(pricing_service.get_commercial_settings(db).token_value_usd))
+            if profit_per_token < 0 or profit_per_token >= token_value:
+                missing.append("pricing_rule.desired_profit_per_token_usd")
 
         token_setting = system_setting_repository.get_by_key(db, TOKEN_VALUE_KEY)
         if token_setting is None or not self._positive(token_setting.value_float):
