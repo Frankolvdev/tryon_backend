@@ -138,6 +138,7 @@ class SubscriptionPlanResponse(BaseModel):
     sort_order: int
 
     created_at: object
+    archived_at: object | None = None
     updated_at: object
 
     model_config = ConfigDict(from_attributes=True)

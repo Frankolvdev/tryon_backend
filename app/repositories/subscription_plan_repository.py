@@ -41,8 +41,14 @@ class SubscriptionPlanRepository(BaseRepository[SubscriptionPlan]):
         is_public: bool | None = None,
         skip: int = 0,
         limit: int = 100,
+        include_archived: bool = False,
     ) -> list[SubscriptionPlan]:
         statement = select(SubscriptionPlan)
+
+        if not include_archived:
+            statement = statement.where(
+                SubscriptionPlan.archived_at.is_(None),
+            )
 
         if search:
             pattern = f"%{search.strip()}%"
@@ -91,8 +97,14 @@ class SubscriptionPlanRepository(BaseRepository[SubscriptionPlan]):
         billing_interval: str | None = None,
         is_active: bool | None = None,
         is_public: bool | None = None,
+        include_archived: bool = False,
     ) -> int:
         statement = select(func.count(SubscriptionPlan.id))
+
+        if not include_archived:
+            statement = statement.where(
+                SubscriptionPlan.archived_at.is_(None),
+            )
 
         if search:
             pattern = f"%{search.strip()}%"
@@ -132,6 +144,7 @@ class SubscriptionPlanRepository(BaseRepository[SubscriptionPlan]):
             select(SubscriptionPlan)
             .where(SubscriptionPlan.is_active.is_(True))
             .where(SubscriptionPlan.is_public.is_(True))
+            .where(SubscriptionPlan.archived_at.is_(None))
         )
 
         if billing_interval:

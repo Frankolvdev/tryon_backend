@@ -101,6 +101,12 @@ class SubscriptionPlan(Base):
         nullable=False,
     )
 
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=utc_now,

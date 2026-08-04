@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.billing_enums import BillingInterval
+from app.common.time import utc_now
 from app.common.exceptions import ConflictException, NotFoundException
 from app.models.subscription_plan import SubscriptionPlan
 from app.repositories.subscription_plan_repository import (
@@ -100,6 +101,7 @@ class SubscriptionPlanService:
             is_active=plan.is_active,
             sort_order=plan.sort_order,
             created_at=plan.created_at,
+            archived_at=plan.archived_at,
             updated_at=plan.updated_at,
         )
 
@@ -149,6 +151,7 @@ class SubscriptionPlanService:
         is_public: bool | None = None,
         skip: int = 0,
         limit: int = 100,
+        include_archived: bool = False,
     ) -> SubscriptionPlanListResponse:
         interval_value = (
             billing_interval.value
@@ -164,6 +167,7 @@ class SubscriptionPlanService:
             is_public=is_public,
             skip=skip,
             limit=limit,
+            include_archived=include_archived,
         )
 
         total = subscription_plan_repository.count_filtered(
@@ -172,6 +176,7 @@ class SubscriptionPlanService:
             billing_interval=interval_value,
             is_active=is_active,
             is_public=is_public,
+            include_archived=include_archived,
         )
 
         return SubscriptionPlanListResponse(
@@ -404,6 +409,7 @@ class SubscriptionPlanService:
                 data={
                     "is_active": False,
                     "is_public": False,
+                    "archived_at": utc_now(),
                 },
             )
             return True
