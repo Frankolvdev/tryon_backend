@@ -1,196 +1,179 @@
 from __future__ import annotations
 
 import json
-from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import inspect, or_
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from app.common.time import utc_now
-from app.models.background_job import BackgroundJob
-from app.models.external_ai_job import ExternalAiJob
-from app.models.generation_financial_record import GenerationFinancialRecord
 from app.models.generation_module_execution import GenerationModuleExecution
 from app.models.storage_file import StorageFile
-from app.models.token_consumption_allocation import TokenConsumptionAllocation
-from app.models.token_transaction import TokenTransaction
-from app.models.token_value_lot import TokenValueLot
 from app.models.tryon_job import TryOnJob
-from app.models.user import User
-from app.models.user_gallery_item import UserGalleryItem
 from app.services.storage_service import storage_service
-
+from app.services.stripe_client_service import stripe_client_service
 
 ACTIVE_STATUSES = {"pending", "queued", "running", "processing", "cancelling", "canceling"}
-GENERATION_TOKEN_SOURCES = {
-    "generation_module", "generation_module_adjustment", "generation_module_refund",
-    "generation_module_price_refund", "tryon", "tryon_refund",
-}
-CONFIRMATION_TEXT = "BORRAR GENERACIONES"
+CONFIRMATION_TEXT = "BORRAR ACTIVIDAD DE PRUEBAS"
 
 
 class GenerationDataResetService:
     @staticmethod
+    def _table_exists(db: Session, table: str) -> bool:
+        return inspect(db.get_bind()).has_table(table)
+
+    @staticmethod
+    def _count(db: Session, table: str) -> int:
+        if not GenerationDataResetService._table_exists(db, table):
+            return 0
+        return int(db.execute(text(f'SELECT COUNT(*) FROM "{table}"')).scalar() or 0)
+
+    @staticmethod
     def _collect_file_ids(value: Any, found: set[int]) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
-                normalized = str(key).lower()
-                if (normalized.endswith("file_id") or normalized.endswith("storage_file_id")) and isinstance(item, int):
+                name = str(key).lower()
+                if (name.endswith("file_id") or name.endswith("storage_file_id")) and isinstance(item, int):
                     found.add(item)
-                elif (normalized.endswith("file_ids") or normalized.endswith("storage_file_ids")) and isinstance(item, list):
+                elif (name.endswith("file_ids") or name.endswith("storage_file_ids")) and isinstance(item, list):
                     found.update(v for v in item if isinstance(v, int))
                 GenerationDataResetService._collect_file_ids(item, found)
         elif isinstance(value, list):
             for item in value:
                 GenerationDataResetService._collect_file_ids(item, found)
 
-    def _context(self, db: Session) -> dict[str, Any]:
-        executions = db.query(GenerationModuleExecution).all()
-        tryon_jobs = db.query(TryOnJob).all()
-        execution_ids = [row.public_id for row in executions]
-        tryon_ids = [row.id for row in tryon_jobs]
-        file_ids: set[int] = set()
-        for row in executions:
-            try:
-                self._collect_file_ids(json.loads(row.snapshot_json or "{}"), file_ids)
-            except (TypeError, ValueError):
-                continue
-        for row in tryon_jobs:
-            file_ids.update(v for v in (row.person_image_file_id, row.item_image_file_id, row.result_file_id) if v)
-        # The gallery module is optional in older or partially migrated installations.
-        # Never make the maintenance preview fail just because its table is absent.
-        gallery_table_available = inspect(db.get_bind()).has_table(UserGalleryItem.__tablename__)
-        gallery_rows = []
-        if gallery_table_available and (tryon_ids or file_ids):
-            gallery_rows = db.query(UserGalleryItem).filter(
-                or_(
-                    UserGalleryItem.tryon_job_id.in_(tryon_ids) if tryon_ids else False,
-                    UserGalleryItem.source_file_id.in_(file_ids) if file_ids else False,
-                    UserGalleryItem.result_file_id.in_(file_ids) if file_ids else False,
-                )
-            ).all()
-        for row in gallery_rows:
-            file_ids.update(v for v in (row.source_file_id, row.result_file_id) if v)
-        active_exec = [row.public_id for row in executions if row.status.lower() in ACTIVE_STATUSES]
-        active_tryon = [row.id for row in tryon_jobs if row.status.lower() in ACTIVE_STATUSES]
-        allocations = db.query(TokenConsumptionAllocation).filter(
-            TokenConsumptionAllocation.execution_id.in_(execution_ids)
-        ).all() if execution_ids else []
-        financial_count = db.query(GenerationFinancialRecord).filter(
-            GenerationFinancialRecord.execution_id.in_(execution_ids)
-        ).count() if execution_ids else 0
-        token_tx_count = db.query(TokenTransaction).filter(
-            TokenTransaction.source.in_(GENERATION_TOKEN_SOURCES)
-        ).count()
-        external_count = db.query(ExternalAiJob).filter(ExternalAiJob.internal_job_type == "tryon").count()
-        background_count = db.query(BackgroundJob).filter(
-            or_(BackgroundJob.tryon_job_id.in_(tryon_ids) if tryon_ids else False,
-                BackgroundJob.external_ai_job_id.isnot(None))
-        ).count() if tryon_ids else 0
-        return {
-            "executions": executions, "tryon_jobs": tryon_jobs, "execution_ids": execution_ids,
-            "tryon_ids": tryon_ids, "file_ids": file_ids, "gallery_rows": gallery_rows,
-            "allocations": allocations, "gallery_table_available": gallery_table_available,
-            "active_execution_ids": active_exec,
-            "active_tryon_job_ids": active_tryon, "financial_count": financial_count,
-            "token_transaction_count": token_tx_count, "external_job_count": external_count,
-            "background_job_count": background_count,
-        }
+    def _file_ids(self, db: Session) -> set[int]:
+        found: set[int] = set()
+        if self._table_exists(db, "generation_module_executions"):
+            for row in db.query(GenerationModuleExecution).all():
+                try:
+                    self._collect_file_ids(json.loads(row.snapshot_json or "{}"), found)
+                except (TypeError, ValueError):
+                    pass
+        if self._table_exists(db, "tryon_jobs"):
+            for row in db.query(TryOnJob).all():
+                found.update(v for v in (row.person_image_file_id, row.item_image_file_id, row.result_file_id) if v)
+        return found
 
     def preview(self, db: Session) -> dict[str, Any]:
-        ctx = self._context(db)
-        restored = sum(max(a.tokens_allocated - a.tokens_reversed, 0) for a in ctx["allocations"])
+        active_execution_ids: list[str] = []
+        active_tryon_job_ids: list[int] = []
+        if self._table_exists(db, "generation_module_executions"):
+            active_execution_ids = [r.public_id for r in db.query(GenerationModuleExecution).all() if str(r.status).lower() in ACTIVE_STATUSES]
+        if self._table_exists(db, "tryon_jobs"):
+            active_tryon_job_ids = [r.id for r in db.query(TryOnJob).all() if str(r.status).lower() in ACTIVE_STATUSES]
+        file_ids = self._file_ids(db)
+        token_balance = int(db.execute(text("SELECT COALESCE(SUM(token_balance), 0) FROM users")).scalar() or 0)
+        counts = {
+            "generation_module_executions": self._count(db, "generation_module_executions"),
+            "tryon_jobs": self._count(db, "tryon_jobs"),
+            "generation_financial_records": self._count(db, "generation_financial_records"),
+            "token_consumption_allocations": self._count(db, "token_consumption_allocations"),
+            "token_transactions": self._count(db, "token_transactions"),
+            "token_value_lots": self._count(db, "token_value_lots"),
+            "token_purchases": self._count(db, "token_purchases"),
+            "billing_payments": self._count(db, "billing_payments"),
+            "billing_invoices": self._count(db, "billing_invoices"),
+            "billing_events": self._count(db, "billing_events"),
+            "user_subscriptions": self._count(db, "user_subscriptions"),
+            "billing_customers": self._count(db, "billing_customers"),
+            "external_ai_jobs": self._count(db, "external_ai_jobs"),
+            "background_jobs": self._count(db, "background_jobs"),
+            "storage_files": len(file_ids),
+            "tokens_to_zero": token_balance,
+        }
         return {
             "confirmation_text": CONFIRMATION_TEXT,
-            "can_execute": not ctx["active_execution_ids"] and not ctx["active_tryon_job_ids"],
-            "active_execution_ids": ctx["active_execution_ids"],
-            "active_tryon_job_ids": ctx["active_tryon_job_ids"],
-            "counts": {
-                "generation_module_executions": len(ctx["executions"]),
-                "tryon_jobs": len(ctx["tryon_jobs"]),
-                "generation_financial_records": ctx["financial_count"],
-                "token_consumption_allocations": len(ctx["allocations"]),
-                "generation_token_transactions": ctx["token_transaction_count"],
-                "external_ai_jobs": ctx["external_job_count"],
-                "background_jobs": ctx["background_job_count"],
-                "gallery_items": len(ctx["gallery_rows"]),
-                "gallery_table_available": ctx["gallery_table_available"],
-                "storage_files": len(ctx["file_ids"]),
-                "tokens_to_restore": restored,
-            },
+            "can_execute": not active_execution_ids and not active_tryon_job_ids,
+            "active_execution_ids": active_execution_ids,
+            "active_tryon_job_ids": active_tryon_job_ids,
+            "counts": counts,
         }
 
-    def execute(self, db: Session, *, confirmation: str, delete_storage_files: bool = True) -> dict[str, Any]:
+    def execute(self, db: Session, *, confirmation: str, delete_storage_files: bool = True,
+                cancel_stripe_subscriptions: bool = False) -> dict[str, Any]:
         if confirmation.strip() != CONFIRMATION_TEXT:
             raise ValueError(f"Confirmation must exactly match: {CONFIRMATION_TEXT}")
-        ctx = self._context(db)
-        if ctx["active_execution_ids"] or ctx["active_tryon_job_ids"]:
-            raise RuntimeError("There are active generations. Cancel or finish them before resetting data.")
+        preview = self.preview(db)
+        if not preview["can_execute"]:
+            raise RuntimeError("There are active generations. Cancel or finish them before resetting activity.")
 
-        storage_rows = db.query(StorageFile).filter(StorageFile.id.in_(ctx["file_ids"])).all() if ctx["file_ids"] else []
-        deleted_storage = 0
+        # External side effects happen first. If one fails, PostgreSQL is not cleared.
+        stripe_cancelled = 0
+        stripe_failures: list[str] = []
+        if cancel_stripe_subscriptions and self._table_exists(db, "user_subscriptions"):
+            rows = db.execute(text("SELECT provider_subscription_id FROM user_subscriptions WHERE provider_subscription_id IS NOT NULL")).all()
+            for (subscription_id,) in rows:
+                try:
+                    stripe_client_service.cancel_subscription_immediately(db, subscription_id=subscription_id, invoice_now=False, prorate=False)
+                    stripe_cancelled += 1
+                except Exception as exc:  # do not silently erase a still-active remote subscription
+                    stripe_failures.append(f"{subscription_id}: {exc}")
+            if stripe_failures:
+                raise RuntimeError("Stripe cancellation failed; no local data was deleted. " + " | ".join(stripe_failures[:5]))
+
+        file_ids = self._file_ids(db)
+        storage_rows = db.query(StorageFile).filter(StorageFile.id.in_(file_ids)).all() if file_ids else []
+        deleted_storage_files = 0
+        storage_failures: list[str] = []
         if delete_storage_files:
-            for storage_file in storage_rows:
-                storage_service.delete_file(db=db, storage_file=storage_file)
-                deleted_storage += 1
+            for row in storage_rows:
+                try:
+                    storage_service.delete_file(db=db, storage_file=row)
+                    deleted_storage_files += 1
+                except Exception as exc:
+                    storage_failures.append(f"{row.id}: {exc}")
+            if storage_failures:
+                raise RuntimeError("Storage cleanup failed; database activity was not deleted. " + " | ".join(storage_failures[:5]))
 
-        restored_by_user: dict[int, int] = defaultdict(int)
-        for allocation in ctx["allocations"]:
-            amount = max(allocation.tokens_allocated - allocation.tokens_reversed, 0)
-            if amount:
-                lot = db.query(TokenValueLot).filter(TokenValueLot.id == allocation.lot_id).with_for_update().first()
-                if lot:
-                    lot.remaining_tokens = min(lot.original_tokens, lot.remaining_tokens + amount)
-                restored_by_user[allocation.user_id] += amount
+        deleted: dict[str, int] = {}
+        def delete_all(table: str) -> None:
+            if self._table_exists(db, table):
+                result = db.execute(text(f'DELETE FROM "{table}"'))
+                deleted[table] = int(result.rowcount or 0)
 
-        for user_id, amount in restored_by_user.items():
-            user = db.query(User).filter(User.id == user_id).with_for_update().first()
-            if user:
-                user.token_balance += amount
-                db.add(TokenTransaction(
-                    user_id=user.id, transaction_type="credit", amount=amount,
-                    balance_after=user.token_balance, source="admin_generation_reset",
-                    reference_id=None, description="Tokens restored by generation test-data reset.",
-                ))
+        try:
+            # Job dependencies first.
+            delete_all("background_job_attempts")
+            delete_all("background_job_dependencies")
+            delete_all("background_jobs")
+            delete_all("external_ai_jobs")
 
-        # Break nullable references before deleting job rows.
-        if ctx["tryon_ids"]:
-            db.query(BackgroundJob).filter(BackgroundJob.tryon_job_id.in_(ctx["tryon_ids"])).update(
-                {BackgroundJob.tryon_job_id: None}, synchronize_session=False
-            )
-        external_ids = [r.id for r in db.query(ExternalAiJob.id).filter(ExternalAiJob.internal_job_type == "tryon").all()]
-        if external_ids:
-            db.query(BackgroundJob).filter(BackgroundJob.external_ai_job_id.in_(external_ids)).update(
-                {BackgroundJob.external_ai_job_id: None}, synchronize_session=False
-            )
+            # Financial and token ledger dependencies.
+            delete_all("token_consumption_allocations")
+            delete_all("generation_financial_records")
+            delete_all("token_purchases")
+            delete_all("billing_invoices")
+            delete_all("billing_payments")
+            delete_all("user_subscriptions")
+            delete_all("token_transactions")
+            delete_all("token_value_lots")
+            delete_all("billing_events")
+            delete_all("billing_customers")
 
-        for row in ctx["gallery_rows"]:
-            db.delete(row)
-        if ctx["execution_ids"]:
-            db.query(TokenConsumptionAllocation).filter(TokenConsumptionAllocation.execution_id.in_(ctx["execution_ids"])).delete(synchronize_session=False)
-            db.query(GenerationFinancialRecord).filter(GenerationFinancialRecord.execution_id.in_(ctx["execution_ids"])).delete(synchronize_session=False)
-            db.query(TokenTransaction).filter(
-                TokenTransaction.reference_id.in_(ctx["execution_ids"]),
-                TokenTransaction.source.in_(GENERATION_TOKEN_SOURCES),
-            ).delete(synchronize_session=False)
-        if ctx["tryon_ids"]:
-            tryon_refs = [str(v) for v in ctx["tryon_ids"]]
-            db.query(TokenTransaction).filter(
-                TokenTransaction.reference_id.in_(tryon_refs), TokenTransaction.source.in_(GENERATION_TOKEN_SOURCES)
-            ).delete(synchronize_session=False)
-        db.query(ExternalAiJob).filter(ExternalAiJob.internal_job_type == "tryon").delete(synchronize_session=False)
-        db.query(GenerationModuleExecution).delete(synchronize_session=False)
-        db.query(TryOnJob).delete(synchronize_session=False)
+            # Generation records and optional gallery.
+            delete_all("user_gallery_items")
+            delete_all("generation_module_executions")
+            delete_all("tryon_jobs")
 
-        if storage_rows:
-            db.query(StorageFile).filter(StorageFile.id.in_([r.id for r in storage_rows])).delete(synchronize_session=False)
-        db.commit()
+            if file_ids and self._table_exists(db, "storage_files"):
+                result = db.execute(text("DELETE FROM storage_files WHERE id = ANY(:ids)"), {"ids": list(file_ids)})
+                deleted["storage_files"] = int(result.rowcount or 0)
+
+            # Keep users, but reset all token balances exactly to zero.
+            result = db.execute(text("UPDATE users SET token_balance = 0 WHERE token_balance <> 0"))
+            zeroed_users = int(result.rowcount or 0)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
         return {
             "success": True,
-            "deleted_storage_files": deleted_storage,
-            "restored_tokens": sum(restored_by_user.values()),
-            "restored_users": len(restored_by_user),
+            "deleted": deleted,
+            "deleted_storage_files": deleted_storage_files,
+            "zeroed_users": zeroed_users,
+            "stripe_subscriptions_cancelled": stripe_cancelled,
             "completed_at": utc_now().isoformat(),
         }
 

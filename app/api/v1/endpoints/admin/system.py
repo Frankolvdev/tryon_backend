@@ -112,6 +112,7 @@ from app.services.generation_data_reset_service import generation_data_reset_ser
 class GenerationResetRequest(BaseModel):
     confirmation: str = Field(min_length=1, max_length=100)
     delete_storage_files: bool = True
+    cancel_stripe_subscriptions: bool = False
 
 
 @router.get("/maintenance/generation-reset/preview")
@@ -131,7 +132,8 @@ def reset_generation_data(
 ):
     try:
         result = generation_data_reset_service.execute(
-            db, confirmation=data.confirmation, delete_storage_files=data.delete_storage_files
+            db, confirmation=data.confirmation, delete_storage_files=data.delete_storage_files,
+            cancel_stripe_subscriptions=data.cancel_stripe_subscriptions,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -140,7 +142,7 @@ def reset_generation_data(
     audit_service.create_log(
         db, actor_user_id=current_admin.id, action="admin_generation_data_reset",
         entity_type="system_maintenance", entity_id=None,
-        description="Admin reset all generation test data and related storage files.",
+        description="Admin reset all test commercial activity, generation data, tokens, payments, subscriptions, and related storage files.",
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
