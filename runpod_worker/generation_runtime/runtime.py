@@ -62,9 +62,9 @@ class GenerationRuntime:
                 duration_ms = int((time.monotonic() - started) * 1000)
                 metrics.add_step(step_key=key, step_type=str(step.get("step_type") or ""), duration_ms=duration_ms, status="failed")
                 states.append({"step_key": key, "step_type": str(step.get("step_type") or ""), "status": "failed", "duration_ms": duration_ms, "outputs": {}, "error": str(exc)})
-                return {"runtime_contract": self.CONTRACT, "status": "failed", "error": str(exc), "steps": states, "metrics": metrics.snapshot()}
+                return {"runtime_contract": self.CONTRACT, "status": "failed", "error": str(exc), "steps": states, "metrics": metrics.snapshot(status="failed", error=str(exc))}
         outputs = GenerationRuntimeContext.resolve_module_outputs(module.get("outputs") or [], context)
-        return {"runtime_contract": self.CONTRACT, "status": "completed", "steps": states, "outputs": self._externalize(outputs), "context": self._externalize(context), "metrics": metrics.snapshot()}
+        return {"runtime_contract": self.CONTRACT, "status": "completed", "steps": states, "outputs": self._externalize(outputs), "context": self._externalize(context), "metrics": metrics.snapshot(status="completed")}
 
     def _materialize(self, value: Any, directory: Path) -> Any:
         if isinstance(value, dict) and value.get("__generation_file__"):

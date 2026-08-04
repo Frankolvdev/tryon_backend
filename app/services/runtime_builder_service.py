@@ -1370,19 +1370,31 @@ class ComfyUIServer:
         try:
             result = runtime.execute(payload)
         except BaseException as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
             _modal_trace(
                 "pipeline_error",
                 role="pipeline_server",
                 execution_id=execution_id,
+                duration_ms=duration_ms,
                 error_type=exc.__class__.__name__,
                 error=str(exc),
             )
             raise
+        duration_ms = int((time.monotonic() - started) * 1000)
+        if isinstance(result, dict):
+            metrics = result.get("metrics")
+            if not isinstance(metrics, dict):
+                metrics = {{}}
+                result["metrics"] = metrics
+            metrics["pipeline_duration_ms"] = duration_ms
+            metrics["execution_time_ms"] = int(metrics.get("execution_time_ms") or duration_ms)
+            metrics["duration_source"] = "runtime_exact"
+            metrics["termination_status"] = str(result.get("status") or "completed")
         _modal_trace(
             "pipeline_end",
             role="pipeline_server",
             execution_id=execution_id,
-            duration_ms=int((time.monotonic() - started) * 1000),
+            duration_ms=duration_ms,
             status=result.get("status") if isinstance(result, dict) else None,
         )
         _emit_model_diagnostics(payload, phase="after_pipeline", execution_id=execution_id)

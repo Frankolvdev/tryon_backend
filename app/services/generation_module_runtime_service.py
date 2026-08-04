@@ -522,20 +522,46 @@ class GenerationModuleRuntimeService:
             return
         provider = item.engine.value if hasattr(item.engine, "value") else str(item.engine)
         rule = pricing_rule_repository.get_by_id(db, item.pricing_rule_id) if item.pricing_rule_id else None
-        completed_step_ms = sum(max(int(step.duration_ms or 0), 0) for step in item.steps)
-        elapsed_ms = int(
-            completed_step_ms
-            or (item.runtime_metrics or {}).get("execution_time_ms")
-            or (item.runtime_metrics or {}).get("duration_ms")
-            or (item.provider_metrics or {}).get("pipeline_duration_ms")
-            or (item.provider_metrics or {}).get("execution_time_ms")
-            or item.real_provider_duration_ms
-            or item.duration_ms
+        runtime_metrics = item.runtime_metrics or {}
+        provider_metrics = item.provider_metrics or {}
+        runtime_exact_ms = int(
+            runtime_metrics.get("execution_time_ms")
+            or runtime_metrics.get("pipeline_duration_ms")
+            or runtime_metrics.get("total_duration_ms")
             or 0
         )
-        if item.started_at and item.finished_at:
-            elapsed_ms = max(elapsed_ms, int((item.finished_at - item.started_at).total_seconds() * 1000))
+        provider_observed_ms = int(
+            provider_metrics.get("pipeline_duration_ms")
+            or provider_metrics.get("execution_time_ms")
+            or 0
+        )
+        if runtime_exact_ms > 0:
+            elapsed_ms = runtime_exact_ms
+            duration_source = "runtime_exact"
+        elif provider_observed_ms > 0:
+            elapsed_ms = provider_observed_ms
+            duration_source = str(provider_metrics.get("duration_source") or "provider_observed")
+        elif item.provider_submitted_at and item.finished_at:
+            elapsed_ms = max(
+                int((item.finished_at - item.provider_submitted_at).total_seconds() * 1000),
+                0,
+            )
+            duration_source = (
+                "provider_observed_cancelled"
+                if item.status == "cancelled"
+                else "provider_observed_fallback"
+            )
+        elif item.started_at and item.finished_at:
+            elapsed_ms = max(
+                int((item.finished_at - item.started_at).total_seconds() * 1000),
+                0,
+            )
+            duration_source = "backend_fallback"
+        else:
+            elapsed_ms = max(int(item.real_provider_duration_ms or item.duration_ms or 0), 0)
+            duration_source = "backend_fallback"
         item.real_provider_duration_ms = max(elapsed_ms, 0)
+        item.provider_metrics["duration_source"] = duration_source
 
         gpu_key = None
         scaledown_seconds = 0
@@ -568,6 +594,7 @@ class GenerationModuleRuntimeService:
             "gpu_key": gpu_key,
             "gpu_cost_usd_per_second": gpu_cost,
             "real_provider_seconds": actual_seconds,
+            "duration_source": duration_source,
             "configured_scaledown_seconds": scaledown_seconds,
             "technical_margin_seconds": margin_seconds,
             "billable_seconds": billable_seconds,
@@ -678,6 +705,31 @@ class GenerationModuleRuntimeService:
             raise RuntimeError("Modal Generation Runtime returned an invalid output payload.")
         if output.get("runtime_contract") != "tryon.generation-runtime/v1":
             raise RuntimeError("Modal worker does not support the required Generation Runtime contract.")
+
+        runtime_metrics = copy.deepcopy(output.get("metrics") or {})
+        runtime_duration_ms = int(
+            runtime_metrics.get("execution_time_ms")
+            or runtime_metrics.get("pipeline_duration_ms")
+            or runtime_metrics.get("total_duration_ms")
+            or 0
+        )
+        with self._lock:
+            metric_item = self._items[execution_id]
+            metric_item.runtime_metrics = runtime_metrics
+            metric_item.provider_metrics = {
+                "provider": "modal",
+                "execution_time_ms": runtime_duration_ms or result.get("execution_time_ms"),
+                "pipeline_duration_ms": runtime_metrics.get("pipeline_duration_ms"),
+                "duration_source": (
+                    "runtime_exact" if runtime_duration_ms > 0 else "provider_observed"
+                ),
+                "runtime_url": result.get("runtime_url"),
+                "provider_job_id": result.get("provider_job_id") or metric_item.provider_job_id,
+                "resumed_after_backend_restart": bool(result.get("resumed")),
+                "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
+            }
+            generation_module_execution_store_service.save(metric_item.model_copy(deep=True))
+
         if output.get("status") != "completed":
             raise RuntimeError(str(output.get("error") or "Modal Generation Runtime failed."))
 
@@ -713,14 +765,19 @@ class GenerationModuleRuntimeService:
             remote_context = output.get("context")
             if isinstance(remote_context, dict):
                 item.context = self._materialize_modal_files(remote_context, execution_id)
-            item.runtime_metrics = copy.deepcopy(output.get("metrics") or {})
-            item.provider_metrics = {
+            item.runtime_metrics = runtime_metrics
+            item.provider_metrics.update({
                 "provider": "modal",
-                "execution_time_ms": result.get("execution_time_ms"),
+                "execution_time_ms": runtime_duration_ms or result.get("execution_time_ms"),
+                "pipeline_duration_ms": runtime_metrics.get("pipeline_duration_ms"),
+                "duration_source": (
+                    "runtime_exact" if runtime_duration_ms > 0 else "provider_observed"
+                ),
                 "runtime_url": result.get("runtime_url"),
                 "provider_job_id": result.get("provider_job_id") or item.provider_job_id,
                 "resumed_after_backend_restart": bool(result.get("resumed")),
-            }
+                "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
+            })
             item.status = "completed"
             item.progress = 100
             item.provider_status = "COMPLETED"
