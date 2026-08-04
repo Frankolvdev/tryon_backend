@@ -20,7 +20,7 @@ class BillingCouponCreate(BaseModel):
     name: str = Field(min_length=2, max_length=255)
     description: str | None = None
 
-    discount_type: CouponDiscountType
+    discount_type: Literal[CouponDiscountType.PERCENTAGE] = CouponDiscountType.PERCENTAGE
     duration: CouponDuration = CouponDuration.ONCE
     duration_in_months: int | None = Field(default=None, ge=1)
 
@@ -28,17 +28,6 @@ class BillingCouponCreate(BaseModel):
         default=None,
         gt=0,
         le=100,
-    )
-
-    amount_off: Decimal | None = Field(
-        default=None,
-        gt=0,
-    )
-
-    currency: str | None = Field(
-        default=None,
-        min_length=3,
-        max_length=3,
     )
 
     max_redemptions: int | None = Field(default=None, ge=1)
@@ -57,35 +46,8 @@ class BillingCouponCreate(BaseModel):
     def validate_discount(self):
         self.code = self.code.upper()
 
-        if self.currency:
-            self.currency = self.currency.upper()
-
-        if self.discount_type == CouponDiscountType.PERCENTAGE:
-            if self.percentage_off is None:
-                raise ValueError(
-                    "percentage_off is required for percentage coupons."
-                )
-
-            if self.amount_off is not None:
-                raise ValueError(
-                    "amount_off must be empty for percentage coupons."
-                )
-
-        if self.discount_type == CouponDiscountType.FIXED_AMOUNT:
-            if self.amount_off is None:
-                raise ValueError(
-                    "amount_off is required for fixed amount coupons."
-                )
-
-            if not self.currency:
-                raise ValueError(
-                    "currency is required for fixed amount coupons."
-                )
-
-            if self.percentage_off is not None:
-                raise ValueError(
-                    "percentage_off must be empty for fixed coupons."
-                )
+        if self.percentage_off is None:
+            raise ValueError("percentage_off is required.")
 
         if self.duration == CouponDuration.REPEATING:
             if self.duration_in_months is None:

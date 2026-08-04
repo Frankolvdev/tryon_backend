@@ -145,10 +145,10 @@ class BillingCouponService:
             raise ConflictException(
                 "Coupon code already exists."
             )
-        if data.discount_type == CouponDiscountType.PERCENTAGE:
-            financial_protection_service.protected_price(
-                db, nominal_price_usd=1.0, requested_discount_percent=float(data.percentage_off or 0)
-            )
+        financial_protection_service.protected_price(
+            db, nominal_price_usd=max(float(financial_protection_service.report(db).safe_profit_usd or 0), 0.01),
+            requested_discount_percent=float(data.percentage_off or 0),
+        )
 
         coupon = billing_coupon_repository.create(
             db,
@@ -156,16 +156,12 @@ class BillingCouponService:
                 "code": data.code.upper(),
                 "name": data.name,
                 "description": data.description,
-                "discount_type": data.discount_type.value,
+                "discount_type": CouponDiscountType.PERCENTAGE.value,
                 "duration": data.duration.value,
                 "duration_in_months": data.duration_in_months,
                 "percentage_off": data.percentage_off,
-                "amount_off": data.amount_off,
-                "currency": (
-                    data.currency.upper()
-                    if data.currency
-                    else None
-                ),
+                "amount_off": None,
+                "currency": None,
                 "max_redemptions": data.max_redemptions,
                 "redemption_count": 0,
                 "first_time_transaction_only": (
@@ -469,31 +465,47 @@ class BillingCouponService:
                 message="Coupon is not synchronized with Stripe.",
             )
 
+        if coupon.discount_type != CouponDiscountType.PERCENTAGE.value:
+            return BillingCouponValidationResponse(
+                valid=False, coupon=self._response(coupon),
+                message="Only percentage coupons are supported.",
+            )
+
         discount_amount = None
         final_amount = purchase_amount
         requested_percent = None
         effective_percent = None
-        protected_percent = Decimal(str(financial_protection_service.get_settings(db).protected_discount_percent))
+        protected_percent = Decimal("100")
         if purchase_amount is not None and purchase_amount > 0:
-            nominal = nominal_amount if nominal_amount is not None and nominal_amount > 0 else purchase_amount
-            if coupon.discount_type == CouponDiscountType.PERCENTAGE.value:
-                coupon_discount = purchase_amount * Decimal(str(coupon.percentage_off or 0)) / Decimal("100")
-            else:
-                coupon_discount = min(purchase_amount, coupon.amount_off or Decimal("0"))
-            requested_final = max(Decimal("0"), purchase_amount - coupon_discount)
-            requested_percent = ((nominal - requested_final) / nominal * Decimal("100"))
+            coupon_percent = Decimal(str(coupon.percentage_off or 0))
+            existing_percent = Decimal("0")
+            if purchase_type == "token_package" and item_id is not None:
+                from app.repositories.token_package_repository import token_package_repository
+                package = token_package_repository.get_by_id(db, item_id)
+                if package is not None:
+                    existing_percent = Decimal(str(package.requested_discount_percent or 0))
+            combined_percent = existing_percent + coupon_percent
+            requested_percent = combined_percent
             try:
                 protected = financial_protection_service.protected_price(
-                    db, nominal_price_usd=float(nominal), requested_discount_percent=float(requested_percent)
+                    db,
+                    nominal_price_usd=float(nominal_amount or purchase_amount),
+                    requested_discount_percent=float(coupon_percent),
+                    existing_discount_percent=float(existing_percent),
                 )
             except ConflictException as exc:
+                report = financial_protection_service.report(db)
+                safe_profit = Decimal(str(report.safe_profit_usd or 0))
+                loss = max(Decimal("0"), combined_percent - Decimal("100")) * safe_profit / Decimal("100")
                 return BillingCouponValidationResponse(
                     valid=False, coupon=self._response(coupon), message=str(exc),
                     requested_discount_percent=requested_percent, protected_discount_percent=protected_percent,
+                    potential_loss_usd=loss,
                 )
-            effective_percent = Decimal(str(protected.effective_discount_percent))
-            final_amount = Decimal(str(protected.final_price_usd)).quantize(Decimal("0.01"))
-            discount_amount = max(Decimal("0"), purchase_amount - final_amount).quantize(Decimal("0.01"))
+            effective_percent = Decimal(str(combined_percent))
+            coupon_discount = Decimal(str(protected.discount_amount_usd)).quantize(Decimal("0.01"))
+            final_amount = max(Decimal("0"), purchase_amount - coupon_discount).quantize(Decimal("0.01"))
+            discount_amount = coupon_discount
 
         return BillingCouponValidationResponse(
             valid=True, coupon=self._response(coupon), message="Coupon is valid.",
