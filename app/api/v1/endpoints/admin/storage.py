@@ -1,7 +1,5 @@
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
@@ -10,7 +8,6 @@ from app.common.exceptions import ConflictException, NotFoundException
 from app.models.user import User
 from app.repositories.storage_file_repository import storage_file_repository
 from app.schemas.storage_file import StorageFileResponse
-from app.services.runtime_settings_service import runtime_settings_service
 from app.services.storage_service import storage_service
 
 router = APIRouter()
@@ -87,25 +84,35 @@ def read_storage_file_content(
     filename = storage_file.original_filename or f"storage-file-{storage_file.id}"
     disposition = "attachment" if download else "inline"
 
-    if storage_file.provider == "local":
-        local_path = Path(runtime_settings_service.local_storage_dir(db)) / storage_file.object_key
-        if not local_path.exists() or not local_path.is_file():
-            raise NotFoundException("Stored file content was not found.")
-        return FileResponse(
-            path=str(local_path),
-            media_type=storage_file.content_type or "application/octet-stream",
-            filename=filename if download else None,
-            content_disposition_type=disposition,
-        )
+    content = storage_service.read_bytes(db, storage_file=storage_file)
+    headers = {"Content-Disposition": f'{disposition}; filename="{filename}"'}
+    return Response(content=content, media_type=storage_file.content_type or "application/octet-stream", headers=headers)
 
-    url = storage_service.create_presigned_url(
-        db=db,
-        storage_file=storage_file,
-        expires_in_seconds=3600,
-    )
-    if not url:
-        raise NotFoundException("Storage file URL is not available.")
-    return RedirectResponse(url=url, status_code=307)
+
+@router.get("/storage/providers")
+def list_storage_providers(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    active = storage_service.active_provider(db)
+    return {
+        "active_provider": active,
+        "providers": [
+            {"key": "local", "label": "Local", "active": active == "local"},
+            {"key": "amazon_s3", "label": "Amazon S3", "active": active == "amazon_s3"},
+            {"key": "cloudflare_r2", "label": "Cloudflare R2", "active": active == "cloudflare_r2"},
+        ],
+        "note": "Changing the active provider only affects new files. Existing files keep their original provider.",
+    }
+
+
+@router.post("/storage/providers/{provider}/health")
+def check_storage_provider(
+    provider: str,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return storage_service.health_check(db, provider=provider)
 
 
 @router.delete("/storage/files/{storage_file_id}", status_code=204)

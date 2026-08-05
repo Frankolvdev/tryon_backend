@@ -275,17 +275,21 @@ class IntegrationService:
                     ),
                 )
 
-            if provider == IntegrationProvider.S3:
+            if provider in {IntegrationProvider.S3, IntegrationProvider.AMAZON_S3, IntegrationProvider.CLOUDFLARE_R2}:
                 from app.services.s3_storage_service import s3_storage_service
-
-                result = s3_storage_service.health_check(db)
+                storage_provider = {
+                    IntegrationProvider.S3: "s3",
+                    IntegrationProvider.AMAZON_S3: "amazon_s3",
+                    IntegrationProvider.CLOUDFLARE_R2: "cloudflare_r2",
+                }[provider]
+                result = s3_storage_service.health_check(db, provider=storage_provider)
                 return self.update_health(
                     db,
                     provider=provider,
                     health=IntegrationHealthResponse(
                         provider=provider,
                         status=IntegrationHealthStatus.HEALTHY,
-                        message="S3 storage is reachable.",
+                        message=f"{provider.value} storage is reachable.",
                         metadata=result,
                     ),
                 )
@@ -380,6 +384,22 @@ class IntegrationService:
                     "endpoint_url": "",
                     "cdn_base_url": "",
                 },
+            ),
+            IntegrationConfigCreate(
+                provider=IntegrationProvider.AMAZON_S3,
+                name="Amazon S3",
+                status=IntegrationStatus.DISABLED,
+                is_enabled=False,
+                base_url=None,
+                config={"bucket": "", "region": "", "endpoint_url": "", "public_base_url": "", "addressing_style": "virtual"},
+            ),
+            IntegrationConfigCreate(
+                provider=IntegrationProvider.CLOUDFLARE_R2,
+                name="Cloudflare R2",
+                status=IntegrationStatus.DISABLED,
+                is_enabled=False,
+                base_url=None,
+                config={"account_id": "", "bucket": "", "endpoint_url": "", "public_base_url": "", "addressing_style": "path"},
             ),
             IntegrationConfigCreate(
                 provider=IntegrationProvider.SMTP,

@@ -1,4 +1,5 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from sqlalchemy.orm import Session
 
 from app.common.enums import IntegrationProvider
@@ -12,9 +13,6 @@ from app.services.storage_service import storage_service
 
 
 class ComfyUITryOnService:
-    def _local_file_path(self, object_key: str) -> str:
-        return str(Path("storage") / object_key)
-
     def _get_comfyui_config(self, db: Session) -> dict:
         config = integration_service.get_config(db, IntegrationProvider.COMFYUI)
         return integration_service._parse_json(config.config_json)
@@ -73,22 +71,19 @@ class ComfyUITryOnService:
         if not person_file or not item_file:
             raise ConflictException("Try-on source files are missing.")
 
-        person_path = self._local_file_path(person_file.object_key)
-        item_path = self._local_file_path(item_file.object_key)
+        # Materialize through StorageService so local, Amazon S3 and R2 inputs behave identically.
+        with TemporaryDirectory(prefix=f"tryon-{job.id}-") as temporary_dir:
+            person_path = Path(temporary_dir) / f"person_{job.id}{Path(person_file.original_filename or person_file.object_key).suffix or '.jpg'}"
+            item_path = Path(temporary_dir) / f"item_{job.id}{Path(item_file.original_filename or item_file.object_key).suffix or '.jpg'}"
+            person_path.write_bytes(storage_service.read_bytes(db, storage_file=person_file))
+            item_path.write_bytes(storage_service.read_bytes(db, storage_file=item_file))
 
-        uploaded_person = comfyui_client_service.upload_image(
-            db=db,
-            file_path=person_path,
-            filename=f"person_{job.id}.jpg",
-            overwrite=True,
-        )
-
-        uploaded_item = comfyui_client_service.upload_image(
-            db=db,
-            file_path=item_path,
-            filename=f"item_{job.id}.jpg",
-            overwrite=True,
-        )
+            uploaded_person = comfyui_client_service.upload_image(
+                db=db, file_path=str(person_path), filename=person_path.name, overwrite=True,
+            )
+            uploaded_item = comfyui_client_service.upload_image(
+                db=db, file_path=str(item_path), filename=item_path.name, overwrite=True,
+            )
 
         workflow_name = job.comfy_workflow_name or "tryon_workflow.json"
 

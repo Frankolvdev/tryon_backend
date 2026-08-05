@@ -9,12 +9,10 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.common.enums import StorageProvider
 from app.common.exceptions import AppException, NotFoundException
-from app.core.config import settings
 from app.repositories.storage_file_repository import storage_file_repository
 from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
-from app.services.s3_storage_service import s3_storage_service
+from app.services.storage_service import storage_service
 
 
 class GenerationModuleFileMaterializerService:
@@ -43,18 +41,7 @@ class GenerationModuleFileMaterializerService:
         if stored is None:
             raise NotFoundException("Generation input file was not found.")
 
-        if stored.provider == StorageProvider.LOCAL.value:
-            source = Path(str(settings.LOCAL_STORAGE_DIR)) / stored.object_key
-            if not source.is_file():
-                raise NotFoundException("The local generation input file is missing.")
-            content = source.read_bytes()
-        elif stored.provider == StorageProvider.S3.value:
-            client = s3_storage_service._client(db)
-            config, parsed, bucket, region, endpoint = s3_storage_service._get_config(db)
-            response = client.get_object(Bucket=stored.bucket or bucket, Key=stored.object_key)
-            content = response["Body"].read()
-        else:
-            raise AppException(f"Unsupported storage provider: {stored.provider}.")
+        content = storage_service.read_bytes(db, storage_file=stored)
 
         filename = self._safe_name(stored.original_filename, fallback=f"input-{stored.id}")
         content_type = stored.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"

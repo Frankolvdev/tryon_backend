@@ -242,8 +242,8 @@ class TryOnService:
             "quality_mode": job.quality_mode,
             "prompt": job.prompt,
             "workflow_name": job.comfy_workflow_name,
-            "person_image_url": person_file.public_url,
-            "item_image_url": item_file.public_url,
+            "person_image_url": storage_service.create_presigned_url(db, storage_file=person_file, expires_in_seconds=3600) or person_file.public_url,
+            "item_image_url": storage_service.create_presigned_url(db, storage_file=item_file, expires_in_seconds=3600) or item_file.public_url,
             "person_image_file_id": person_file.id,
             "item_image_file_id": item_file.id,
         }

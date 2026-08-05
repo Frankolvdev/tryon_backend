@@ -34,7 +34,9 @@ class QualityMode(str, Enum):
 
 class StorageProvider(str, Enum):
     LOCAL = "local"
-    S3 = "s3"
+    S3 = "s3"  # legacy Amazon S3 value
+    AMAZON_S3 = "amazon_s3"
+    CLOUDFLARE_R2 = "cloudflare_r2"
 
 
 class PaymentStatus(str, Enum):
@@ -234,7 +236,9 @@ class IntegrationProvider(str, Enum):
     STRIPE = "stripe"
     RUNPOD = "runpod"
     COMFYUI = "comfyui"
-    S3 = "s3"
+    S3 = "s3"  # legacy Amazon S3 configuration
+    AMAZON_S3 = "amazon_s3"
+    CLOUDFLARE_R2 = "cloudflare_r2"
     SMTP = "smtp"
     GOOGLE_OAUTH = "google_oauth"
     GITHUB_OAUTH = "github_oauth"
