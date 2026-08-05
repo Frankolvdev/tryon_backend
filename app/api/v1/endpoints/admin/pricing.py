@@ -204,3 +204,27 @@ def simulate_pricing(
     current_admin: User = Depends(admin_guard),
 ):
     return pricing_simulator_service.simulate(db, data)
+
+
+@router.post("/profit-simulator/simulate", response_model=PricingSimulatorResponse)
+def simulate_profit_configuration(
+    data: PricingSimulatorRequest,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    """Simulate explicit token and profit values without generating recommendations."""
+    data.target_profit_usd = None
+    return pricing_simulator_service.simulate(db, data)
+
+
+@router.post("/profit-simulator/recommendations", response_model=PricingSimulatorResponse)
+def search_profit_recommendations(
+    data: PricingSimulatorRequest,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    """Search configurations for a target profit without using the manual simulation values as constraints."""
+    data.scenarios = []
+    data.token_value_usd = None
+    data.desired_profit_per_token_usd = None
+    return pricing_simulator_service.simulate(db, data)
