@@ -7,6 +7,8 @@ from pydantic import (
     Field,
 )
 
+from app.schemas.legal import LegalAcceptanceBundle
+
 from app.common.enums import (
     UserRole,
     UserStatus,
@@ -36,6 +38,8 @@ class UserCreate(UserBase):
     )
 
     age_confirmed: bool = False
+
+    legal: LegalAcceptanceBundle | None = None
 
     turnstile_token: str | None = Field(
         default=None,

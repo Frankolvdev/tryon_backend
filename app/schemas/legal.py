@@ -28,3 +28,9 @@ class TokenBagPublicResponse(BaseModel):
     id:int; source:str; original_tokens:int; remaining_tokens:int; status:str
     created_at:datetime; expires_at:datetime|None; refundable:bool
     accepted_documents:list[dict]=[]
+
+class LegalAcceptanceStatusResponse(BaseModel):
+    complete: bool
+    missing_document_ids: list[int]
+    accepted_document_ids: list[int]
+

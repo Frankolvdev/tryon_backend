@@ -164,6 +164,12 @@ class UserService:
 
         password = user_dict.pop("password")
 
+        legal_bundle = user_dict.pop("legal", None)
+        legal_documents = None
+        if legal_bundle is not None:
+            from app.services.legal_document_service import legal_document_service
+            legal_documents = legal_document_service.validate_bundle(db, legal_bundle)
+
         terms_accepted = bool(
             user_dict.pop(
                 "terms_accepted",
@@ -293,6 +299,13 @@ class UserService:
             )
 
         db.refresh(user)
+
+        if legal_documents is not None:
+            from app.services.legal_document_service import legal_document_service
+            legal_document_service.record(
+                db, user_id=user.id, documents=legal_documents, context="account_registration",
+                reference=str(user.id), ip=requested_ip, language="es", user_agent=user_agent,
+            )
 
         return user
 
