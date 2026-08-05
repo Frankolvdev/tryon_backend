@@ -5,6 +5,8 @@ from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.common.responses import SuccessResponse
 from app.models.user import User
+from app.schemas.pricing_simulator import PricingSimulatorRequest, PricingSimulatorResponse
+from app.services.pricing_simulator_service import pricing_simulator_service
 from app.schemas.pricing import (
     CommercialPricePreviewRequest,
     CommercialPricePreviewResponse,
@@ -193,3 +195,12 @@ def list_applied_pricing_rules(
     current_admin: User = Depends(admin_guard),
 ):
     return pricing_service.list_applied_rules(db)
+
+
+@router.post("/pricing-simulator", response_model=PricingSimulatorResponse)
+def simulate_pricing(
+    data: PricingSimulatorRequest,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return pricing_simulator_service.simulate(db, data)
