@@ -378,6 +378,7 @@ class TokenPurchaseService:
                 db, code=data.coupon_code, purchase_amount=amount, nominal_amount=nominal_amount,
                 purchase_type="token_package" if token_package else "free_token_purchase",
                 item_id=token_package.id if token_package else None,
+                tokens_amount=tokens_amount + bonus_tokens,
             )
             if not validation.valid or validation.final_amount is None:
                 raise ConflictException(validation.message)
@@ -392,6 +393,23 @@ class TokenPurchaseService:
                 "final_amount": str(validation.final_amount),
             }
             amount = validation.final_amount
+
+        from app.services.financial_protection_service import financial_protection_service
+        protection_report = financial_protection_service.report(db)
+        safe_profit_per_token = float(protection_report.safe_profit_per_token_usd or 0)
+        coupon_snapshot = purchase_metadata.get("coupon_financial_snapshot") or {}
+        package_discount = float(getattr(token_package, "requested_discount_percent", 0) or 0) if token_package else 0.0
+        coupon_discount = float(coupon_snapshot.get("requested_discount_percent") or 0)
+        total_profit_discount = min(100.0, package_discount + coupon_discount)
+        purchase_metadata["commercial_terms_snapshot"] = {
+            "token_value_usd": str(pricing_service._token_value(db)),
+            "normal_profit_per_token_usd": str(safe_profit_per_token),
+            "profit_discount_percent": str(total_profit_discount),
+            "effective_profit_per_token_usd": str(safe_profit_per_token * (1 - total_profit_discount / 100.0)),
+            "tokens": int(tokens_amount + bonus_tokens),
+            "amount_paid_usd": str(amount),
+            "source": "token_package" if token_package else "free_token_purchase",
+        }
 
         customer = billing_customer_service.get_or_create_stripe_customer(
             db,
@@ -630,7 +648,13 @@ class TokenPurchaseService:
                 f"Token purchase #{purchase.id}"
             ),
             monetary_value_usd=float(purchase.amount),
-            lot_metadata={"purchase_id": purchase.id, "token_package_id": purchase.token_package_id, "currency": purchase.currency},
+            lot_metadata={
+                "purchase_id": purchase.id,
+                "token_package_id": purchase.token_package_id,
+                "currency": purchase.currency,
+                **(self._parse_json(purchase.metadata_json).get("commercial_terms_snapshot") or {}),
+                "coupon_code": self._parse_json(purchase.metadata_json).get("coupon_code"),
+            },
         )
 
         purchase.status = TokenPurchaseStatus.CREDITED.value

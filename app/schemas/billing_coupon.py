@@ -145,6 +145,7 @@ class BillingCouponValidationRequest(BaseModel):
     purchase_amount: Decimal | None = Field(default=None, ge=0)
     purchase_type: Literal["token_package", "free_token_purchase"] | None = None
     item_id: int | None = Field(default=None, ge=1)
+    tokens_amount: int | None = Field(default=None, ge=1)
 
 
 class BillingCouponValidationResponse(BaseModel):

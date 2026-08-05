@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -41,6 +42,8 @@ from app.services.billing_customer_service import (
     billing_customer_service,
 )
 from app.services.integration_service import integration_service
+from app.services.financial_protection_service import financial_protection_service
+from app.services.pricing_service import pricing_service
 from app.services.stripe_client_service import (
     stripe_client_service,
 )
@@ -331,10 +334,28 @@ class SubscriptionService:
                 "Subscription plan is not publicly available."
             )
 
-        if not plan.stripe_price_id:
-            raise ConflictException(
-                "Subscription plan is not synchronized with Stripe."
-            )
+        report = financial_protection_service.report(db)
+        safe_profit_per_token = float(report.safe_profit_per_token_usd or 0)
+        try:
+            plan_metadata = self._parse_json(plan.metadata_json)
+        except Exception:
+            plan_metadata = {}
+        requested_discount = float(plan_metadata.get("requested_discount_percent") or 0)
+        commercial_terms_snapshot = {
+            "plan_id": plan.id,
+            "plan_key": plan.key,
+            "plan_name": plan.name,
+            "tokens_per_period": int(plan.tokens_per_period),
+            "token_value_usd": float(pricing_service._token_value(db)),
+            "normal_profit_per_token_usd": safe_profit_per_token,
+            "profit_discount_percent": requested_discount,
+            "effective_profit_per_token_usd": safe_profit_per_token * (1 - requested_discount / 100.0),
+            "price_paid_per_period_usd": float(plan.price_amount),
+            "currency": plan.currency,
+            "billing_interval": plan.billing_interval,
+            "billing_interval_count": int(plan.billing_interval_count or 1),
+        }
+        commercial_snapshot_json = self._serialize_json(commercial_terms_snapshot)
 
         customer = (
             billing_customer_service.get_or_create_stripe_customer(
@@ -351,7 +372,22 @@ class SubscriptionService:
                 mode="subscription",
                 line_items=[
                     {
-                        "price": plan.stripe_price_id,
+                        "price_data": {
+                            "currency": plan.currency.lower(),
+                            "product_data": {
+                                "name": plan.name,
+                                "description": plan.description or None,
+                                "metadata": {
+                                    "internal_plan_id": str(plan.id),
+                                    "plan_key": plan.key,
+                                },
+                            },
+                            "unit_amount": int((Decimal(str(plan.price_amount)) * 100).quantize(Decimal("1"))),
+                            "recurring": {
+                                "interval": plan.billing_interval,
+                                "interval_count": int(plan.billing_interval_count or 1),
+                            },
+                        },
                         "quantity": 1,
                     }
                 ],
@@ -363,11 +399,13 @@ class SubscriptionService:
                     "internal_user_id": str(user.id),
                     "internal_plan_id": str(plan.id),
                     "plan_key": plan.key,
+                    "commercial_terms_snapshot": commercial_snapshot_json,
                 },
                 subscription_metadata={
                     "internal_user_id": str(user.id),
                     "internal_plan_id": str(plan.id),
                     "plan_key": plan.key,
+                    "commercial_terms_snapshot": commercial_snapshot_json,
                 },
                 client_reference_id=str(user.id),
                 # A Checkout Session can expire, be completed, or be cancelled.
@@ -1021,6 +1059,13 @@ class SubscriptionService:
             subscription.metadata_json
         )
 
+        if metadata.get("tokens_next_period_disabled"):
+            # The customer keeps the already-paid period, but an archived plan
+            # cannot grant tokens for any later renewal.
+            db.commit()
+            db.refresh(subscription)
+            return subscription
+
         granted_invoice_ids = metadata.get(
             "granted_token_invoice_ids",
             [],
@@ -1057,17 +1102,47 @@ class SubscriptionService:
 
             return subscription
 
+        raw_snapshot = (
+            metadata.get("next_period_commercial_terms_snapshot")
+            or metadata.get("commercial_terms_snapshot")
+        )
+        if metadata.get("next_period_commercial_terms_snapshot"):
+            metadata["commercial_terms_snapshot"] = metadata.pop(
+                "next_period_commercial_terms_snapshot"
+            )
+        if isinstance(raw_snapshot, str):
+            try:
+                commercial_snapshot = json.loads(raw_snapshot)
+            except (TypeError, ValueError):
+                commercial_snapshot = {}
+        elif isinstance(raw_snapshot, dict):
+            commercial_snapshot = raw_snapshot
+        else:
+            commercial_snapshot = {}
+
+        # Each paid period freezes its own terms. If the catalog changes, the
+        # current paid period keeps this snapshot; the next renewal receives
+        # the terms included in the new Stripe subscription/invoice metadata.
+        period_tokens = int(commercial_snapshot.get("tokens_per_period") or plan.tokens_per_period)
+        period_amount = float(commercial_snapshot.get("price_paid_per_period_usd") or plan.price_amount)
+
         token_service.credit_tokens(
             db=db,
             user_id=subscription.user_id,
-            amount=plan.tokens_per_period,
+            amount=period_tokens,
             source="subscription_period_grant",
             reference_id=reference_id,
             description=(
-                f"Tokens incluidos en el plan {plan.name}"
+                f"Tokens incluidos en el plan {commercial_snapshot.get('plan_name') or plan.name}"
             ),
-            monetary_value_usd=float(plan.price_amount),
-            lot_metadata={"subscription_id": subscription.id, "plan_id": plan.id, "invoice_reference": reference_id, "currency": plan.currency},
+            monetary_value_usd=period_amount,
+            lot_metadata={
+                "subscription_id": subscription.id,
+                "plan_id": plan.id,
+                "invoice_reference": reference_id,
+                "currency": commercial_snapshot.get("currency") or plan.currency,
+                **commercial_snapshot,
+            },
         )
 
         granted_invoice_ids.append(reference_id)

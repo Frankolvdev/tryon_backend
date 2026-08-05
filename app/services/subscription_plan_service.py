@@ -4,10 +4,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.common.billing_enums import BillingInterval
+from app.common.billing_enums import BillingInterval, SubscriptionStatus
 from app.common.time import utc_now
 from app.common.exceptions import ConflictException, NotFoundException
 from app.models.subscription_plan import SubscriptionPlan
+from app.models.user_subscription import UserSubscription
 from app.repositories.subscription_plan_repository import (
     subscription_plan_repository,
 )
@@ -403,6 +404,44 @@ class SubscriptionPlanService:
         )
 
         if subscription_count > 0:
+            # Existing customers keep the period they already paid for, but an
+            # archived plan must never renew or grant tokens for another period.
+            active_statuses = {
+                SubscriptionStatus.ACTIVE.value,
+                SubscriptionStatus.TRIALING.value,
+                SubscriptionStatus.PAST_DUE.value,
+            }
+            subscriptions = (
+                db.query(UserSubscription)
+                .filter(
+                    UserSubscription.subscription_plan_id == plan.id,
+                    UserSubscription.status.in_(active_statuses),
+                )
+                .all()
+            )
+            for subscription in subscriptions:
+                subscription.cancel_at_period_end = True
+                metadata = self._parse_dict(subscription.metadata_json)
+                metadata.update({
+                    "renewal_disabled": True,
+                    "tokens_next_period_disabled": True,
+                    "cancellation_reason": "plan_archived",
+                    "plan_archived_at": utc_now().isoformat(),
+                })
+                subscription.metadata_json = self._serialize_json(metadata)
+                db.add(subscription)
+                if subscription.provider_subscription_id:
+                    try:
+                        stripe_client_service.update_subscription_cancel_at_period_end(
+                            db,
+                            subscription_id=subscription.provider_subscription_id,
+                            cancel_at_period_end=True,
+                        )
+                    except Exception:
+                        # Local state remains authoritative and the webhook/token
+                        # grant path also checks the archived-plan marker.
+                        pass
+
             subscription_plan_repository.update(
                 db,
                 db_obj=plan,
@@ -412,6 +451,7 @@ class SubscriptionPlanService:
                     "archived_at": utc_now(),
                 },
             )
+            db.commit()
             return True
 
         subscription_plan_repository.delete(
@@ -571,6 +611,74 @@ class SubscriptionPlanService:
         db.add(plan)
         db.commit()
         db.refresh(plan)
+
+        if price_replaced and plan.stripe_price_id:
+            # Keep the already-paid period untouched. Switching the Stripe item
+            # with no proration makes the new catalog price apply on the next
+            # monthly/yearly renewal only.
+            active_statuses = {
+                SubscriptionStatus.ACTIVE.value,
+                SubscriptionStatus.TRIALING.value,
+                SubscriptionStatus.PAST_DUE.value,
+            }
+            subscriptions = (
+                db.query(UserSubscription)
+                .filter(
+                    UserSubscription.subscription_plan_id == plan.id,
+                    UserSubscription.status.in_(active_statuses),
+                    UserSubscription.cancel_at_period_end.is_(False),
+                )
+                .all()
+            )
+            report = financial_protection_service.report(db)
+            safe_profit = float(report.safe_profit_per_token_usd or 0)
+            plan_metadata = self._parse_dict(plan.metadata_json)
+            discount = float(plan_metadata.get("requested_discount_percent") or 0)
+            next_terms = {
+                "plan_id": plan.id,
+                "plan_key": plan.key,
+                "plan_name": plan.name,
+                "tokens_per_period": int(plan.tokens_per_period),
+                "token_value_usd": float(pricing_service._token_value(db)),
+                "normal_profit_per_token_usd": safe_profit,
+                "profit_discount_percent": discount,
+                "effective_profit_per_token_usd": safe_profit * (1 - discount / 100.0),
+                "price_paid_per_period_usd": float(plan.price_amount),
+                "currency": plan.currency,
+                "billing_interval": plan.billing_interval,
+                "billing_interval_count": int(getattr(plan, "billing_interval_count", 1) or 1),
+            }
+            for subscription in subscriptions:
+                if not subscription.provider_subscription_id:
+                    continue
+                try:
+                    stripe_subscription = stripe_client_service.retrieve_subscription(
+                        db, subscription_id=subscription.provider_subscription_id
+                    )
+                    items = getattr(getattr(stripe_subscription, "items", None), "data", None)
+                    if items is None and isinstance(stripe_subscription, dict):
+                        items = ((stripe_subscription.get("items") or {}).get("data") or [])
+                    primary_item = items[0] if items else None
+                    item_id = getattr(primary_item, "id", None) if primary_item is not None else None
+                    if item_id is None and isinstance(primary_item, dict):
+                        item_id = primary_item.get("id")
+                    if item_id:
+                        stripe_client_service.change_subscription_price(
+                            db,
+                            subscription_id=subscription.provider_subscription_id,
+                            subscription_item_id=item_id,
+                            new_price_id=plan.stripe_price_id,
+                            proration_behavior="none",
+                        )
+                    subscription_metadata = self._parse_dict(subscription.metadata_json)
+                    subscription_metadata["next_period_commercial_terms_snapshot"] = next_terms
+                    subscription.metadata_json = self._serialize_json(subscription_metadata)
+                    db.add(subscription)
+                except Exception:
+                    # Do not alter the already-paid current period if Stripe is
+                    # temporarily unavailable. The administrator can sync again.
+                    continue
+            db.commit()
 
         integration_service.record_event(
             db,

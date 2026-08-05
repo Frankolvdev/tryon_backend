@@ -45,14 +45,69 @@ class TokenValueLedgerService:
         db.flush()
 
     def execution_summary(self, db:Session, execution_id:str) -> dict:
-        rows=db.execute(select(TokenConsumptionAllocation,TokenValueLot).join(TokenValueLot,TokenValueLot.id==TokenConsumptionAllocation.lot_id).where(TokenConsumptionAllocation.execution_id==execution_id)).all()
-        tokens=0; revenue=Decimal('0'); allocations=[]; legacy=False
+        rows=db.execute(
+            select(TokenConsumptionAllocation,TokenValueLot)
+            .join(TokenValueLot,TokenValueLot.id==TokenConsumptionAllocation.lot_id)
+            .where(TokenConsumptionAllocation.execution_id==execution_id)
+            .order_by(TokenConsumptionAllocation.id)
+        ).all()
+        tokens=0
+        cash_revenue=Decimal("0")
+        normal_profit=Decimal("0")
+        discount_given=Decimal("0")
+        net_profit=Decimal("0")
+        allocations=[]
+        legacy=False
         for allocation,lot in rows:
             net=max(allocation.tokens_allocated-allocation.tokens_reversed,0)
+            if not net:
+                continue
             value=Decimal(allocation.effective_token_value_usd or 0)
-            tokens+=net; revenue+=value*net
-            legacy=legacy or lot.source=='legacy_untraced_balance'
-            if net: allocations.append({'lot_id':lot.id,'source':lot.source,'reference_id':lot.reference_id,'tokens':net,'effective_token_value_usd':float(value),'recognized_revenue_usd':float(value*net)})
-        return {'tokens':tokens,'recognized_revenue_usd':float(revenue),'allocations':allocations,'traceability_status':'partial' if legacy else ('exact' if rows else 'unavailable')}
+            try:
+                metadata=json.loads(lot.metadata_json or "{}")
+            except (TypeError,ValueError):
+                metadata={}
+            normal_per_token=Decimal(str(metadata.get("normal_profit_per_token_usd") or 0))
+            discount_percent=Decimal(str(metadata.get("profit_discount_percent") or 0))
+            effective_per_token=Decimal(str(
+                metadata.get("effective_profit_per_token_usd")
+                if metadata.get("effective_profit_per_token_usd") is not None
+                else normal_per_token*(Decimal("1")-discount_percent/Decimal("100"))
+            ))
+            row_normal=normal_per_token*net
+            row_net=effective_per_token*net
+            row_discount=max(Decimal("0"),row_normal-row_net)
+            tokens+=net
+            cash_revenue+=value*net
+            normal_profit+=row_normal
+            discount_given+=row_discount
+            net_profit+=row_net
+            legacy=legacy or lot.source=="legacy_untraced_balance"
+            allocations.append({
+                "token_bag_id":lot.id,
+                "source":lot.source,
+                "source_label":metadata.get("source_label") or metadata.get("source") or lot.source,
+                "reference_id":lot.reference_id,
+                "tokens_used":net,
+                "benefit_percent":float(discount_percent),
+                "normal_profit_per_token_usd":float(normal_per_token),
+                "profit_per_token_after_benefit_usd":float(effective_per_token),
+                "profit_without_benefit_usd":float(row_normal),
+                "benefit_given_usd":float(row_discount),
+                "company_profit_usd":float(row_net),
+                "effective_token_value_usd":float(value),
+                "cash_value_at_purchase_usd":float(value*net),
+                "coupon_code":metadata.get("coupon_code"),
+                "plan_name":metadata.get("plan_name"),
+            })
+        return {
+            "tokens":tokens,
+            "recognized_revenue_usd":float(cash_revenue),
+            "profit_without_benefits_usd":float(normal_profit),
+            "customer_benefits_usd":float(discount_given),
+            "company_profit_usd":float(net_profit),
+            "allocations":allocations,
+            "traceability_status":"partial" if legacy else ("exact" if rows else "unavailable"),
+        }
 
 token_value_ledger_service=TokenValueLedgerService()

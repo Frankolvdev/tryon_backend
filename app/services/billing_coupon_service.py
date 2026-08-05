@@ -388,6 +388,7 @@ class BillingCouponService:
         nominal_amount: Decimal | None = None,
         purchase_type: str | None = None,
         item_id: int | None = None,
+        tokens_amount: int | None = None,
     ) -> BillingCouponValidationResponse:
         coupon = billing_coupon_repository.get_by_code(
             db,
@@ -459,11 +460,6 @@ class BillingCouponService:
         if item_id is not None and eligible_item_ids and item_id not in eligible_item_ids:
             return BillingCouponValidationResponse(valid=False, coupon=self._response(coupon), message="Coupon does not apply to the selected item.")
 
-        if not coupon.stripe_promotion_code_id:
-            return BillingCouponValidationResponse(
-                valid=False, coupon=self._response(coupon),
-                message="Coupon is not synchronized with Stripe.",
-            )
 
         if coupon.discount_type != CouponDiscountType.PERCENTAGE.value:
             return BillingCouponValidationResponse(
@@ -492,6 +488,7 @@ class BillingCouponService:
                     nominal_price_usd=float(nominal_amount or purchase_amount),
                     requested_discount_percent=float(coupon_percent),
                     existing_discount_percent=float(existing_percent),
+                    tokens_amount=int(tokens_amount or 0),
                 )
             except ConflictException as exc:
                 report = financial_protection_service.report(db)
@@ -508,7 +505,7 @@ class BillingCouponService:
             discount_amount = coupon_discount
 
         return BillingCouponValidationResponse(
-            valid=True, coupon=self._response(coupon), message="Coupon is valid.",
+            valid=True, coupon=self._response(coupon), message="Coupon is valid and will be calculated by the backend.",
             discount_amount=discount_amount, final_amount=final_amount,
             requested_discount_percent=requested_percent, effective_discount_percent=effective_percent,
             protected_discount_percent=protected_percent,
