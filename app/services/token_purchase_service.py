@@ -323,9 +323,31 @@ class TokenPurchaseService:
             bonus_tokens = int(
                 getattr(token_package, "bonus_tokens", 0) or 0
             )
-            currency = token_package.currency.upper()
-            amount = (Decimal(token_package.price_cents) / Decimal("100")).quantize(Decimal("0.01"))
-            nominal_amount = (Decimal(token_package.nominal_price_cents or token_package.price_cents) / Decimal("100")).quantize(Decimal("0.01"))
+
+            # The public catalog and Stripe checkout must use the same
+            # backend-owned dynamic quote. Never start checkout from the
+            # legacy/stored price_cents value.
+            calculated_nominal_amount, calculated_currency = (
+                pricing_service.price_for_tokens(db, tokens_amount)
+            )
+            nominal_amount = Decimal(str(calculated_nominal_amount)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
+            )
+            from app.services.financial_protection_service import (
+                financial_protection_service,
+            )
+            protected_price = financial_protection_service.protected_price(
+                db,
+                nominal_price_usd=float(nominal_amount),
+                requested_discount_percent=float(
+                    getattr(token_package, "requested_discount_percent", 0) or 0
+                ),
+                tokens_amount=tokens_amount,
+            )
+            amount = Decimal(str(protected_price.final_price_usd)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
+            )
+            currency = str(calculated_currency).upper()
             product_name = token_package.name
             product_description = (
                 token_package.description.strip()
