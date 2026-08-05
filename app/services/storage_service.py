@@ -132,8 +132,22 @@ class StorageService:
     def health_check(self, db: Session, *, provider: str | None = None) -> dict:
         selected=self.ACTIVE_ALIASES.get((provider or self.active_provider(db)).lower(), provider or self.active_provider(db))
         if selected == StorageProvider.LOCAL.value:
-            root=self._ensure_local_storage_dir(db); probe=root/'.storage-health-check'; probe.write_bytes(b'ok'); probe.unlink()
-            return {"healthy":True,"provider":selected,"directory":str(root)}
-        return s3_storage_service.health_check(db, provider=selected)
+            root = self._ensure_local_storage_dir(db)
+            probe = root / ".storage-health-check"
+            probe.write_bytes(b"ok")
+            probe.unlink()
+            return {
+                "healthy": True,
+                "provider": selected,
+                "directory": str(root),
+                "message": f"Almacenamiento local disponible en {root}.",
+            }
+
+        result = s3_storage_service.health_check(db, provider=selected)
+        result.setdefault(
+            "message",
+            f"Conexión correcta con {selected} y acceso confirmado al bucket {result.get('bucket', '')}.",
+        )
+        return result
 
 storage_service=StorageService()

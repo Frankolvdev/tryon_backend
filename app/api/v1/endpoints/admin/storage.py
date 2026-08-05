@@ -219,9 +219,24 @@ def update_storage_provider(
         )
 
     if data.active_provider is not None:
-        selected = storage_service.ACTIVE_ALIASES.get(data.active_provider.strip().lower(), data.active_provider.strip().lower())
+        selected = storage_service.ACTIVE_ALIASES.get(
+            data.active_provider.strip().lower(),
+            data.active_provider.strip().lower(),
+        )
         if selected not in {"local", "amazon_s3", "cloudflare_r2"}:
             raise ConflictException("Unsupported active storage provider.")
+
+        # A provider may only become active after its real health check succeeds.
+        # Saving configuration and selecting it are deliberately separate concerns:
+        # a typo in credentials, bucket, endpoint or local path must never redirect
+        # new uploads to a broken destination.
+        health = storage_service.health_check(db, provider=selected)
+        if not health.get("healthy"):
+            raise ConflictException(
+                health.get("message")
+                or f"El proveedor {selected} no superó la prueba de conexión."
+            )
+
         setting = system_setting_repository.get_by_key(db, "storage_provider")
         if not setting:
             raise NotFoundException("storage_provider setting not found.")
