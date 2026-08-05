@@ -187,7 +187,10 @@ class BillingHistoryService:
             "record_kind": record_kind,
             "display_status": display_status,
             "is_payment_attempt": is_attempt,
-            "can_reconcile": bool(payment.provider_payment_intent_id),
+            "can_reconcile": bool(
+                payment.provider_payment_intent_id
+                or payment.provider_checkout_session_id
+            ),
             "original_amount": original_amount,
             "discount_amount": discount_amount,
             "final_amount": payment.amount,
@@ -557,10 +560,104 @@ class BillingHistoryService:
             db,
             payment_id=payment_id,
         )
+        # A missing webhook can leave a paid Checkout Session without the
+        # PaymentIntent copied into our local payment. Reconciliation must be
+        # able to recover from the Checkout Session itself.
         if not payment.provider_payment_intent_id:
-            raise ConflictException(
-                "Payment has no Stripe PaymentIntent."
+            if not payment.provider_checkout_session_id:
+                raise ConflictException(
+                    "Payment has neither a Stripe PaymentIntent nor a Checkout Session."
+                )
+
+            checkout_session = stripe_client_service.retrieve_checkout_session(
+                db,
+                checkout_session_id=payment.provider_checkout_session_id,
             )
+            checkout_payment_status = self._stripe_value(
+                checkout_session,
+                "payment_status",
+            )
+            checkout_status = self._stripe_value(
+                checkout_session,
+                "status",
+            )
+
+            # Token purchases require the complete idempotent business flow:
+            # payment update, purchase state, token credit, bag creation and
+            # legal-evidence linkage. Reuse the same service used by webhooks.
+            if payment.payment_type == BillingPaymentType.TOKEN_PURCHASE.value:
+                purchase = token_purchase_repository.get_by_billing_payment_id(
+                    db,
+                    payment.id,
+                )
+                if not purchase:
+                    raise ConflictException(
+                        "Token purchase linked to this payment was not found."
+                    )
+
+                from app.services.token_purchase_service import token_purchase_service
+
+                result = token_purchase_service.reconcile(
+                    db,
+                    purchase_id=purchase.id,
+                    force=True,
+                )
+                refreshed = self.get_payment(db, payment_id=payment.id)
+                return BillingPaymentReconcileResponse(
+                    payment=self._payment_response(refreshed),
+                    reconciled=result.reconciled,
+                    message=(
+                        "Stripe confirmed the Checkout payment and the token "
+                        "purchase was synchronized."
+                        if refreshed.status == BillingPaymentStatus.SUCCEEDED.value
+                        else "Checkout Session synchronized with Stripe; payment is not completed yet."
+                    ),
+                )
+
+            checkout_payment_intent = self._stripe_value(
+                checkout_session,
+                "payment_intent",
+            )
+            if not isinstance(checkout_payment_intent, str):
+                checkout_payment_intent = self._stripe_value(
+                    checkout_payment_intent,
+                    "id",
+                )
+
+            if checkout_payment_intent:
+                payment.provider_payment_intent_id = checkout_payment_intent
+                db.add(payment)
+                db.flush()
+            else:
+                payment.status = (
+                    BillingPaymentStatus.SUCCEEDED.value
+                    if checkout_payment_status == "paid"
+                    else (
+                        BillingPaymentStatus.CANCELED.value
+                        if checkout_status in {"expired", "complete"}
+                        and checkout_payment_status != "paid"
+                        else BillingPaymentStatus.PENDING.value
+                    )
+                )
+                payment.metadata_json = self._serialize(
+                    {
+                        **self._parse(payment.metadata_json),
+                        "last_reconciled_checkout_status": checkout_status,
+                        "last_reconciled_checkout_payment_status": checkout_payment_status,
+                        "last_reconciled_at": utc_now().isoformat(),
+                    }
+                )
+                db.add(payment)
+                db.commit()
+                db.refresh(payment)
+                return BillingPaymentReconcileResponse(
+                    payment=self._payment_response(payment),
+                    reconciled=True,
+                    message=(
+                        "Checkout Session synchronized with Stripe. No PaymentIntent "
+                        "is available for this checkout type."
+                    ),
+                )
 
         payment_intent = (
             stripe_client_service.retrieve_payment_intent(
