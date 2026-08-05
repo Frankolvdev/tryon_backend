@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, File, Query, UploadFile, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
 from app.api.v1.guards.auth_guard import auth_guard
@@ -23,7 +23,17 @@ def upload(file:UploadFile=File(...), db:Session=Depends(get_db), current_user:U
 @router.get("/{file_id}/content")
 def content(file_id:int, db:Session=Depends(get_db), current_user:User=Depends(auth_guard)):
     item=user_library_service.get_owned(db,current_user,file_id)
-    return RedirectResponse(user_library_service._url(db,item))
+    payload = user_library_service.read_content(db, item)
+    filename = (item.original_filename or f"library-file-{item.id}").replace('"', "")
+    return Response(
+        content=payload,
+        media_type=item.content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 @router.delete("/{file_id}", status_code=204)
 def delete(file_id:int, db:Session=Depends(get_db), current_user:User=Depends(auth_guard)):

@@ -83,6 +83,10 @@ class UserLibraryService:
         if item is None: raise NotFoundException("Library file not found.")
         return item
 
+    def read_content(self, db: Session, item: StorageFile) -> bytes:
+        """Read a library file through its original storage provider."""
+        return storage_service.read_bytes(db, storage_file=item)
+
     def delete(self, db: Session, user: User, file_id: int):
         item=self.get_owned(db,user,file_id)
         storage_service.delete_file(db=db,storage_file=item)

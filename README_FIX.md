@@ -1,8 +1,6 @@
-# FIX Backend — Generation reset with optional gallery
+# FIX Backend: selección autenticada de archivos de biblioteca
 
-Corrige el endpoint `/api/v1/admin/maintenance/generation-reset/preview` cuando la instalación no contiene la tabla opcional `user_gallery_items`.
-
-- Detecta la tabla con el inspector de SQLAlchemy.
-- Si no existe, omite únicamente la limpieza de galería.
-- Continúa contabilizando y eliminando ejecuciones, jobs, datos financieros y archivos de almacenamiento.
-- No requiere migración Alembic.
+Sirve los bytes del archivo desde el proveedor original mediante `storage_service.read_bytes()`.
+Compatible con Local, Cloudflare R2, Amazon S3 y el proveedor histórico S3.
+No cambia guardado, cuotas, URLs de miniatura ni proveedor activo.
+No requiere migración Alembic.
