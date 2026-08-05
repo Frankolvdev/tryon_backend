@@ -133,8 +133,25 @@ class IntegrationService:
             "api_secret",
             "webhook_secret",
         ]:
-            if field in update_data:
-                final_data[field] = update_data[field]
+            if field not in update_data:
+                continue
+
+            value = update_data[field]
+            # Admin forms never receive stored secrets back. Consequently, a
+            # save/activate request commonly sends null or an empty value for
+            # credentials that are already configured. Treat those values as
+            # "keep the existing secret" rather than erasing it. A credential
+            # is replaced only when the administrator submits a real value.
+            if field in {"api_key", "api_secret", "webhook_secret"}:
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    normalized = value.strip()
+                    if not normalized or normalized in {"********", "••••••••"}:
+                        continue
+                    value = normalized
+
+            final_data[field] = value
 
         if "status" in update_data and update_data["status"] is not None:
             final_data["status"] = update_data["status"].value
