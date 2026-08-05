@@ -1,0 +1,1671 @@
+from __future__ import annotations
+
+import base64
+import copy
+import io
+import json
+import threading
+import time
+import math
+import tempfile
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy.orm import Session
+
+from app.common.exceptions import AppException, ConflictException, NotFoundException
+from app.common.generation_module_enums import GenerationExecutionEngine, GenerationModuleStepType
+from app.common.time import utc_now
+from app.common.generation_execution_state_machine import transition_execution
+from app.db.database import SessionLocal
+from app.core.config import settings
+from app.schemas.generation_module_runtime import (
+    GenerationModuleExecutionCreate,
+    GenerationModuleExecutionLog,
+    GenerationModuleExecutionResponse,
+    GenerationModuleStepExecution,
+)
+from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
+from app.services.comfyui_prompt_preprocessor_service import comfyui_prompt_preprocessor_service
+from app.services.generation_module_service import generation_module_service
+from app.services.generation_module_file_materializer_service import generation_module_file_materializer_service
+from app.services.generation_module_security_service import generation_module_security_service
+from app.services.generation_configuration_readiness_service import generation_configuration_readiness_service
+from app.services.generation_module_execution_store_service import generation_module_execution_store_service
+from app.services.generation_module_billing_service import generation_module_billing_service
+from app.services.generation_finance_service import generation_finance_service
+from app.services.token_value_ledger_service import token_value_ledger_service
+from app.services.ai_engine_settings_service import ai_engine_settings_service
+from app.services.provider_pricing_service import provider_pricing_service
+from app.repositories.pricing_rule_repository import pricing_rule_repository
+from app.services.pricing_service import pricing_service
+from app.services.generation_module_result_service import generation_module_result_service
+from app.services.storage_service import storage_service
+from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
+from app.services.beam_serverless_adapter_service import beam_serverless_adapter_service
+from app.services.infrastructure_provider_service import infrastructure_provider_service
+from app.services.modal_pipeline_adapter_service import modal_pipeline_adapter_service
+from app.services.generation_job_queue_service import generation_job_queue_service
+from app.services.generation_job_orchestrator_service import generation_job_orchestrator_service
+from app.services.generation_runtime import (
+    GenerationRuntimeContext,
+    GenerationRuntimeStepRegistry,
+    RuntimeProviderRegistry,
+)
+
+
+class GenerationModuleRuntimeService:
+    def __init__(self) -> None:
+        self._items: dict[UUID, GenerationModuleExecutionResponse] = {}
+        self._provider_refs: dict[UUID, dict[str, str]] = {}
+        self._owners: dict[UUID, int | None] = {}
+        self._lock = threading.RLock()
+        self._runtime_steps = GenerationRuntimeStepRegistry(self)
+
+    def create(self, db: Session, *, module_id: int, data: GenerationModuleExecutionCreate, user_id: int | None = None) -> GenerationModuleExecutionResponse:
+        module = generation_module_service.get_response(db, module_id=module_id)
+        if not module.is_active:
+            raise AppException("The generation module is inactive.")
+        self._validate_inputs(module.inputs, data.inputs)
+        engine = data.engine or module.default_execution_engine
+        # Fail closed before charging tokens, persisting an execution, or
+        # dispatching provider work. Administrative tests use this same gate,
+        # but continue to skip token charging because user_id remains None.
+        generation_configuration_readiness_service.ensure_ready(
+            db,
+            module_id=module.id,
+            engine=engine,
+        )
+        if user_id is not None:
+            generation_module_security_service.ensure_user_can_start(self, user_id=user_id, engine=engine)
+        now = utc_now()
+        execution_id = uuid4()
+        pricing = module.pricing
+        if user_id is not None and (pricing is None or not pricing.is_active):
+            raise AppException("The generation module has no active pricing rule.")
+        tokens = int(pricing.required_tokens) if pricing and user_id is not None else 0
+        applied_pricing = (
+            pricing_service.get_applied_rule_for_module(db, module.id)
+            if pricing is not None
+            else None
+        )
+        estimated_duration_seconds = (
+            float(pricing.estimated_duration_seconds)
+            if pricing is not None and pricing.estimated_duration_seconds is not None
+            else None
+        )
+        estimated_duration_source = (
+            str(pricing.estimated_duration_source)
+            if pricing is not None and pricing.estimated_duration_source
+            else None
+        )
+        estimated_billable_seconds = (
+            float(pricing.estimated_billable_seconds)
+            if pricing is not None and pricing.estimated_billable_seconds is not None
+            else None
+        )
+        estimated_infrastructure_cost_usd = (
+            float(applied_pricing.estimated_infrastructure_cost_usd)
+            if applied_pricing is not None
+            and applied_pricing.estimated_infrastructure_cost_usd is not None
+            else None
+        )
+        estimated_final_price_usd = (
+            float(applied_pricing.estimated_final_price_usd)
+            if applied_pricing is not None
+            and applied_pricing.estimated_final_price_usd is not None
+            else (float(pricing.final_price_usd) if pricing is not None else None)
+        )
+        estimated_tokens_before_execution = (
+            int(pricing.required_tokens) if pricing is not None else None
+        )
+        estimated_bag_quote = None
+        if (
+            user_id is not None
+            and pricing is not None
+            and estimated_infrastructure_cost_usd is not None
+            and applied_pricing is not None
+        ):
+            estimated_bag_quote = token_value_ledger_service.quote_fifo_infrastructure_charge(
+                db, user_id=user_id, execution_id=None,
+                infrastructure_cost_usd=estimated_infrastructure_cost_usd, apply_profit=True,
+                fallback_profit_per_token_usd=float(applied_pricing.desired_profit_per_token_usd or 0),
+            )
+            tokens = int(estimated_bag_quote["tokens"])
+            estimated_tokens_before_execution = tokens
+            estimated_final_price_usd = float(estimated_bag_quote["charged_usd"])
+        estimated_pricing_snapshot = {
+            "finalized": False,
+            "pricing_rule_id": (pricing.id if pricing else None),
+            "provider": (pricing.provider if pricing else None),
+            "gpu_key": (pricing.gpu_key if pricing else None),
+            "estimated_duration_seconds": estimated_duration_seconds,
+            "estimated_duration_source": estimated_duration_source,
+            "estimated_billable_seconds": estimated_billable_seconds,
+            "estimated_infrastructure_cost_usd": estimated_infrastructure_cost_usd,
+            "estimated_final_price_usd": estimated_final_price_usd,
+            "token_value_usd": (float(pricing.token_value_usd) if pricing else None),
+            "estimated_tokens_before_execution": estimated_tokens_before_execution,
+            "token_charge_basis": "fifo_token_bag_snapshots" if estimated_bag_quote else "current_pricing_rule_fallback",
+            "estimated_token_bag_quote": (estimated_bag_quote.get("bags") if estimated_bag_quote else None),
+        }
+        if user_id is not None and tokens > 0:
+            generation_module_billing_service.charge(
+                db, user_id=user_id, execution_id=str(execution_id), module_key=module.key, tokens=tokens
+            )
+        execution = GenerationModuleExecutionResponse(
+            id=execution_id, module_id=module.id, module_key=module.key, user_id=user_id, engine=engine,
+            status="queued", progress=0, inputs=copy.deepcopy(data.inputs), context=copy.deepcopy(data.inputs),
+            outputs={}, steps=[GenerationModuleStepExecution(step_key=s.key, step_name=s.name, step_type=s.step_type, status="pending") for s in sorted(module.steps, key=lambda item: item.position) if s.is_enabled],
+            logs=[GenerationModuleExecutionLog(timestamp=now, message=(f"Execution queued. {tokens} tokens charged." if tokens else "Execution queued."))], created_at=now,
+            pricing_rule_id=(pricing.id if pricing else None), tokens_charged=tokens,
+            currency=(pricing.currency if pricing else None),
+            commercial_price=(pricing.final_price_usd if pricing else None),
+            provider_endpoint_id=module.endpoint,
+            estimated_duration_seconds=estimated_duration_seconds,
+            estimated_duration_source=estimated_duration_source,
+            estimated_billable_seconds=estimated_billable_seconds,
+            estimated_infrastructure_cost_usd=estimated_infrastructure_cost_usd,
+            estimated_final_price_usd=estimated_final_price_usd,
+            estimated_tokens_before_execution=estimated_tokens_before_execution,
+            billing_breakdown=estimated_pricing_snapshot,
+        )
+        with self._lock:
+            self._items[execution.id] = execution
+            self._owners[execution.id] = user_id
+        execution.queue_name = generation_job_queue_service.queue_name(engine)
+        execution.provider_status = "queued_for_dispatch"
+        generation_module_execution_store_service.save(execution)
+        generation_job_orchestrator_service.submit(execution.id, engine=engine)
+        execution.queue_position = generation_job_queue_service.position(execution.id, engine=engine)
+        generation_module_execution_store_service.save(execution)
+        return self.get(execution.id)
+
+    def attach_persisted(self, execution: GenerationModuleExecutionResponse) -> None:
+        with self._lock:
+            self._items[execution.id] = execution.model_copy(deep=True)
+            self._owners[execution.id] = execution.user_id
+
+    @staticmethod
+    def recovery_log() -> GenerationModuleExecutionLog:
+        return GenerationModuleExecutionLog(
+            timestamp=utc_now(),
+            level="warning",
+            message="Execution recovered after backend restart and returned to its provider queue.",
+        )
+
+    @staticmethod
+    def _validate_inputs(definitions: list[Any], values: dict[str, Any]) -> None:
+        allowed_keys = {item.key for item in definitions}
+        unknown = sorted(set(values) - allowed_keys)
+        if unknown:
+            raise AppException(f"Unknown module inputs: {', '.join(unknown)}.")
+        for item in definitions:
+            value = values.get(item.key, item.default_value)
+            if item.is_required and (value is None or value == ""):
+                raise AppException(f"Required module input '{item.key}' is missing.")
+            if value is None:
+                continue
+            rules = item.validation or {}
+            if item.input_type in {"integer", "float"}:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise AppException(f"Module input '{item.key}' must be numeric.")
+                if "min" in rules and value < rules["min"]:
+                    raise AppException(f"Module input '{item.key}' is below its minimum.")
+                if "max" in rules and value > rules["max"]:
+                    raise AppException(f"Module input '{item.key}' exceeds its maximum.")
+            if item.input_type in {"text", "textarea"}:
+                if not isinstance(value, str):
+                    raise AppException(f"Module input '{item.key}' must be text.")
+                if "min_length" in rules and len(value) < rules["min_length"]:
+                    raise AppException(f"Module input '{item.key}' is shorter than allowed.")
+                if "max_length" in rules and len(value) > rules["max_length"]:
+                    raise AppException(f"Module input '{item.key}' is longer than allowed.")
+            if item.input_type == "select":
+                options = rules.get("options") or []
+                allowed = {str(option.get("value")) if isinstance(option, dict) else str(option) for option in options}
+                if str(value) not in allowed:
+                    raise AppException(f"Module input '{item.key}' has an invalid option.")
+            if item.input_type == "boolean" and not isinstance(value, bool):
+                raise AppException(f"Module input '{item.key}' must be boolean.")
+            if item.input_type == "json" and not isinstance(value, (dict, list)):
+                raise AppException(f"Module input '{item.key}' must contain JSON data.")
+            if item.input_type in {"image", "file"}:
+                if not isinstance(value, dict) or not value.get("__generation_file__"):
+                    raise AppException(f"Module input '{item.key}' must contain an uploaded file.")
+
+    def get(self, execution_id: UUID) -> GenerationModuleExecutionResponse:
+        with self._lock:
+            item = self._items.get(execution_id)
+            if item:
+                return item.model_copy(deep=True)
+        persisted = generation_module_execution_store_service.get(execution_id)
+        if persisted is None:
+            raise NotFoundException("Generation module execution not found.")
+        if (
+            persisted.status == "failed"
+            and persisted.user_id is not None
+            and persisted.tokens_charged > 0
+            and not persisted.tokens_refunded
+            and (persisted.error or "").startswith("Execution was interrupted because the backend process restarted")
+        ):
+            db = SessionLocal()
+            try:
+                refunded = generation_module_billing_service.refund(
+                    db,
+                    user_id=persisted.user_id,
+                    execution_id=str(persisted.id),
+                    module_key=persisted.module_key,
+                    tokens=persisted.tokens_charged,
+                    reason=persisted.error or "backend restart",
+                )
+                if refunded:
+                    persisted.tokens_refunded = True
+                    persisted.logs.append(GenerationModuleExecutionLog(
+                        timestamp=utc_now(),
+                        message=f"{persisted.tokens_charged} tokens refunded after backend restart.",
+                    ))
+                    generation_module_execution_store_service.save(persisted)
+            finally:
+                db.close()
+        return persisted
+
+
+    def get_for_user(self, execution_id: UUID, *, user_id: int) -> GenerationModuleExecutionResponse:
+        item = self.get(execution_id)
+        if item.user_id != user_id:
+            raise NotFoundException("Generation module execution not found.")
+        return item
+
+    def cancel_for_user(self, execution_id: UUID, *, user_id: int) -> GenerationModuleExecutionResponse:
+        self.get_for_user(execution_id, user_id=user_id)
+        return self.cancel(execution_id)
+
+    def cancel(self, execution_id: UUID) -> GenerationModuleExecutionResponse:
+        with self._lock:
+            item = self._items.get(execution_id)
+        if not item:
+            item = generation_module_execution_store_service.get(execution_id)
+            if not item:
+                raise NotFoundException("Generation module execution not found.")
+            self.attach_persisted(item)
+
+        with self._lock:
+            item = self._items[execution_id]
+            if item.status in {"completed", "failed", "cancelled"}:
+                return item.model_copy(deep=True)
+            was_queued = item.status == "queued"
+            item.cancel_requested = True
+            item.provider_status = "CANCEL_REQUESTED"
+            item.heartbeat_at = utc_now()
+            item.provider_metrics["cancel_requested_at"] = item.heartbeat_at.isoformat()
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=item.heartbeat_at,
+                level="warning",
+                message=(
+                    "Queued execution cancellation requested."
+                    if was_queued else
+                    "Provider cancellation requested; waiting for confirmation."
+                ),
+            ))
+            request_snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(request_snapshot)
+
+        if was_queued:
+            generation_job_queue_service.remove(execution_id, engine=request_snapshot.engine)
+
+        provider = copy.deepcopy(self._provider_refs.get(execution_id) or {})
+        if not provider.get("provider_job_id") and request_snapshot.provider_job_id:
+            provider["provider_job_id"] = request_snapshot.provider_job_id
+        provider.setdefault("engine", request_snapshot.engine.value)
+
+        if provider.get("engine") == GenerationExecutionEngine.MODAL.value:
+            call_id = str(provider.get("provider_job_id") or "").strip()
+
+            # A Modal execution can still be marked locally as ``queued`` while
+            # ``spawn()`` is already in progress. Previously this branch returned
+            # immediately and only removed the local queue entry, leaving the
+            # newly-created Modal FunctionCall running without ever receiving a
+            # cancellation signal. Wait for the submitted callback to persist the
+            # call ID whenever dispatch has started. If cancellation won the race
+            # before ``spawn()``, execute_pipeline() observes cancel_requested and
+            # no FunctionCall is created.
+            dispatch_started = bool(
+                request_snapshot.dispatch_attempts > 0
+                or str(request_snapshot.provider_status or "").upper()
+                in {"DISPATCHING", "IN_QUEUE", "RUNNING"}
+            )
+            if not call_id and (dispatch_started or not was_queued):
+                deadline = time.monotonic() + 30.0
+                while time.monotonic() < deadline and not call_id:
+                    time.sleep(0.25)
+                    current = self.get(execution_id)
+                    call_id = str(current.provider_job_id or "").strip()
+
+            if not call_id:
+                if was_queued:
+                    return self._confirm_cancellation(
+                        execution_id,
+                        "Cancelled before Modal provider dispatch.",
+                    )
+                raise AppException(
+                    "Modal cancellation could not start because no FunctionCall ID was persisted."
+                )
+
+            db = SessionLocal()
+            cancellation_started = time.monotonic()
+            try:
+                config = infrastructure_provider_service.get_modal(db)
+                cancellation = modal_pipeline_adapter_service.cancel_call(
+                    config, call_id=call_id
+                )
+            finally:
+                cancellation_time_ms = int((time.monotonic() - cancellation_started) * 1000)
+                with self._lock:
+                    tracked = self._items[execution_id]
+                    tracked.provider_metrics["cancellation_time_ms"] = cancellation_time_ms
+                db.close()
+
+            cancellation_errors = cancellation.get("errors") or []
+            if cancellation.get("confirmed"):
+                message = (
+                    f"Modal FunctionCall {call_id} cancellation confirmed after "
+                    f"{cancellation.get('attempts', 1)} attempt(s)."
+                )
+            elif cancellation.get("request_sent"):
+                message = (
+                    f"Modal FunctionCall {call_id} cancellation was sent but Modal did "
+                    "not confirm it after the existing 50s + 20s waits; the execution "
+                    f"was closed locally. Modal errors: {cancellation_errors or 'none reported'}."
+                )
+            else:
+                message = (
+                    f"Modal FunctionCall {call_id} cancellation could not be sent after "
+                    "two attempts and the existing 50s + 20s waits; the execution was "
+                    f"closed locally. Modal errors: {cancellation_errors or 'none reported'}."
+                )
+            return self._confirm_cancellation(execution_id, message)
+
+        if was_queued:
+            return self._confirm_cancellation(execution_id, "Cancelled before provider dispatch.")
+
+        if provider.get("engine") == GenerationExecutionEngine.LOCAL_DOCKER.value:
+            prompt_id = str(provider.get("prompt_id") or "").strip()
+            if not prompt_id:
+                raise AppException("Local cancellation could not start because no ComfyUI prompt_id was persisted.")
+            confirmation = comfyui_local_adapter_service.cancel_prompt_and_wait(prompt_id=prompt_id)
+            if not confirmation.get("confirmed"):
+                raise AppException("ComfyUI did not confirm the interruption.")
+            return self._confirm_cancellation(execution_id, f"ComfyUI prompt {prompt_id} interruption confirmed.")
+
+        if provider.get("engine") == GenerationExecutionEngine.BEAM.value and provider.get("provider_job_id"):
+            db = SessionLocal()
+            try:
+                beam_serverless_adapter_service.cancel_job(db, provider_job_id=provider["provider_job_id"], endpoint=provider.get("endpoint_id"))
+            finally:
+                db.close()
+            return self._confirm_cancellation(execution_id, "Beam cancellation request accepted.")
+
+        if provider.get("engine") == GenerationExecutionEngine.RUNPOD_SERVERLESS.value and provider.get("provider_job_id"):
+            db = SessionLocal()
+            try:
+                runpod_serverless_adapter_service.cancel_job(
+                    db,
+                    provider_job_id=provider["provider_job_id"],
+                    endpoint_id=provider.get("endpoint_id"),
+                )
+            finally:
+                db.close()
+            return self._confirm_cancellation(execution_id, "RunPod cancellation request accepted.")
+
+        return self._confirm_cancellation(execution_id, "Execution cancellation confirmed.")
+
+    def _confirm_cancellation(self, execution_id: UUID, message: str) -> GenerationModuleExecutionResponse:
+        cancelled_at = utc_now()
+        with self._lock:
+            item = self._items[execution_id]
+            if item.status == "completed":
+                return item.model_copy(deep=True)
+            item.status = "cancelled"
+            item.finished_at = cancelled_at
+            item.heartbeat_at = cancelled_at
+            item.provider_status = "CANCELLED"
+            item.error = None
+            running_step = next((step for step in item.steps if step.status == "running"), None)
+            if running_step is not None:
+                running_step.status = "cancelled"
+                running_step.finished_at = cancelled_at
+                running_step.error = "Execution cancelled by user."
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=cancelled_at,
+                level="warning",
+                message=message,
+            ))
+            snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(snapshot)
+        db = SessionLocal()
+        try:
+            with self._lock:
+                billing_item = self._items[execution_id]
+                if billing_item.started_at:
+                    billing_item.duration_ms = int((cancelled_at - billing_item.started_at).total_seconds() * 1000)
+            self._finalize_dynamic_billing(db, billing_item)
+            generation_module_execution_store_service.save(billing_item.model_copy(deep=True))
+        finally:
+            db.close()
+        return self.get(execution_id)
+
+    def _refund_confirmed_cancellation(self, execution_id: UUID) -> None:
+        """Deprecated: dynamic billing now charges actual provider consumption."""
+        return None
+
+    def delete(self, execution_id: UUID) -> None:
+        item = self.get(execution_id)
+        if item.status in {"queued", "running"}:
+            raise AppException("Active generation executions must be cancelled before deletion.")
+        with self._lock:
+            self._items.pop(execution_id, None)
+            self._provider_refs.pop(execution_id, None)
+            self._owners.pop(execution_id, None)
+        generation_module_execution_store_service.delete(execution_id)
+
+    def health(self, db: Session) -> dict[str, Any]:
+        try:
+            runpod_health = runpod_serverless_adapter_service.health(db)
+        except Exception as exc:
+            runpod_health = {"available": False, "error": str(exc)}
+        return {
+            "local_docker": comfyui_local_adapter_service.health(),
+            "runpod_serverless": runpod_health,
+            "modal": self._modal_health(db),
+            "beam": beam_serverless_adapter_service.health(db),
+            "simulated": {"available": True, "mode": "deterministic", "supports_cancel": True, "supports_progress": True},
+            "orchestrator": generation_job_orchestrator_service.status(),
+        }
+
+    def _run(self, execution_id: UUID, module: dict[str, Any]) -> None:
+        resumed_at = utc_now()
+        db = SessionLocal()
+        with self._lock:
+            item = self._items[execution_id]
+            started = item.started_at or resumed_at
+            transition_execution(item, "running")
+            item.started_at = started
+            item.queue_position = None
+            item.provider_status = ("running_local" if item.engine == GenerationExecutionEngine.LOCAL_DOCKER else ("dispatching_to_runpod" if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS else ("dispatching_to_modal" if item.engine == GenerationExecutionEngine.MODAL else ("dispatching_to_beam" if item.engine == GenerationExecutionEngine.BEAM else "running_simulation"))))
+            item.heartbeat_at = started
+            item.logs.append(GenerationModuleExecutionLog(timestamp=resumed_at, message=("Execution resumed by the unified provider worker." if item.provider_job_id else "Execution started by the unified provider worker.")))
+            running_snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(running_snapshot)
+        try:
+            if running_snapshot.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:
+                self._run_remote_module(db, execution_id, module)
+                return
+            if running_snapshot.engine == GenerationExecutionEngine.MODAL:
+                self._run_modal_module(db, execution_id, module)
+                return
+            if running_snapshot.engine == GenerationExecutionEngine.BEAM:
+                self._run_beam_module(db, execution_id, module)
+                return
+            steps = [s for s in sorted(module["steps"], key=lambda row: row["position"]) if s["is_enabled"]]
+            for index, step in enumerate(steps):
+                with self._lock:
+                    item = self._items[execution_id]
+                    if item.cancel_requested:
+                        item.status = "cancelled"
+                        item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="warning", message="Execution cancelled."))
+                        break
+                    state = item.steps[index]
+                    state.status = "running"; state.started_at = utc_now()
+                    item.logs.append(GenerationModuleExecutionLog(timestamp=state.started_at, step_key=step["key"], message=f"Step '{step['name']}' started."))
+                    context = copy.deepcopy(item.context)
+                    engine = item.engine
+                outputs = self._execute_step(db, execution_id, step, context, engine)
+                finished = utc_now()
+                with self._lock:
+                    item = self._items[execution_id]; state = item.steps[index]
+                    state.status = "completed"; state.finished_at = finished
+                    state.duration_ms = int((finished - state.started_at).total_seconds() * 1000) if state.started_at else 0
+                    state.outputs = outputs
+                    GenerationRuntimeContext.merge_step_outputs(item.context, step["key"], outputs)
+                    item.progress = int(((index + 1) / max(len(steps), 1)) * 90)
+                    item.logs.append(GenerationModuleExecutionLog(timestamp=finished, step_key=step["key"], message=f"Step '{step['name']}' completed."))
+                    step_snapshot = item.model_copy(deep=True)
+                generation_module_execution_store_service.save(step_snapshot)
+            with self._lock:
+                item = self._items[execution_id]
+                if item.status != "cancelled":
+                    resolved_outputs = self._resolve_module_outputs(module["outputs"], item.context)
+                    item.outputs = self._persist_final_outputs(
+                        db, execution_id=execution_id, user_id=item.user_id, outputs=resolved_outputs
+                    )
+                    item.status = "completed"; item.progress = 100
+                    item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), message="Execution completed."))
+        except InterruptedError as exc:
+            with self._lock:
+                item = self._items[execution_id]; item.status = "cancelled"; item.error = str(exc)
+                item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="warning", message=str(exc)))
+        except Exception as exc:
+            with self._lock:
+                item = self._items[execution_id]
+                running = next((s for s in item.steps if s.status == "running"), None)
+                if item.cancel_requested or item.status == "cancelled":
+                    item.status = "cancelled"
+                    item.error = None
+                    if running:
+                        running.status = "cancelled"
+                        running.error = "Execution cancelled by user."
+                        running.finished_at = utc_now()
+                    item.logs.append(
+                        GenerationModuleExecutionLog(
+                            timestamp=utc_now(),
+                            level="warning",
+                            step_key=running.step_key if running else None,
+                            message="Provider execution stopped after cancellation request.",
+                        )
+                    )
+                else:
+                    item.status = "failed"; item.error = str(exc)
+                    if running:
+                        running.status = "failed"; running.error = str(exc); running.finished_at = utc_now()
+                    item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="error", step_key=running.step_key if running else None, message=str(exc)))
+        finally:
+            finished = utc_now()
+            with self._lock:
+                item = self._items[execution_id]; item.finished_at = finished
+                item.duration_ms = int((finished - started).total_seconds() * 1000)
+                item.heartbeat_at = finished
+                item.provider_status = "COMPLETED" if item.status == "completed" else item.status.upper()
+                self._provider_refs.pop(execution_id, None)
+            try:
+                with self._lock:
+                    billing_item = self._items[execution_id]
+                self._finalize_dynamic_billing(db, billing_item)
+            except Exception as billing_error:
+                db.rollback()
+                with self._lock:
+                    item.logs.append(GenerationModuleExecutionLog(
+                        timestamp=utc_now(), level="error",
+                        message=f"Dynamic billing finalization failed without changing the execution result: {billing_error}",
+                    ))
+            with self._lock:
+                final_snapshot = item.model_copy(deep=True)
+            db.close()
+            generation_module_execution_store_service.save(final_snapshot)
+
+
+    def _finalize_dynamic_billing(self, db: Session, item: GenerationModuleExecutionResponse) -> None:
+        """Create an immutable per-execution billing snapshot.
+
+        This runs synchronously before the final execution snapshot is exposed,
+        including recovered, failed and cancelled provider calls.
+        """
+        if item.billing_breakdown.get("finalized"):
+            return
+        provider = item.engine.value if hasattr(item.engine, "value") else str(item.engine)
+        rule = pricing_rule_repository.get_by_id(db, item.pricing_rule_id) if item.pricing_rule_id else None
+        runtime_metrics = item.runtime_metrics or {}
+        provider_metrics = item.provider_metrics or {}
+        runtime_exact_ms = int(
+            runtime_metrics.get("execution_time_ms")
+            or runtime_metrics.get("pipeline_duration_ms")
+            or runtime_metrics.get("total_duration_ms")
+            or 0
+        )
+        provider_observed_ms = int(
+            provider_metrics.get("pipeline_duration_ms")
+            or provider_metrics.get("execution_time_ms")
+            or 0
+        )
+        if runtime_exact_ms > 0:
+            elapsed_ms = runtime_exact_ms
+            duration_source = "runtime_exact"
+        elif provider_observed_ms > 0:
+            elapsed_ms = provider_observed_ms
+            duration_source = str(provider_metrics.get("duration_source") or "provider_observed")
+        elif item.provider_submitted_at and item.finished_at:
+            elapsed_ms = max(
+                int((item.finished_at - item.provider_submitted_at).total_seconds() * 1000),
+                0,
+            )
+            duration_source = (
+                "provider_observed_cancelled"
+                if item.status == "cancelled"
+                else "provider_observed_fallback"
+            )
+        elif item.started_at and item.finished_at:
+            elapsed_ms = max(
+                int((item.finished_at - item.started_at).total_seconds() * 1000),
+                0,
+            )
+            duration_source = "backend_fallback"
+        else:
+            elapsed_ms = max(int(item.real_provider_duration_ms or item.duration_ms or 0), 0)
+            duration_source = "backend_fallback"
+        item.real_provider_duration_ms = max(elapsed_ms, 0)
+        item.provider_metrics["duration_source"] = duration_source
+
+        gpu_key = None
+        scaledown_seconds = 0
+        if provider == GenerationExecutionEngine.MODAL.value:
+            engine_settings = ai_engine_settings_service.get(db)
+            gpu_key = engine_settings.modal_gpu
+            scaledown_seconds = int(engine_settings.modal_scaledown_window_seconds)
+        gpu_cost = provider_pricing_service.get_cost(db, provider=provider, gpu_key=gpu_key)
+        margin_seconds = int(getattr(rule, "technical_margin_seconds", 0) or 0)
+        profit_per_token_usd = float(getattr(rule, "desired_profit_per_token_usd", 0) or 0)
+        actual_seconds = round(item.real_provider_duration_ms / 1000, 3)
+        pending_snapshot = dict(item.billing_breakdown or {})
+        billing_seconds = actual_seconds
+        test_override_applied = False
+        test_multiplier = 1.0
+        if pending_snapshot.get("settlement_pending"):
+            billing_seconds = float(pending_snapshot.get("billing_simulated_seconds") or actual_seconds)
+            test_override_applied = bool(pending_snapshot.get("billing_test_override_applied"))
+            test_multiplier = float(pending_snapshot.get("billing_test_multiplier") or 1.0)
+        else:
+            configured_execution_id = str(settings.TEST_BILLING_EXECUTION_ID or "").strip()
+            test_override_applied = (
+                settings.APP_ENV.lower() not in {"production", "prod"}
+                and bool(settings.TEST_FORCE_BILLING_OVERRUN)
+                and settings.TEST_BILLING_USER_ID is not None
+                and item.user_id == settings.TEST_BILLING_USER_ID
+                and (not configured_execution_id or configured_execution_id == str(item.id))
+            )
+            if test_override_applied:
+                test_multiplier = max(float(settings.TEST_FORCE_BILLING_OVERRUN_MULTIPLIER or 1.0), 1.0)
+                billing_seconds = round(actual_seconds * test_multiplier, 3)
+        billable_seconds = round(billing_seconds + scaledown_seconds + margin_seconds, 3)
+        raw_infrastructure_cost = (billable_seconds * gpu_cost) if gpu_cost is not None else None
+        billing_policy = pricing_service.get_execution_billing_policy(db)
+        failure_origin = None
+        if item.status == "completed":
+            policy_key = "completed"
+        elif item.status == "cancelled":
+            policy_key = "cancelled"
+        else:
+            explicit_origin = str(provider_metrics.get("failure_origin") or runtime_metrics.get("failure_origin") or "").strip().lower()
+            runtime_reached = bool(runtime_exact_ms > 0 or runtime_metrics.get("termination_status") == "failed")
+            failure_origin = (
+                "workflow_or_user"
+                if explicit_origin in {"workflow", "user", "workflow_or_user"} or (not explicit_origin and runtime_reached)
+                else "platform_or_provider"
+            )
+            policy_key = (
+                "failed_workflow_or_user"
+                if failure_origin == "workflow_or_user"
+                else "failed_platform_or_provider"
+            )
+        policy = getattr(billing_policy, policy_key)
+        infrastructure_cost = raw_infrastructure_cost if policy.charge_infrastructure else 0.0
+        token_value = pricing_service.get_commercial_settings(db).token_value_usd
+        final_bag_quote = None
+        if raw_infrastructure_cost is not None:
+            if item.user_id is not None:
+                try:
+                    final_bag_quote = token_value_ledger_service.quote_fifo_infrastructure_charge(
+                        db, user_id=item.user_id, execution_id=str(item.id),
+                        infrastructure_cost_usd=float(infrastructure_cost or 0),
+                        apply_profit=bool(policy.apply_profit),
+                        fallback_profit_per_token_usd=profit_per_token_usd,
+                    )
+                except ConflictException:
+                    if item.status != "completed":
+                        raise
+                    estimated_total_tokens = max(
+                        int(math.ceil(float(infrastructure_cost or 0) / max(float(token_value or 0), 0.000000001))),
+                        int(item.tokens_charged or 0),
+                    )
+                    estimated_pending_tokens = max(estimated_total_tokens - int(item.tokens_charged or 0), 1)
+                    item.result_locked = True
+                    item.billing_access_status = "payment_pending"
+                    item.estimated_pending_tokens = estimated_pending_tokens
+                    item.billing_breakdown = {
+                        **pending_snapshot,
+                        "finalized": False,
+                        "settlement_pending": True,
+                        "settlement_reason": "insufficient_funded_capacity",
+                        "result_locked": True,
+                        "billing_access_status": "payment_pending",
+                        "estimated_pending_tokens": estimated_pending_tokens,
+                        "settlement_target_infrastructure_cost_usd": round(float(infrastructure_cost or 0), 9),
+                        "provider": provider,
+                        "gpu_key": gpu_key,
+                        "gpu_cost_usd_per_second": gpu_cost,
+                        "real_provider_seconds": actual_seconds,
+                        "billing_simulated_seconds": billing_seconds,
+                        "billing_test_override_applied": test_override_applied,
+                        "billing_test_multiplier": test_multiplier,
+                        "duration_source": duration_source,
+                        "configured_scaledown_seconds": scaledown_seconds,
+                        "technical_margin_seconds": margin_seconds,
+                        "billable_seconds": billable_seconds,
+                        "raw_infrastructure_cost_usd": round(raw_infrastructure_cost, 9) if raw_infrastructure_cost is not None else None,
+                        "infrastructure_cost_usd": round(float(infrastructure_cost or 0), 9),
+                        "profit_applied": bool(policy.apply_profit),
+                        "infrastructure_charge_applied": bool(policy.charge_infrastructure),
+                        "billing_policy_key": policy_key,
+                        "termination_status": item.status,
+                    }
+                    item.logs.append(GenerationModuleExecutionLog(
+                        timestamp=utc_now(),
+                        level="warning",
+                        message=(
+                            "Result locked because the final infrastructure charge exceeds "
+                            "the funded capacity of the user's token bags."
+                        ),
+                    ))
+                    db.commit()
+                    return
+                final_tokens = int(final_bag_quote["tokens"])
+                final_price = float(final_bag_quote["charged_usd"])
+                applied_profit_usd = float(final_bag_quote["configured_profit_usd"])
+                profit_rounding_surplus_usd = float(final_bag_quote["rounding_surplus_usd"])
+            else:
+                final_tokens, final_price, applied_profit_usd, profit_rounding_surplus_usd = pricing_service.token_charge_for_infrastructure(
+                    db, infrastructure_cost_usd=float(infrastructure_cost or 0),
+                    desired_profit_per_token_usd=profit_per_token_usd,
+                    apply_profit=bool(policy.apply_profit),
+                )
+        else:
+            final_tokens = item.tokens_charged
+            final_price = None
+            applied_profit_usd = 0.0
+            profit_rounding_surplus_usd = 0.0
+        extra = refunded = 0
+        if item.user_id is not None and final_price is not None:
+            extra, refunded = generation_module_billing_service.reconcile(
+                db, user_id=item.user_id, execution_id=str(item.id), module_key=item.module_key,
+                previously_charged=item.tokens_charged, final_tokens=final_tokens,
+                reason=f"{item.status} after {actual_seconds:.3f}s provider time",
+            )
+            item.tokens_charged = final_tokens
+            item.tokens_refunded = refunded > 0
+        item.commercial_price = round(final_price, 9) if final_price is not None else item.commercial_price
+        ledger_summary = (
+            token_value_ledger_service.execution_summary(db, str(item.id))
+            if item.user_id is not None
+            else {}
+        )
+        normal_profit_from_bags = float(ledger_summary.get("profit_without_benefits_usd") or applied_profit_usd or 0)
+        applied_profit_from_bags = float(ledger_summary.get("company_profit_usd") or applied_profit_usd or 0)
+        estimated_snapshot = dict(item.billing_breakdown or {})
+        initial_estimated_tokens = int(
+            estimated_snapshot.get("estimated_tokens_before_execution")
+            or item.estimated_tokens_before_execution
+            or (item.tokens_charged - extra + refunded)
+            or 0
+        )
+        item.billing_breakdown = {
+            **estimated_snapshot,
+            "finalized": True,
+            "provider": provider,
+            "gpu_key": gpu_key,
+            "gpu_cost_usd_per_second": gpu_cost,
+            "real_provider_seconds": actual_seconds,
+            "billing_simulated_seconds": billing_seconds,
+            "billing_test_override_applied": test_override_applied,
+            "billing_test_multiplier": test_multiplier,
+            "duration_source": duration_source,
+            "configured_scaledown_seconds": scaledown_seconds,
+            "technical_margin_seconds": margin_seconds,
+            "billable_seconds": billable_seconds,
+            "raw_infrastructure_cost_usd": round(raw_infrastructure_cost, 9) if raw_infrastructure_cost is not None else None,
+            "infrastructure_cost_usd": round(infrastructure_cost, 9) if infrastructure_cost is not None else None,
+            "desired_profit_per_token_usd": profit_per_token_usd,
+            "desired_profit_usd": round(normal_profit_from_bags, 9),
+            "applied_profit_usd": round(applied_profit_from_bags, 9),
+            "profit_rounding_surplus_usd": round(profit_rounding_surplus_usd, 9),
+            "profit_applied": bool(policy.apply_profit),
+            "infrastructure_charge_applied": bool(policy.charge_infrastructure),
+            "billing_policy_key": policy_key,
+            "failure_origin": failure_origin,
+            "final_price_usd": round(final_price, 9) if final_price is not None else None,
+            "token_value_usd": token_value,
+            "estimated_tokens_before_execution": initial_estimated_tokens,
+            "final_tokens": final_tokens,
+            "token_charge_basis": "fifo_token_bag_snapshots" if final_bag_quote else "current_pricing_rule_fallback",
+            "token_bag_charge_quote": (final_bag_quote.get("bags") if final_bag_quote else None),
+            "token_bag_traceability_status": (final_bag_quote.get("traceability_status") if final_bag_quote else None),
+            "infrastructure_capacity_from_bags_usd": (round(float(final_bag_quote.get("infrastructure_capacity_usd") or 0),9) if final_bag_quote else None),
+            "extra_tokens_debited": extra,
+            "tokens_refunded": refunded,
+            "termination_status": item.status,
+            "pricing_rule_id": item.pricing_rule_id,
+            "settlement_pending": False,
+            "settlement_reason": None,
+            "result_locked": False,
+            "billing_access_status": "unlocked",
+            "estimated_pending_tokens": None,
+        }
+        item.result_locked = False
+        item.billing_access_status = "unlocked"
+        item.estimated_pending_tokens = None
+        generation_finance_service.finalize(
+            db, execution_id=str(item.id), module_id=item.module_id, module_key=item.module_key,
+            user_id=item.user_id, status=item.status, infrastructure_cost_usd=infrastructure_cost,
+            billing_breakdown=item.billing_breakdown,
+        )
+        db.commit()
+
+
+    def settle_pending_billing(
+        self,
+        db: Session,
+        execution_id: UUID,
+        *,
+        user_id: int,
+    ) -> GenerationModuleExecutionResponse:
+        with self._lock:
+            item = self.get_for_user(execution_id, user_id=user_id)
+            if not bool(item.result_locked or (item.billing_breakdown or {}).get("settlement_pending")):
+                return item
+            self._finalize_dynamic_billing(db, item)
+            self._items[item.id] = item.model_copy(deep=True)
+            self._owners[item.id] = item.user_id
+            generation_module_execution_store_service.save(item)
+            return item.model_copy(deep=True)
+
+
+    @staticmethod
+    def _modal_health(db: Session) -> dict[str, Any]:
+        config = infrastructure_provider_service.get_modal(db)
+        return {
+            "available": bool(config.enabled and config.app_name and config.token_id and config.token_secret),
+            "enabled": config.enabled,
+            "runtime_url": None,
+            "mode": "modal_function_call",
+            "supports_cancel": True,
+            "supports_progress": True,
+            "error": None if (config.enabled and config.app_name and config.token_id and config.token_secret) else "Modal provider is disabled or its App name/credentials are not configured.",
+        }
+
+    def _modal_submitted(self, execution_id: UUID, call_id: str) -> None:
+        with self._lock:
+            item = self._items.get(execution_id)
+            if item is None:
+                return
+            self._provider_refs[execution_id] = {
+                "engine": GenerationExecutionEngine.MODAL.value,
+                "provider_job_id": call_id,
+            }
+            item.provider_job_id = call_id
+            item.provider_submitted_at = item.provider_submitted_at or utc_now()
+            item.provider_status = "IN_QUEUE"
+            item.heartbeat_at = utc_now()
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=item.heartbeat_at,
+                message=f"Modal FunctionCall submitted: {call_id}.",
+            ))
+            snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(snapshot)
+
+    def _run_modal_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
+        """Dispatch the entire module to one Modal GPU container.
+
+        Local Docker, RunPod and simulated execution paths remain untouched.
+        Modal receives the same generation-runtime/v1 contract already used
+        for complete remote pipelines and returns every configured module output.
+        """
+        config = infrastructure_provider_service.get_modal(db)
+        if not config.enabled:
+            raise AppException("Modal is selected for this module, but the Modal provider is disabled.")
+        if not config.app_name or not config.token_id or not config.token_secret:
+            raise AppException(
+                "Modal is selected for this module, but its App name or credentials are not configured."
+            )
+
+        with self._lock:
+            current = self._items[execution_id].model_copy(deep=True)
+
+        timeout = max(
+            int(config.timeout_seconds or 900),
+            sum(
+                int((step.get("configuration") or {}).get("timeout_seconds") or 300)
+                for step in module.get("steps", [])
+                if step.get("is_enabled")
+            ),
+        )
+        provider = RuntimeProviderRegistry.get(GenerationExecutionEngine.MODAL)
+        payload = {
+            "runtime_contract": "tryon.generation-runtime/v1",
+            "provider": {"key": provider.key, "remote": provider.remote},
+            "execution_id": str(execution_id),
+            "module": copy.deepcopy(module),
+            "context": self._serialize_remote_value(db, current.context),
+        }
+
+        with self._lock:
+            item = self._items[execution_id]
+            item.provider_status = "DISPATCHING"
+            item.dispatch_attempts += 1
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=utc_now(),
+                message="Dispatching the complete generation pipeline to Modal.",
+            ))
+            generation_module_execution_store_service.save(item.model_copy(deep=True))
+
+        result = modal_pipeline_adapter_service.execute_pipeline(
+            config,
+            payload=payload,
+            timeout_seconds=timeout,
+            progress_callback=lambda progress, message, meta=None: self._remote_module_progress(
+                execution_id, progress, message, meta or {}
+            ),
+            cancellation_callback=lambda: self.get(execution_id).cancel_requested,
+            submitted_callback=lambda call_id: self._modal_submitted(execution_id, call_id),
+            existing_call_id=current.provider_job_id,
+        )
+        output = result.get("output")
+        if not isinstance(output, dict):
+            raise RuntimeError("Modal Generation Runtime returned an invalid output payload.")
+        if output.get("runtime_contract") != "tryon.generation-runtime/v1":
+            raise RuntimeError("Modal worker does not support the required Generation Runtime contract.")
+
+        runtime_metrics = copy.deepcopy(output.get("metrics") or {})
+        runtime_duration_ms = int(
+            runtime_metrics.get("execution_time_ms")
+            or runtime_metrics.get("pipeline_duration_ms")
+            or runtime_metrics.get("total_duration_ms")
+            or 0
+        )
+        with self._lock:
+            metric_item = self._items[execution_id]
+            metric_item.runtime_metrics = runtime_metrics
+            metric_item.provider_metrics = {
+                "provider": "modal",
+                "execution_time_ms": runtime_duration_ms or result.get("execution_time_ms"),
+                "pipeline_duration_ms": runtime_metrics.get("pipeline_duration_ms"),
+                "duration_source": (
+                    "runtime_exact" if runtime_duration_ms > 0 else "provider_observed"
+                ),
+                "runtime_url": result.get("runtime_url"),
+                "provider_job_id": result.get("provider_job_id") or metric_item.provider_job_id,
+                "resumed_after_backend_restart": bool(result.get("resumed")),
+                "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
+            }
+            generation_module_execution_store_service.save(metric_item.model_copy(deep=True))
+
+        if output.get("status") != "completed":
+            raise RuntimeError(str(output.get("error") or "Modal Generation Runtime failed."))
+
+        remote_steps = output.get("steps") or []
+        with self._lock:
+            item = self._items[execution_id]
+            states_by_key = {
+                str(state.step_key): state
+                for state in item.steps
+                if getattr(state, "step_key", None) is not None
+            }
+            for index, remote_step in enumerate(remote_steps):
+                if not isinstance(remote_step, dict):
+                    continue
+                state = states_by_key.get(str(remote_step.get("step_key") or ""))
+                if state is None:
+                    if index >= len(item.steps):
+                        continue
+                    state = item.steps[index]
+                state.status = str(remote_step.get("status") or state.status)
+                state.duration_ms = int(remote_step.get("duration_ms") or 0)
+                state.outputs = self._materialize_modal_files(
+                    remote_step.get("outputs") or {}, execution_id
+                )
+                state.error = remote_step.get("error")
+
+            normalized_outputs = self._materialize_modal_files(
+                output.get("outputs") or {}, execution_id
+            )
+            item.outputs = self._persist_final_outputs(
+                db, execution_id=execution_id, user_id=item.user_id, outputs=normalized_outputs
+            )
+            remote_context = output.get("context")
+            if isinstance(remote_context, dict):
+                item.context = self._materialize_modal_files(remote_context, execution_id)
+            item.runtime_metrics = runtime_metrics
+            item.provider_metrics.update({
+                "provider": "modal",
+                "execution_time_ms": runtime_duration_ms or result.get("execution_time_ms"),
+                "pipeline_duration_ms": runtime_metrics.get("pipeline_duration_ms"),
+                "duration_source": (
+                    "runtime_exact" if runtime_duration_ms > 0 else "provider_observed"
+                ),
+                "runtime_url": result.get("runtime_url"),
+                "provider_job_id": result.get("provider_job_id") or item.provider_job_id,
+                "resumed_after_backend_restart": bool(result.get("resumed")),
+                "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
+            })
+            item.status = "completed"
+            item.progress = 100
+            item.provider_status = "COMPLETED"
+            item.logs.append(GenerationModuleExecutionLog(
+                timestamp=utc_now(),
+                message="Modal completed the entire generation pipeline in one GPU container.",
+            ))
+
+    def _run_remote_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
+        """Dispatch an entire generation module as one RunPod Serverless job."""
+        with self._lock:
+            current = self._items[execution_id].model_copy(deep=True)
+
+        remote_context = self._serialize_remote_value(db, current.context)
+        timeout = max(
+            60,
+            sum(
+                int((step.get("configuration") or {}).get("timeout_seconds") or 300)
+                for step in module.get("steps", [])
+                if step.get("is_enabled")
+            ),
+        )
+        provider = RuntimeProviderRegistry.get(GenerationExecutionEngine.RUNPOD_SERVERLESS)
+        payload = {
+            "runtime_contract": "tryon.generation-runtime/v1",
+            "provider": {"key": provider.key, "remote": provider.remote},
+            "execution_id": str(execution_id),
+            "module": copy.deepcopy(module),
+            "context": remote_context,
+        }
+        submitted = runpod_serverless_adapter_service.submit_job(
+            db, input_data=payload, endpoint_id=(module.get("endpoint") or None)
+        )
+        with self._lock:
+            item = self._items[execution_id]
+            self._provider_refs[execution_id] = {
+                "engine": GenerationExecutionEngine.RUNPOD_SERVERLESS.value,
+                "provider_job_id": submitted["provider_job_id"],
+                "endpoint_id": submitted["endpoint_id"],
+            }
+            item.provider_job_id = submitted["provider_job_id"]
+            item.provider_endpoint_id = submitted["endpoint_id"]
+            item.provider_status = str(submitted.get("status") or "IN_QUEUE")
+            item.dispatch_attempts += 1
+            generation_module_execution_store_service.save(item.model_copy(deep=True))
+
+        result = runpod_serverless_adapter_service.execute_submitted_job(
+            db,
+            provider_job_id=submitted["provider_job_id"],
+            endpoint_id=submitted["endpoint_id"],
+            job_public_id=str(execution_id),
+            timeout_seconds=timeout,
+            download_outputs=True,
+            progress_callback=lambda progress, message, meta=None: self._remote_module_progress(
+                execution_id, progress, message, meta or {}
+            ),
+            cancellation_callback=lambda: self.get(execution_id).cancel_requested,
+        )
+        output = result.get("output")
+        if not isinstance(output, dict):
+            raise RuntimeError("RunPod Generation Runtime returned an invalid output payload.")
+        if output.get("runtime_contract") != "tryon.generation-runtime/v1":
+            raise RuntimeError("RunPod worker does not support the required Generation Runtime contract.")
+        if output.get("status") != "completed":
+            raise RuntimeError(str(output.get("error") or "Remote Generation Runtime failed."))
+
+        remote_steps = output.get("steps") or []
+        with self._lock:
+            item = self._items[execution_id]
+            for index, remote_step in enumerate(remote_steps):
+                if index >= len(item.steps) or not isinstance(remote_step, dict):
+                    continue
+                state = item.steps[index]
+                state.status = str(remote_step.get("status") or state.status)
+                state.duration_ms = int(remote_step.get("duration_ms") or 0)
+                state.outputs = self._normalize_remote_files(remote_step.get("outputs") or {}, result.get("files") or [])
+                state.error = remote_step.get("error")
+            normalized_outputs = self._normalize_remote_files(output.get("outputs") or {}, result.get("files") or [])
+            item.outputs = self._persist_final_outputs(
+                db, execution_id=execution_id, user_id=item.user_id, outputs=normalized_outputs
+            )
+            remote_context = output.get("context")
+            if isinstance(remote_context, dict):
+                item.context = self._normalize_remote_files(remote_context, result.get("files") or [])
+            item.runtime_metrics = copy.deepcopy(output.get("metrics") or {})
+            item.provider_metrics = {
+                "provider": str(result.get("provider") or "runpod_serverless"),
+                "execution_time_ms": result.get("execution_time"),
+                "delay_time_ms": result.get("delay_time"),
+                "provider_job_id": result.get("provider_job_id"),
+                "endpoint_id": result.get("endpoint_id"),
+            }
+            item.status = "completed"
+            item.progress = 100
+            item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), message="Remote Generation Runtime completed the entire module in one RunPod job."))
+
+    def _run_beam_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
+        with self._lock:
+            current = self._items[execution_id].model_copy(deep=True)
+        config = infrastructure_provider_service.get_beam(db)
+        timeout = max(
+            60,
+            int(config.timeout_seconds or 900),
+            sum(
+                int((step.get("configuration") or {}).get("timeout_seconds") or 300)
+                for step in module.get("steps", [])
+                if step.get("is_enabled")
+            ),
+        )
+        provider=RuntimeProviderRegistry.get(GenerationExecutionEngine.BEAM)
+        payload={"runtime_contract":"tryon.generation-runtime/v1","provider":{"key":provider.key,"remote":provider.remote},"execution_id":str(execution_id),"module":copy.deepcopy(module),"context":self._serialize_remote_value(db,current.context)}
+        submitted=beam_serverless_adapter_service.submit_job(db,input_data=payload,endpoint=(module.get("endpoint") or None))
+        with self._lock:
+            item=self._items[execution_id]
+            self._provider_refs[execution_id]={"engine":GenerationExecutionEngine.BEAM.value,"provider_job_id":submitted["provider_job_id"],"endpoint_id":submitted["endpoint"]}
+            item.provider_job_id=submitted["provider_job_id"]; item.provider_endpoint_id=submitted["endpoint"]; item.provider_status=submitted.get("status") or "PENDING"; item.dispatch_attempts+=1
+            generation_module_execution_store_service.save(item.model_copy(deep=True))
+        result=beam_serverless_adapter_service.execute_submitted_job(db,provider_job_id=submitted["provider_job_id"],endpoint=submitted["endpoint"],timeout_seconds=timeout,progress_callback=lambda p,m,meta=None:self._remote_module_progress(execution_id,p,m,meta or {}),cancellation_callback=lambda:self.get(execution_id).cancel_requested)
+        output = result.get("output")
+        valid_output = (
+            isinstance(output, dict)
+            and output.get("runtime_contract") == "tryon.generation-runtime/v1"
+            and output.get("status") == "completed"
+        )
+        if not valid_output:
+            detail = output.get("error") if isinstance(output, dict) else None
+            if not detail:
+                task = result.get("task") if isinstance(result.get("task"), dict) else {}
+                detail = task.get("error") or (
+                    "Beam marked the task complete, but its result artifacts were not available "
+                    "or did not contain the Generation Runtime contract."
+                )
+            raise RuntimeError(str(detail))
+        with self._lock:
+            item=self._items[execution_id]
+            for index,remote_step in enumerate(output.get("steps") or []):
+                if index>=len(item.steps) or not isinstance(remote_step,dict): continue
+                state=item.steps[index]; state.status=str(remote_step.get("status") or state.status); state.duration_ms=int(remote_step.get("duration_ms") or 0); state.outputs=remote_step.get("outputs") or {}; state.error=remote_step.get("error")
+            item.outputs=self._persist_final_outputs(db,execution_id=execution_id,user_id=item.user_id,outputs=output.get("outputs") or {})
+            if isinstance(output.get("context"),dict): item.context=output["context"]
+            item.runtime_metrics=copy.deepcopy(output.get("metrics") or {}); item.provider_metrics={"provider":"beam","provider_job_id":result.get("provider_job_id"),"endpoint":result.get("endpoint"),"execution_time_ms":result.get("execution_time_ms")}; item.status="completed"; item.progress=100; item.provider_status="COMPLETE"
+            item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(),message="Beam completed the entire generation pipeline in one task."))
+
+    def _remote_module_progress(self, execution_id: UUID, progress: float, message: str, meta: dict[str, Any]) -> None:
+        with self._lock:
+            item = self._items.get(execution_id)
+            if not item:
+                return
+            normalized = min(max(float(progress), 0.0), 100.0)
+            item.progress = min(95, max(item.progress, int(normalized * 0.95)))
+            item.heartbeat_at = utc_now()
+            item.provider_status = str(meta.get("provider_status") or "IN_PROGRESS")
+            item.logs.append(GenerationModuleExecutionLog(timestamp=item.heartbeat_at, message=message))
+            snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(snapshot)
+
+    def _serialize_remote_value(self, db: Session, value: Any) -> Any:
+        if self._is_generation_file_reference(value):
+            content, filename, content_type = generation_module_file_materializer_service._read_bytes(db, value)
+            return {
+                "__generation_file__": True,
+                "transport": "base64",
+                "filename": filename,
+                "content_type": content_type,
+                "size_bytes": len(content),
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            }
+        if isinstance(value, dict):
+            return {key: self._serialize_remote_value(db, item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._serialize_remote_value(db, item) for item in value]
+        return value
+
+    def _materialize_modal_files(self, value: Any, execution_id: UUID) -> Any:
+        """Convert Modal data-URI files into backend-owned temporary files."""
+        if isinstance(value, dict) and value.get("__generation_file__"):
+            data = value.get("data")
+            if isinstance(data, str) and data.startswith("data:") and ";base64," in data:
+                header, encoded = data.split(",", 1)
+                content_type = str(value.get("content_type") or header[5:].split(";", 1)[0] or "application/octet-stream")
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                except Exception as exc:
+                    raise AppException("Modal returned an invalid base64 file payload.") from exc
+                filename = Path(str(value.get("filename") or uuid4().hex)).name
+                directory = Path(tempfile.gettempdir()) / "tryon-modal-results" / str(execution_id)
+                directory.mkdir(parents=True, exist_ok=True)
+                target = directory / f"{uuid4().hex[:10]}-{filename}"
+                target.write_bytes(content)
+                normalized = {
+                    "__generation_file__": True,
+                    "temporary": True,
+                    "local_path": str(target),
+                    "filename": filename,
+                    "content_type": content_type,
+                    "size_bytes": len(content),
+                }
+                if value.get("node_id") is not None:
+                    normalized["node_id"] = str(value.get("node_id"))
+                return normalized
+            normalized = dict(value)
+            normalized.pop("data", None)
+            normalized.pop("encoding", None)
+            normalized["__generation_file__"] = True
+            return normalized
+        if isinstance(value, dict):
+            return {key: self._materialize_modal_files(item, execution_id) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._materialize_modal_files(item, execution_id) for item in value]
+        return value
+
+    def _normalize_remote_files(self, value: Any, downloaded: list[dict[str, Any]]) -> Any:
+        by_source = {str(item.get("source_url")): item for item in downloaded if item.get("source_url")}
+        by_filename = {str(item.get("filename")): item for item in downloaded if item.get("filename")}
+        if isinstance(value, dict) and value.get("__generation_file__"):
+            source_url = value.get("url") or value.get("download_url") or value.get("source_url")
+            matched = by_source.get(str(source_url)) if source_url else None
+            if matched is None and value.get("filename"):
+                matched = by_filename.get(str(value.get("filename")))
+            normalized = dict(matched or value)
+            normalized["__generation_file__"] = True
+            if normalized.get("local_path") and not normalized.get("storage_file_id"):
+                normalized["temporary"] = True
+            normalized.pop("content_base64", None)
+            return normalized
+        if isinstance(value, dict):
+            return {key: self._normalize_remote_files(item, downloaded) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._normalize_remote_files(item, downloaded) for item in value]
+        return value
+
+    def _execute_step(self, db: Session, execution_id: UUID, step: dict[str, Any], context: dict[str, Any], engine: GenerationExecutionEngine) -> dict[str, Any]:
+        return self._runtime_steps.execute(db, execution_id, step, context, engine)
+
+    def execute_workflow_step(
+        self,
+        db: Session,
+        execution_id: UUID,
+        step: dict[str, Any],
+        context: dict[str, Any],
+        engine: GenerationExecutionEngine,
+    ) -> dict[str, Any]:
+        workflow, configuration, engine_files = self._prepare_workflow(db, execution_id, step, context, engine)
+        if engine == GenerationExecutionEngine.SIMULATED:
+            simulation = configuration.get("simulation") or {}
+            duration_ms = max(150, min(int(simulation.get("duration_ms") or 1200), 15000))
+            checkpoints = max(2, min(int(simulation.get("checkpoints") or 6), 30))
+            for checkpoint in range(1, checkpoints + 1):
+                if self.get(execution_id).cancel_requested:
+                    raise InterruptedError("Simulated execution cancelled.")
+                time.sleep(duration_ms / checkpoints / 1000)
+                self._provider_progress(
+                    execution_id, step["key"], checkpoint / checkpoints,
+                    f"Simulated workflow progress {int(checkpoint / checkpoints * 100)}%.",
+                )
+            files = []
+            for binding in configuration.get("output_bindings", []):
+                files.append({
+                    "node_id": str(binding.get("node_id")),
+                    "type": "simulated",
+                    "filename": f"simulated-{execution_id}-{binding.get('module_output_key') or 'output'}.png",
+                    "preview_url": simulation.get("preview_url"),
+                })
+            result = {
+                "workflow_preview": workflow, "engine": engine.value, "materialized_inputs": engine_files,
+                "execution_mode": "simulated", "files": files,
+                "simulation": {"duration_ms": duration_ms, "checkpoints": checkpoints},
+            }
+            return self._map_workflow_outputs(configuration, files, result)
+        timeout = int(configuration.get("timeout_seconds") or 900)
+        if engine == GenerationExecutionEngine.LOCAL_DOCKER:
+            queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow, extra_data={"generation_execution_id": str(execution_id), "materialized_inputs": engine_files})
+            with self._lock:
+                self._provider_refs[execution_id] = {"engine": engine.value, "prompt_id": queued["prompt_id"], "client_id": queued["client_id"]}
+                item = self._items[execution_id]
+                item.provider_job_id = queued["prompt_id"]
+                item.provider_status = "comfyui_queued"
+                generation_module_execution_store_service.save(item.model_copy(deep=True))
+            result = comfyui_local_adapter_service.execute_queued_prompt(
+                prompt_id=queued["prompt_id"], client_id=queued["client_id"], job_public_id=str(execution_id),
+                timeout_seconds=timeout, download_outputs=True,
+                progress_callback=lambda progress, message, meta=None: self._provider_progress(execution_id, step["key"], progress, message),
+            )
+            owner_id = self.get(execution_id).user_id
+            files = self._mark_temporary_files(result.get("outputs") or [])
+            result["outputs"] = files
+            return self._map_workflow_outputs(configuration, files, result)
+        payload = {
+            "generation_module": {"step_key": step["key"], "workflow": workflow, "output_bindings": configuration.get("output_bindings", [])},
+            "inputs": context,
+            "files": engine_files,
+        }
+        submitted = runpod_serverless_adapter_service.submit_job(
+            db, input_data=payload, endpoint_id=(module.get("endpoint") or None)
+        )
+        with self._lock:
+            self._provider_refs[execution_id] = {"engine": engine.value, "provider_job_id": submitted["provider_job_id"], "endpoint_id": submitted["endpoint_id"]}
+            item = self._items[execution_id]
+            item.provider_job_id = submitted["provider_job_id"]
+            item.provider_endpoint_id = submitted["endpoint_id"]
+            item.provider_status = str(submitted.get("status") or "IN_QUEUE")
+            item.dispatch_attempts += 1
+            generation_module_execution_store_service.save(item.model_copy(deep=True))
+        result = runpod_serverless_adapter_service.execute_submitted_job(
+            db, provider_job_id=submitted["provider_job_id"], endpoint_id=submitted["endpoint_id"], job_public_id=str(execution_id),
+            timeout_seconds=timeout, download_outputs=True,
+            progress_callback=lambda progress, message, meta=None: self._provider_progress(execution_id, step["key"], progress, message),
+            cancellation_callback=lambda: self.get(execution_id).cancel_requested,
+        )
+        owner_id = self.get(execution_id).user_id
+        files = self._mark_temporary_files(result.get("files") or [])
+        result["files"] = files
+        return self._map_workflow_outputs(configuration, files, result)
+
+    def _provider_progress(self, execution_id: UUID, step_key: str, progress: float, message: str) -> None:
+        with self._lock:
+            item = self._items.get(execution_id)
+            if not item:
+                return
+            item.progress = min(89, max(item.progress, int(progress * 0.85)))
+            item.heartbeat_at = utc_now()
+            if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:
+                item.provider_status = "IN_PROGRESS"
+            elif item.engine == GenerationExecutionEngine.LOCAL_DOCKER:
+                item.provider_status = "comfyui_running"
+            item.logs.append(GenerationModuleExecutionLog(timestamp=item.heartbeat_at, step_key=step_key, message=message))
+            progress_snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(progress_snapshot)
+
+    def _prepare_workflow(
+        self,
+        db: Session,
+        execution_id: UUID,
+        step: dict[str, Any],
+        context: dict[str, Any],
+        engine: GenerationExecutionEngine,
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+        configuration = copy.deepcopy(step.get("configuration") or {})
+        workflow = configuration.get("workflow")
+        if not isinstance(workflow, dict):
+            raise AppException(f"Workflow step '{step['key']}' has no workflow JSON.")
+        materialized: list[dict[str, Any]] = []
+        cache: dict[str, dict[str, Any]] = {}
+        for binding in configuration.get("input_bindings", []):
+            source_key = binding.get("source_path") or binding.get("module_input_key")
+            value = context
+            for part in str(source_key or "").split("."):
+                value = value.get(part) if isinstance(value, dict) else None
+            node = workflow.get(str(binding.get("node_id")))
+            if not isinstance(node, dict):
+                raise AppException(f"Workflow node '{binding.get('node_id')}' was not found.")
+            if isinstance(value, dict) and self._is_generation_file_reference(value):
+                cached = cache.get(str(source_key))
+                if cached is None:
+                    if engine == GenerationExecutionEngine.LOCAL_DOCKER:
+                        cached = generation_module_file_materializer_service.materialize_local(
+                            db, execution_id=execution_id, module_input_key=str(source_key), reference=value
+                        )
+                    elif engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:
+                        cached = generation_module_file_materializer_service.materialize_runpod(
+                            db, execution_id=execution_id, module_input_key=str(source_key), reference=value
+                        )
+                    else:
+                        cached = {
+                            "module_input_key": str(source_key),
+                            "engine": "simulated",
+                            "relative_name": value.get("filename") or source_key,
+                        }
+                    cache[str(source_key)] = cached
+                    materialized.append(cached)
+                value = cached.get("relative_name") or cached.get("target_name") or cached.get("filename")
+            node.setdefault("inputs", {})[binding["input_field"]] = value
+        workflow = comfyui_prompt_preprocessor_service.preprocess(workflow)
+        return workflow, configuration, materialized
+
+
+    @staticmethod
+    def _is_generation_file_reference(value: Any) -> bool:
+        return isinstance(value, dict) and bool(
+            value.get("__generation_file__")
+            or value.get("storage_file_id")
+            or value.get("local_path")
+        )
+
+    @staticmethod
+    def _mark_temporary_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        marked: list[dict[str, Any]] = []
+        for item in files:
+            enriched = dict(item)
+            if enriched.get("local_path") or enriched.get("storage_file_id"):
+                enriched["__generation_file__"] = True
+                if not enriched.get("storage_file_id"):
+                    enriched["temporary"] = True
+            marked.append(enriched)
+        return marked
+
+    def _persist_final_outputs(
+        self,
+        db: Session,
+        *,
+        execution_id: UUID,
+        user_id: int | None,
+        outputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        def persist(value: Any) -> Any:
+            if self._is_generation_file_reference(value):
+                if value.get("storage_file_id"):
+                    final = dict(value)
+                else:
+                    registered = generation_module_result_service.register_files(
+                        db, execution_id=execution_id, user_id=user_id, files=[dict(value)]
+                    )
+                    final = registered[0] if registered else dict(value)
+                final.pop("temporary", None)
+                final["__generation_file__"] = True
+                return final
+            if isinstance(value, dict):
+                return {key: persist(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [persist(item) for item in value]
+            return value
+
+        return {key: persist(value) for key, value in outputs.items()}
+
+    @staticmethod
+    def _map_workflow_outputs(configuration: dict[str, Any], files: list[dict[str, Any]], raw: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {"files": files, "provider_result": raw}
+        for binding in configuration.get("output_bindings", []):
+            key = binding.get("module_output_key")
+            node_id = str(binding.get("node_id"))
+            matched = [item for item in files if str(item.get("node_id")) == node_id]
+            if key:
+                result[key] = matched[0] if len(matched) == 1 else matched
+        return result
+
+    def execute_python_step(
+        self,
+        db: Session,
+        execution_id: UUID,
+        step: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        configuration = step.get("configuration") or {}
+        source = configuration.get("source_code") or ""
+        entrypoint = configuration.get("entrypoint") or "run"
+        timeout = int(configuration.get("timeout_seconds") or 300)
+
+        raw_inputs = GenerationRuntimeContext.step_inputs(context, step.get("input_mapping"))
+
+        # Python image ports receive real Pillow images instead of the internal
+        # persisted-file reference used by the API and workflow runtime.
+        def materialize(value: Any) -> Any:
+            if isinstance(value, dict) and self._is_generation_file_reference(value):
+                try:
+                    from PIL import Image
+                except ImportError as exc:
+                    raise AppException(
+                        "Pillow is required to use image inputs in Python nodes."
+                    ) from exc
+                content, _filename, content_type = (
+                    generation_module_file_materializer_service._read_bytes(db, value)
+                )
+                if not str(content_type or "").startswith("image/"):
+                    return value
+                image = Image.open(io.BytesIO(content))
+                image.load()
+                return image
+            if isinstance(value, dict):
+                return {key: materialize(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [materialize(item) for item in value]
+            return value
+
+        python_inputs = materialize(raw_inputs)
+
+        # CPython requires a real dict for frame builtins. MappingProxyType can
+        # trigger ``dictobject.c: bad argument to internal function`` while
+        # executing user functions, especially when an import is present.
+        allowed_import_roots = {"PIL", "math", "json", "io", "base64"}
+        real_import = __import__
+
+        def safe_import(name: str, globals=None, locals=None, fromlist=(), level=0):
+            root = name.split(".", 1)[0]
+            if root not in allowed_import_roots:
+                raise ImportError(f"Import '{name}' is not allowed in Python nodes.")
+            return real_import(name, globals, locals, fromlist, level)
+
+        safe_builtins: dict[str, Any] = {
+            "len": len, "min": min, "max": max, "sum": sum, "sorted": sorted, "range": range,
+            "enumerate": enumerate, "zip": zip, "str": str, "int": int, "float": float,
+            "bool": bool, "dict": dict, "list": list, "tuple": tuple, "set": set,
+            "abs": abs, "round": round, "any": any, "all": all, "isinstance": isinstance,
+            "Exception": Exception, "ValueError": ValueError, "TypeError": TypeError,
+            "ImportError": ImportError, "__import__": safe_import,
+        }
+        namespace: dict[str, Any] = {"__builtins__": safe_builtins, "json": json}
+        exec(compile(source, f"generation_module_{step['key']}.py", "exec"), namespace, namespace)
+        function = namespace.get(entrypoint)
+        if not callable(function):
+            raise AppException(f"Python entrypoint '{entrypoint}' was not found.")
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(function, python_inputs)
+            try:
+                result = future.result(timeout=timeout)
+            except FutureTimeoutError as exc:
+                raise AppException(f"Python step '{step['key']}' exceeded {timeout} seconds.") from exc
+
+        raw_result: dict[str, Any]
+        if result is None:
+            raw_result = {}
+        else:
+            raw_result = result if isinstance(result, dict) else {"result": result}
+
+        # Convert Pillow outputs back into persisted, JSON-safe generation-file
+        # references so they can be consumed by later Workflow/Python nodes.
+        def persist(value: Any, key_path: str) -> Any:
+            try:
+                from PIL import Image
+            except ImportError:
+                Image = None  # type: ignore[assignment]
+            if Image is not None and isinstance(value, Image.Image):
+                image = value
+                if image.mode not in {"RGB", "RGBA", "L"}:
+                    image = image.convert("RGBA")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                filename = f"{step['key']}-{key_path.replace('.', '-')}.png"
+                runtime_dir = Path(tempfile.gettempdir()) / "tryon-generation-runtime" / str(execution_id)
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                local_path = runtime_dir / filename
+                local_path.write_bytes(buffer.getvalue())
+                return {
+                    "__generation_file__": True,
+                    "temporary": True,
+                    "local_path": str(local_path),
+                    "filename": filename,
+                    "content_type": "image/png",
+                    "size_bytes": local_path.stat().st_size,
+                }
+            if isinstance(value, dict):
+                return {key: persist(item, f"{key_path}.{key}") for key, item in value.items()}
+            if isinstance(value, list):
+                return [persist(item, f"{key_path}.{index}") for index, item in enumerate(value)]
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return value
+            raise AppException(
+                f"Python output '{key_path}' returned unsupported type '{type(value).__name__}'."
+            )
+
+        raw_result = persist(raw_result, "result")
+        output_mapping = step.get("output_mapping") or {}
+        if not output_mapping:
+            return raw_result
+
+        mapped_result: dict[str, Any] = {}
+        for output_key, result_path in output_mapping.items():
+            value: Any = raw_result
+            for part in str(result_path or output_key).split("."):
+                if not part:
+                    continue
+                value = value.get(part) if isinstance(value, dict) else None
+            mapped_result[str(output_key)] = value
+        return mapped_result
+
+    @staticmethod
+    def _resolve_module_outputs(definitions: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any]:
+        return GenerationRuntimeContext.resolve_module_outputs(definitions, context)
+
+
+
+generation_module_runtime_service = GenerationModuleRuntimeService()
+generation_job_orchestrator_service.bind(generation_module_runtime_service)
+
+# Persistent history helpers used by AppWeb and BackOffice.
+def _runtime_list(self, *, user_id: int | None = None, module_id: int | None = None, status: str | None = None, engine: str | None = None, search: str | None = None, created_from=None, created_to=None, skip: int = 0, limit: int = 100):
+    persisted, _ = generation_module_execution_store_service.list(
+        user_id=user_id,
+        module_id=module_id,
+        status=status,
+        engine=engine,
+        search=search,
+        created_from=created_from,
+        created_to=created_to,
+        skip=0,
+        limit=10000,
+    )
+    with self._lock:
+        active = [item.model_copy(deep=True) for item in self._items.values()]
+    merged = {item.id: item for item in persisted}
+    for item in active:
+        if user_id is not None and item.user_id != user_id:
+            continue
+        if module_id is not None and item.module_id != module_id:
+            continue
+        if status and item.status != status:
+            continue
+        if engine and str(item.engine.value if hasattr(item.engine, "value") else item.engine) != engine:
+            continue
+        if created_from is not None and item.created_at < created_from:
+            continue
+        if created_to is not None and item.created_at > created_to:
+            continue
+        if search:
+            haystack = " ".join([str(item.id), item.module_key, str(item.engine), item.status, item.error or ""]).lower()
+            if search.strip().lower() not in haystack:
+                continue
+        merged[item.id] = item
+    items = sorted(merged.values(), key=lambda item: item.created_at, reverse=True)
+    return items[skip:skip + limit], len(items)
+
+
+def _runtime_retry(self, db: Session, execution_id: UUID, *, user_id: int | None = None, engine=None):
+    current = self.get_for_user(execution_id, user_id=user_id) if user_id is not None else self.get(execution_id)
+    payload = GenerationModuleExecutionCreate(inputs=copy.deepcopy(current.inputs), engine=engine or current.engine)
+    return self.create(db, module_id=current.module_id, data=payload, user_id=user_id)
+
+
+def _runtime_delete(self, execution_id: UUID, *, user_id: int | None = None):
+    if user_id is not None:
+        self.get_for_user(execution_id, user_id=user_id)
+    else:
+        self.get(execution_id)
+    with self._lock:
+        self._items.pop(execution_id, None)
+        self._owners.pop(execution_id, None)
+        self._provider_refs.pop(execution_id, None)
+    generation_module_execution_store_service.delete(execution_id)
+
+
+GenerationModuleRuntimeService.list = _runtime_list
+GenerationModuleRuntimeService.retry = _runtime_retry
+GenerationModuleRuntimeService.delete = _runtime_delete
