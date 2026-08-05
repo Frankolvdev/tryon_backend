@@ -68,6 +68,7 @@ from app.api.v1.endpoints.admin import (
     webhooks,
     workflow_definitions,
     finances,
+    finance_cashbox,
     infrastructure_providers,
     modal_file_manager,
     runpod_file_manager,
@@ -151,6 +152,10 @@ admin_router.include_router(
 admin_router.include_router(
     tokens.router,
     tags=["Admin - Tokens"],
+)
+admin_router.include_router(
+    finance_cashbox.router,
+    tags=["Admin - Finance Cashbox"],
 )
 admin_router.include_router(
     token_purchases.router,

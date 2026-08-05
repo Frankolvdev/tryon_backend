@@ -101,6 +101,7 @@ from app.models.token_transaction import (
 from app.models.token_value_lot import TokenValueLot
 from app.models.token_consumption_allocation import TokenConsumptionAllocation
 from app.models.generation_financial_record import GenerationFinancialRecord
+from app.models.finance_withdrawal import FinanceWithdrawal
 from app.models.tryon_job import TryOnJob
 from app.models.user import User
 from app.models.user_account_security import (
@@ -195,6 +196,7 @@ __all__ = [
     "TokenValueLot",
     "TokenConsumptionAllocation",
     "GenerationFinancialRecord",
+    "FinanceWithdrawal",
     "TryOnJob",
     "User",
     "UserAccountSecurity",

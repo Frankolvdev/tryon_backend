@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.common.billing_enums import (
@@ -18,6 +19,7 @@ from app.common.exceptions import (
 from app.common.time import utc_now
 from app.models.billing_payment import BillingPayment
 from app.models.token_purchase import TokenPurchase
+from app.models.token_value_lot import TokenValueLot
 from app.models.user import User
 from app.repositories.billing_customer_repository import (
     billing_customer_repository,
@@ -930,6 +932,17 @@ class TokenPurchaseService:
                 "Billing payment not found."
             )
 
+        purchase_lots = db.execute(
+            select(TokenValueLot).where(
+                TokenValueLot.user_id == purchase.user_id,
+                TokenValueLot.reference_id == str(purchase.id),
+            ).with_for_update()
+        ).scalars().all()
+        if any(lot.remaining_tokens < lot.original_tokens or lot.activated_at is not None for lot in purchase_lots):
+            raise ConflictException(
+                "This token bag already consumed tokens and is no longer refundable under the active commercial policy."
+            )
+
         payment_intent_id = self._resolve_payment_intent_for_refund(
             db,
             purchase=purchase,
@@ -1041,10 +1054,27 @@ class TokenPurchaseService:
                         f"of purchase #{purchase.id}"
                     ),
                 )
+                remaining_lot_tokens = removed_tokens
+                for lot in purchase_lots:
+                    if remaining_lot_tokens <= 0:
+                        break
+                    take = min(int(lot.remaining_tokens), remaining_lot_tokens)
+                    lot.remaining_tokens -= take
+                    remaining_lot_tokens -= take
+                    if lot.remaining_tokens <= 0:
+                        lot.status = "refunded" if fully_refunded else "exhausted"
+                    db.add(lot)
 
         if fully_refunded:
             purchase.status = TokenPurchaseStatus.REFUNDED.value
             purchase.refunded_at = utc_now()
+            for lot in purchase_lots:
+                lot.remaining_tokens = 0
+                lot.status = "refunded"
+                lot.refunded_at = utc_now()
+                lot.commercial_profit_released = False
+                lot.released_commercial_profit_usd = Decimal("0")
+                db.add(lot)
 
         purchase.metadata_json = self._serialize_json(
             {

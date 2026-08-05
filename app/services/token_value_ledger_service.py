@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 from decimal import Decimal, ROUND_CEILING
+from app.common.time import utc_now
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.common.exceptions import ConflictException
@@ -174,6 +175,14 @@ class TokenValueLedgerService:
             if remaining<=0:break
             take=min(remaining,lot.remaining_tokens)
             lot.remaining_tokens-=take
+            if take > 0 and lot.status == "new":
+                snapshot=self._snapshot_for_lot(lot)
+                lot.status="active"
+                lot.activated_at=utc_now()
+                lot.commercial_profit_released=True
+                lot.released_commercial_profit_usd=(snapshot["effective_profit_per_token"]*lot.original_tokens).quantize(Decimal("0.000001"))
+            if lot.remaining_tokens <= 0 and lot.status not in {"expired","refunded"}:
+                lot.status="exhausted"
             db.add(TokenConsumptionAllocation(execution_id=execution_id,user_id=user_id,lot_id=lot.id,token_transaction_id=token_transaction_id,tokens_allocated=take,tokens_reversed=0,effective_token_value_usd=lot.effective_token_value_usd))
             db.add(lot); remaining-=take
         if remaining>0:
@@ -193,7 +202,10 @@ class TokenValueLedgerService:
             give=min(remaining,available)
             allocation.tokens_reversed+=give
             lot=db.get(TokenValueLot,allocation.lot_id)
-            if lot: lot.remaining_tokens+=give; db.add(lot)
+            if lot:
+                lot.remaining_tokens+=give
+                if lot.status == "exhausted": lot.status="active" if lot.activated_at else "new"
+                db.add(lot)
             db.add(allocation); remaining-=give
         db.flush()
 
