@@ -56,7 +56,7 @@ class TokenValueLedgerService:
         normal_profit=Decimal("0")
         discount_given=Decimal("0")
         net_profit=Decimal("0")
-        allocations=[]
+        grouped:dict[int,dict]={}
         legacy=False
         for allocation,lot in rows:
             net=max(allocation.tokens_allocated-allocation.tokens_reversed,0)
@@ -83,23 +83,32 @@ class TokenValueLedgerService:
             discount_given+=row_discount
             net_profit+=row_net
             legacy=legacy or lot.source=="legacy_untraced_balance"
-            allocations.append({
-                "token_bag_id":lot.id,
-                "source":lot.source,
-                "source_label":metadata.get("source_label") or metadata.get("source") or lot.source,
-                "reference_id":lot.reference_id,
-                "tokens_used":net,
-                "benefit_percent":float(discount_percent),
-                "normal_profit_per_token_usd":float(normal_per_token),
-                "profit_per_token_after_benefit_usd":float(effective_per_token),
-                "profit_without_benefit_usd":float(row_normal),
-                "benefit_given_usd":float(row_discount),
-                "company_profit_usd":float(row_net),
-                "effective_token_value_usd":float(value),
-                "cash_value_at_purchase_usd":float(value*net),
-                "coupon_code":metadata.get("coupon_code"),
-                "plan_name":metadata.get("plan_name"),
-            })
+            current=grouped.get(lot.id)
+            if current is None:
+                current={
+                    "token_bag_id":lot.id,
+                    "source":lot.source,
+                    "source_label":metadata.get("source_label") or metadata.get("source") or lot.source,
+                    "reference_id":lot.reference_id,
+                    "tokens_used":0,
+                    "benefit_percent":float(discount_percent),
+                    "normal_profit_per_token_usd":float(normal_per_token),
+                    "profit_per_token_after_benefit_usd":float(effective_per_token),
+                    "profit_without_benefit_usd":0.0,
+                    "benefit_given_usd":0.0,
+                    "company_profit_usd":0.0,
+                    "effective_token_value_usd":float(value),
+                    "cash_value_at_purchase_usd":0.0,
+                    "coupon_code":metadata.get("coupon_code"),
+                    "plan_name":metadata.get("plan_name"),
+                }
+                grouped[lot.id]=current
+            current["tokens_used"]+=net
+            current["profit_without_benefit_usd"]+=float(row_normal)
+            current["benefit_given_usd"]+=float(row_discount)
+            current["company_profit_usd"]+=float(row_net)
+            current["cash_value_at_purchase_usd"]+=float(value*net)
+        allocations=list(grouped.values())
         return {
             "tokens":tokens,
             "recognized_revenue_usd":float(cash_revenue),

@@ -14,7 +14,9 @@ class GenerationFinanceService:
         infra=float(infrastructure_cost_usd or 0)
         normal_profit=float(summary.get("profit_without_benefits_usd") or 0)
         benefit=float(summary.get("customer_benefits_usd") or 0)
-        company_profit=float(summary.get("company_profit_usd") or 0)
+        profit_after_benefits=float(summary.get("company_profit_usd") or 0)
+        rounding_surplus=max(float(billing_breakdown.get("profit_rounding_surplus_usd") or 0),0.0)
+        company_profit=profit_after_benefits+rounding_surplus
         economic_total=infra+company_profit
         margin=(company_profit/economic_total*100) if economic_total>0 else None
         payload={
@@ -24,8 +26,11 @@ class GenerationFinanceService:
             "money_reserved_for_ai_provider_usd":round(infra,6),
             "profit_without_benefits_usd":round(normal_profit,6),
             "benefit_given_to_customer_usd":round(benefit,6),
+            "profit_after_customer_benefits_usd":round(profit_after_benefits,6),
+            "rounding_surplus_for_company_usd":round(rounding_surplus,6),
             "company_profit_usd":round(company_profit,6),
             "economic_total_for_generation_usd":round(economic_total,6),
+            "applied_profit_usd":round(profit_after_benefits,9),
             "gross_margin_percent":round(margin,4) if margin is not None else None,
         }
         revenue=economic_total

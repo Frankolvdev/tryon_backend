@@ -35,6 +35,7 @@ from app.services.generation_configuration_readiness_service import generation_c
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.generation_module_billing_service import generation_module_billing_service
 from app.services.generation_finance_service import generation_finance_service
+from app.services.token_value_ledger_service import token_value_ledger_service
 from app.services.ai_engine_settings_service import ai_engine_settings_service
 from app.services.provider_pricing_service import provider_pricing_service
 from app.repositories.pricing_rule_repository import pricing_rule_repository
@@ -683,6 +684,13 @@ class GenerationModuleRuntimeService:
             item.tokens_charged = final_tokens
             item.tokens_refunded = refunded > 0
         item.commercial_price = round(final_price, 9) if final_price is not None else item.commercial_price
+        ledger_summary = (
+            token_value_ledger_service.execution_summary(db, str(item.id))
+            if item.user_id is not None
+            else {}
+        )
+        normal_profit_from_bags = float(ledger_summary.get("profit_without_benefits_usd") or applied_profit_usd or 0)
+        applied_profit_from_bags = float(ledger_summary.get("company_profit_usd") or applied_profit_usd or 0)
         estimated_snapshot = dict(item.billing_breakdown or {})
         initial_estimated_tokens = int(
             estimated_snapshot.get("estimated_tokens_before_execution")
@@ -704,8 +712,8 @@ class GenerationModuleRuntimeService:
             "raw_infrastructure_cost_usd": round(raw_infrastructure_cost, 9) if raw_infrastructure_cost is not None else None,
             "infrastructure_cost_usd": round(infrastructure_cost, 9) if infrastructure_cost is not None else None,
             "desired_profit_per_token_usd": profit_per_token_usd,
-            "desired_profit_usd": round(applied_profit_usd, 9),
-            "applied_profit_usd": round(applied_profit_usd, 9),
+            "desired_profit_usd": round(normal_profit_from_bags, 9),
+            "applied_profit_usd": round(applied_profit_from_bags, 9),
             "profit_rounding_surplus_usd": round(profit_rounding_surplus_usd, 9),
             "profit_applied": bool(policy.apply_profit),
             "infrastructure_charge_applied": bool(policy.charge_infrastructure),
