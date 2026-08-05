@@ -28,6 +28,7 @@ def list_billing_payments(
     user_id: int | None = Query(default=None),
     status: BillingPaymentStatus | None = Query(default=None),
     payment_type: str | None = Query(default=None),
+    record_scope: str = Query(default="processed", pattern=r"^(processed|attempts|all)$"),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -38,6 +39,7 @@ def list_billing_payments(
         user_id=user_id,
         status=status,
         payment_type=payment_type,
+        record_scope=record_scope,
         skip=skip,
         limit=limit,
     )
@@ -81,43 +83,6 @@ def reconcile_billing_payment(
         entity_id=str(payment_id),
         description=(
             f"Admin reconciled billing payment {payment_id}."
-        ),
-        ip_address=(
-            request.client.host
-            if request.client
-            else None
-        ),
-        user_agent=request.headers.get("user-agent"),
-    )
-
-    return result
-
-
-@router.post(
-    "/billing-payments/{payment_id}/refund",
-    response_model=BillingPaymentRefundResponse,
-)
-def refund_billing_payment(
-    payment_id: int,
-    data: BillingPaymentRefundRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-    current_admin: User = Depends(admin_guard),
-):
-    result = billing_history_service.refund_payment(
-        db,
-        payment_id=payment_id,
-        data=data,
-    )
-
-    audit_service.create_log(
-        db,
-        actor_user_id=current_admin.id,
-        action="admin_billing_payment_refunded",
-        entity_type="billing_payment",
-        entity_id=str(payment_id),
-        description=(
-            f"Admin refunded billing payment {payment_id}."
         ),
         ip_address=(
             request.client.host

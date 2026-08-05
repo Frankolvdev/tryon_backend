@@ -33,6 +33,18 @@ class BillingPaymentHistoryResponse(BaseModel):
     payment_method_last4: str | None = None
     payment_method_wallet: str | None = None
     metadata: dict[str, Any]
+    record_kind: str = "payment"
+    display_status: str = "payment"
+    is_payment_attempt: bool = False
+    can_reconcile: bool = False
+    original_amount: Decimal
+    discount_amount: Decimal
+    final_amount: Decimal
+    discount_type: str | None = None
+    discount_percent: Decimal | None = None
+    discount_code: str | None = None
+    discount_source: str | None = None
+    commercial_origin: str | None = None
     paid_at: datetime | None
     failed_at: datetime | None
     refunded_at: datetime | None

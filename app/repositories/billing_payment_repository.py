@@ -53,6 +53,7 @@ class BillingPaymentRepository(BaseRepository[BillingPayment]):
         user_id: int | None = None,
         status: str | None = None,
         payment_type: str | None = None,
+        record_scope: str = "processed",
         skip: int = 0,
         limit: int = 100,
     ) -> list[BillingPayment]:
@@ -71,6 +72,15 @@ class BillingPaymentRepository(BaseRepository[BillingPayment]):
         if payment_type is not None:
             statement = statement.where(
                 BillingPayment.payment_type == payment_type
+            )
+
+        if record_scope == "attempts":
+            statement = statement.where(
+                BillingPayment.provider_payment_intent_id.is_(None)
+            )
+        elif record_scope == "processed":
+            statement = statement.where(
+                BillingPayment.provider_payment_intent_id.is_not(None)
             )
 
         statement = (
@@ -92,6 +102,7 @@ class BillingPaymentRepository(BaseRepository[BillingPayment]):
         user_id: int | None = None,
         status: str | None = None,
         payment_type: str | None = None,
+        record_scope: str = "processed",
     ) -> int:
         statement = select(func.count(BillingPayment.id))
 
@@ -108,6 +119,15 @@ class BillingPaymentRepository(BaseRepository[BillingPayment]):
         if payment_type is not None:
             statement = statement.where(
                 BillingPayment.payment_type == payment_type
+            )
+
+        if record_scope == "attempts":
+            statement = statement.where(
+                BillingPayment.provider_payment_intent_id.is_(None)
+            )
+        elif record_scope == "processed":
+            statement = statement.where(
+                BillingPayment.provider_payment_intent_id.is_not(None)
             )
 
         return int(db.execute(statement).scalar_one())
