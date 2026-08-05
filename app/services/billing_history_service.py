@@ -96,6 +96,112 @@ class BillingHistoryService:
             rounding=ROUND_HALF_UP,
         )
 
+
+    def _payment_commercial_summary(
+        self,
+        payment: BillingPayment,
+    ) -> dict[str, Any]:
+        metadata = self._parse(payment.metadata_json)
+        coupon = metadata.get("coupon_financial_snapshot") or {}
+        terms = metadata.get("commercial_terms_snapshot") or {}
+        plan = (
+            metadata.get("plan_snapshot")
+            or metadata.get("subscription_plan_snapshot")
+            or {}
+        )
+
+        def money(
+            value: Any,
+            default: Decimal = Decimal("0.00"),
+        ) -> Decimal:
+            try:
+                return Decimal(str(value)).quantize(Decimal("0.000001"))
+            except Exception:
+                return default
+
+        final_amount = money(coupon.get("final_amount"), payment.amount)
+        original_amount = money(
+            coupon.get("nominal_amount")
+            or coupon.get("pre_coupon_amount")
+            or metadata.get("original_amount")
+            or metadata.get("nominal_amount"),
+            final_amount,
+        )
+        discount_amount = money(
+            coupon.get("discount_amount") or metadata.get("discount_amount"),
+            max(Decimal("0"), original_amount - final_amount),
+        )
+        percent_raw = (
+            coupon.get("effective_discount_percent")
+            or coupon.get("requested_discount_percent")
+            or terms.get("profit_discount_percent")
+            or metadata.get("discount_percent")
+        )
+        try:
+            discount_percent = (
+                Decimal(str(percent_raw)).quantize(Decimal("0.000001"))
+                if percent_raw not in (None, "")
+                else None
+            )
+        except Exception:
+            discount_percent = None
+
+        discount_code = metadata.get("coupon_code")
+        discount_source = (
+            "coupon"
+            if discount_code
+            else (
+                "plan"
+                if metadata.get("plan_id") or plan
+                else (
+                    "package"
+                    if metadata.get("token_package_id")
+                    else None
+                )
+            )
+        )
+        discount_type = None
+        if discount_amount > 0:
+            discount_type = (
+                "percentage"
+                if discount_percent is not None
+                else "fixed_amount"
+            )
+
+        is_attempt = not bool(payment.provider_payment_intent_id)
+        if is_attempt:
+            display_status = "checkout_attempt"
+            record_kind = "attempt"
+        elif payment.status == BillingPaymentStatus.PENDING.value:
+            display_status = "processing"
+            record_kind = "payment"
+        else:
+            display_status = (
+                payment.status.value
+                if isinstance(payment.status, BillingPaymentStatus)
+                else str(payment.status)
+            )
+            record_kind = "payment"
+
+        return {
+            "record_kind": record_kind,
+            "display_status": display_status,
+            "is_payment_attempt": is_attempt,
+            "can_reconcile": bool(payment.provider_payment_intent_id),
+            "original_amount": original_amount,
+            "discount_amount": discount_amount,
+            "final_amount": payment.amount,
+            "discount_type": discount_type,
+            "discount_percent": discount_percent,
+            "discount_code": str(discount_code) if discount_code else None,
+            "discount_source": discount_source,
+            "commercial_origin": str(
+                terms.get("source")
+                or metadata.get("purchase_kind")
+                or payment.payment_type
+            ),
+        }
+
     def _payment_response(
         self,
         payment: BillingPayment,
@@ -149,6 +255,7 @@ class BillingHistoryService:
                 "payment_method_wallet"
             ],
             metadata=self._parse(payment.metadata_json),
+            **self._payment_commercial_summary(payment),
             paid_at=payment.paid_at,
             failed_at=payment.failed_at,
             refunded_at=payment.refunded_at,
@@ -287,6 +394,7 @@ class BillingHistoryService:
         user_id: int | None = None,
         status: BillingPaymentStatus | None = None,
         payment_type: str | None = None,
+        record_scope: str = "processed",
         skip: int = 0,
         limit: int = 100,
     ) -> BillingPaymentHistoryListResponse:
@@ -298,6 +406,7 @@ class BillingHistoryService:
                 user_id=user_id,
                 status=status_value,
                 payment_type=payment_type,
+                record_scope=record_scope,
                 skip=skip,
                 limit=limit,
             )
@@ -309,6 +418,7 @@ class BillingHistoryService:
                 user_id=user_id,
                 status=status_value,
                 payment_type=payment_type,
+                record_scope=record_scope,
             )
         )
         hydrated_any = False
