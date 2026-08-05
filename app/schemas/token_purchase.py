@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
+from app.schemas.legal import LegalAcceptanceBundle
+
 from app.common.billing_enums import (
     BillingPaymentStatus,
     TokenPurchaseStatus,
@@ -17,6 +19,7 @@ class TokenPurchaseCheckoutRequest(BaseModel):
     cancel_url: HttpUrl
     allow_promotion_codes: bool = False
     coupon_code: str | None = Field(default=None, min_length=2, max_length=100)
+    legal: LegalAcceptanceBundle
 
     @model_validator(mode="after")
     def validate_purchase_source(self):

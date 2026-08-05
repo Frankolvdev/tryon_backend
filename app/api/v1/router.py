@@ -17,6 +17,7 @@ from app.api.v1.endpoints import (
     health,
     i18n,
     job_progress,
+    legal,
     metrics,
     oauth,
     password_recovery,
@@ -112,6 +113,11 @@ api_router.include_router(
     billing_coupons.router,
     prefix="/billing-coupons",
     tags=["Billing Coupons"],
+)
+api_router.include_router(
+    legal.router,
+    prefix="/legal",
+    tags=["Legal"],
 )
 api_router.include_router(
     billing.router,

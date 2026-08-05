@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
@@ -37,6 +37,7 @@ router = APIRouter()
 )
 def create_token_checkout(
     data: TokenPurchaseCheckoutRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(auth_guard),
 ):
@@ -44,6 +45,7 @@ def create_token_checkout(
         db=db,
         user=current_user,
         data=data,
+        request_context={"ip": request.client.host if request.client else None, "country": request.headers.get("cf-ipcountry"), "language": request.headers.get("accept-language", "es")[:10], "user_agent": request.headers.get("user-agent")},
     )
 
 
@@ -87,6 +89,7 @@ def get_my_token_purchase(
 )
 def create_subscription_checkout(
     data: SubscriptionCheckoutRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(auth_guard),
 ):
@@ -94,6 +97,7 @@ def create_subscription_checkout(
         db,
         user=current_user,
         data=data,
+        request_context={"ip": request.client.host if request.client else None, "country": request.headers.get("cf-ipcountry"), "language": request.headers.get("accept-language", "es")[:10], "user_agent": request.headers.get("user-agent")},
     )
 
 

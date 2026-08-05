@@ -36,6 +36,7 @@ from app.api.v1.endpoints.admin import (
     i18n,
     integrations,
     integrations_extra,
+    legal_documents,
     monitoring,
     notification_center,
     notification_preferences,
@@ -144,6 +145,10 @@ admin_router.include_router(
 admin_router.include_router(
     user_announcements.router,
     tags=["Admin - User Announcements"],
+)
+admin_router.include_router(
+    legal_documents.router,
+    tags=["Admin - Legal Documents"],
 )
 admin_router.include_router(
     users.router,

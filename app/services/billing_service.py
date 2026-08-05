@@ -45,11 +45,13 @@ class BillingService:
         *,
         user,
         data: TokenPurchaseCheckoutRequest,
+        request_context: dict | None = None,
     ) -> TokenPurchaseCheckoutResponse:
         return token_purchase_service.create_checkout(
             db,
             user=user,
             data=data,
+            request_context=request_context,
         )
 
     def handle_verified_stripe_event(

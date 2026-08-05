@@ -3,6 +3,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
+from app.schemas.legal import LegalAcceptanceBundle
+
 from app.common.billing_enums import (
     BillingInterval,
     BillingProvider,
@@ -15,6 +17,7 @@ class SubscriptionCheckoutRequest(BaseModel):
     success_url: HttpUrl
     cancel_url: HttpUrl
     allow_promotion_codes: bool = False
+    legal: LegalAcceptanceBundle
 
 
 class SubscriptionCheckoutResponse(BaseModel):

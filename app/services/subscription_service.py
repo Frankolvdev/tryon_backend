@@ -311,7 +311,10 @@ class SubscriptionService:
         *,
         user: User,
         data: SubscriptionCheckoutRequest,
+        request_context: dict | None = None,
     ) -> SubscriptionCheckoutResponse:
+        from app.services.legal_document_service import legal_document_service
+        legal_documents = legal_document_service.validate_bundle(db, data.legal)
         current = self.get_current_subscription(
             db,
             user_id=user.id,
@@ -438,6 +441,8 @@ class SubscriptionService:
                 "customer_id": customer.provider_customer_id,
             },
         )
+
+        legal_document_service.record(db,user_id=user.id,documents=legal_documents,context="subscription_checkout",reference=str(checkout_session.id),ip=(request_context or {}).get("ip"),country=(request_context or {}).get("country"),language=(request_context or {}).get("language") or "es",user_agent=(request_context or {}).get("user_agent"))
 
         return SubscriptionCheckoutResponse(
             checkout_session_id=checkout_session.id,

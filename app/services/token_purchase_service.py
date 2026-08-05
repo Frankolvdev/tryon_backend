@@ -306,7 +306,10 @@ class TokenPurchaseService:
         *,
         user: User,
         data: TokenPurchaseCheckoutRequest,
+        request_context: dict | None = None,
     ) -> TokenPurchaseCheckoutResponse:
+        from app.services.legal_document_service import legal_document_service
+        legal_documents = legal_document_service.validate_bundle(db, data.legal)
         token_package = None
 
         if data.token_package_id is not None:
@@ -473,6 +476,7 @@ class TokenPurchaseService:
         db.commit()
         db.refresh(payment)
         db.refresh(purchase)
+        legal_document_service.record(db,user_id=user.id,documents=legal_documents,context="token_checkout",reference=str(purchase.id),purchase_id=purchase.id,payment_id=payment.id,ip=(request_context or {}).get("ip"),country=(request_context or {}).get("country"),language=(request_context or {}).get("language") or "es",user_agent=(request_context or {}).get("user_agent"))
 
         metadata = {
             "type": "token_purchase",
