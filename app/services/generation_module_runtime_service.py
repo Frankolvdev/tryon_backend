@@ -120,6 +120,21 @@ class GenerationModuleRuntimeService:
         estimated_tokens_before_execution = (
             int(pricing.required_tokens) if pricing is not None else None
         )
+        estimated_bag_quote = None
+        if (
+            user_id is not None
+            and pricing is not None
+            and estimated_infrastructure_cost_usd is not None
+            and applied_pricing is not None
+        ):
+            estimated_bag_quote = token_value_ledger_service.quote_fifo_infrastructure_charge(
+                db, user_id=user_id, execution_id=None,
+                infrastructure_cost_usd=estimated_infrastructure_cost_usd, apply_profit=True,
+                fallback_profit_per_token_usd=float(applied_pricing.desired_profit_per_token_usd or 0),
+            )
+            tokens = int(estimated_bag_quote["tokens"])
+            estimated_tokens_before_execution = tokens
+            estimated_final_price_usd = float(estimated_bag_quote["charged_usd"])
         estimated_pricing_snapshot = {
             "finalized": False,
             "pricing_rule_id": (pricing.id if pricing else None),
@@ -132,6 +147,8 @@ class GenerationModuleRuntimeService:
             "estimated_final_price_usd": estimated_final_price_usd,
             "token_value_usd": (float(pricing.token_value_usd) if pricing else None),
             "estimated_tokens_before_execution": estimated_tokens_before_execution,
+            "token_charge_basis": "fifo_token_bag_snapshots" if estimated_bag_quote else "current_pricing_rule_fallback",
+            "estimated_token_bag_quote": (estimated_bag_quote.get("bags") if estimated_bag_quote else None),
         }
         if user_id is not None and tokens > 0:
             generation_module_billing_service.charge(
@@ -663,12 +680,25 @@ class GenerationModuleRuntimeService:
         policy = getattr(billing_policy, policy_key)
         infrastructure_cost = raw_infrastructure_cost if policy.charge_infrastructure else 0.0
         token_value = pricing_service.get_commercial_settings(db).token_value_usd
+        final_bag_quote = None
         if raw_infrastructure_cost is not None:
-            final_tokens, final_price, applied_profit_usd, profit_rounding_surplus_usd = pricing_service.token_charge_for_infrastructure(
-                db, infrastructure_cost_usd=float(infrastructure_cost or 0),
-                desired_profit_per_token_usd=profit_per_token_usd,
-                apply_profit=bool(policy.apply_profit),
-            )
+            if item.user_id is not None:
+                final_bag_quote = token_value_ledger_service.quote_fifo_infrastructure_charge(
+                    db, user_id=item.user_id, execution_id=str(item.id),
+                    infrastructure_cost_usd=float(infrastructure_cost or 0),
+                    apply_profit=bool(policy.apply_profit),
+                    fallback_profit_per_token_usd=profit_per_token_usd,
+                )
+                final_tokens = int(final_bag_quote["tokens"])
+                final_price = float(final_bag_quote["charged_usd"])
+                applied_profit_usd = float(final_bag_quote["configured_profit_usd"])
+                profit_rounding_surplus_usd = float(final_bag_quote["rounding_surplus_usd"])
+            else:
+                final_tokens, final_price, applied_profit_usd, profit_rounding_surplus_usd = pricing_service.token_charge_for_infrastructure(
+                    db, infrastructure_cost_usd=float(infrastructure_cost or 0),
+                    desired_profit_per_token_usd=profit_per_token_usd,
+                    apply_profit=bool(policy.apply_profit),
+                )
         else:
             final_tokens = item.tokens_charged
             final_price = None
@@ -723,6 +753,10 @@ class GenerationModuleRuntimeService:
             "token_value_usd": token_value,
             "estimated_tokens_before_execution": initial_estimated_tokens,
             "final_tokens": final_tokens,
+            "token_charge_basis": "fifo_token_bag_snapshots" if final_bag_quote else "current_pricing_rule_fallback",
+            "token_bag_charge_quote": (final_bag_quote.get("bags") if final_bag_quote else None),
+            "token_bag_traceability_status": (final_bag_quote.get("traceability_status") if final_bag_quote else None),
+            "infrastructure_capacity_from_bags_usd": (round(float(final_bag_quote.get("infrastructure_capacity_usd") or 0),9) if final_bag_quote else None),
             "extra_tokens_debited": extra,
             "tokens_refunded": refunded,
             "termination_status": item.status,
