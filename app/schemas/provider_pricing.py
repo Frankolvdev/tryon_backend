@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,6 +29,9 @@ class AppliedPricingRuleResponse(BaseModel):
     gpu_cost_usd_per_second: float | None
     estimated_duration_seconds: float
     estimate_source: str
+    historical_samples_used: int = 0
+    estimate_confidence: str = "low"
+    estimate_updated_at: str | None = None
     scaledown_seconds: int
     technical_margin_seconds: int
     estimated_billable_seconds: float

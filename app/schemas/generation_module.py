@@ -71,6 +71,9 @@ class GenerationModulePricingResponse(BaseModel):
     is_active: bool
     estimated_duration_seconds: float | None = None
     estimated_duration_source: str | None = None
+    historical_samples_used: int = 0
+    estimate_confidence: str = "low"
+    estimate_updated_at: str | None = None
     estimated_billable_seconds: float | None = None
     provider: str | None = None
     gpu_key: str | None = None

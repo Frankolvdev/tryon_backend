@@ -4,7 +4,7 @@ import json
 import math
 from dataclasses import dataclass
 from decimal import Decimal
-from statistics import mean
+from statistics import median
 
 from sqlalchemy.orm import Session
 
@@ -322,18 +322,80 @@ class PricingService:
         db.delete(rule)
         db.commit()
 
-    def _historical_duration(self, module_id: int, fallback: int) -> tuple[float, str]:
-        rows, _ = generation_module_execution_store_service.list(module_id=module_id, status="completed", skip=0, limit=20)
-        durations = sorted(
-            float((row.provider_metrics or {}).get("execution_time_ms") or row.duration_ms or 0) / 1000
-            for row in rows
-            if ((row.provider_metrics or {}).get("execution_time_ms") or row.duration_ms or 0) > 0
+    @staticmethod
+    def _execution_duration_seconds(row) -> float | None:
+        """Return the best completed-runtime duration available in an execution snapshot."""
+        provider_metrics = row.provider_metrics or {}
+        billing = row.billing_breakdown or {}
+        candidates_seconds = (
+            provider_metrics.get("real_provider_seconds"),
+            billing.get("real_provider_seconds"),
         )
-        if len(durations) < 5:
-            return float(fallback), "initial"
-        trim = max(1, int(len(durations) * 0.1)) if len(durations) >= 10 else 0
-        values = durations[trim:len(durations)-trim] if trim else durations
-        return round(mean(values), 3), "historical_average"
+        for value in candidates_seconds:
+            try:
+                seconds = float(value)
+            except (TypeError, ValueError):
+                continue
+            if seconds > 0:
+                return seconds
+
+        candidates_ms = (
+            row.real_provider_duration_ms,
+            provider_metrics.get("execution_time_ms"),
+            row.duration_ms,
+        )
+        for value in candidates_ms:
+            try:
+                milliseconds = float(value)
+            except (TypeError, ValueError):
+                continue
+            if milliseconds > 0:
+                return milliseconds / 1000.0
+        return None
+
+    def _historical_duration(
+        self, module_id: int, fallback: int
+    ) -> tuple[float, str, int, str, str | None]:
+        rows, _ = generation_module_execution_store_service.list(
+            module_id=module_id,
+            status="completed",
+            skip=0,
+            limit=50,
+        )
+        samples: list[tuple[float, object]] = []
+        for row in rows:
+            duration = self._execution_duration_seconds(row)
+            if duration is not None:
+                samples.append((duration, row))
+
+        if not samples:
+            return float(fallback), "initial", 0, "low", None
+
+        # Protect the estimate from an isolated extreme execution without requiring
+        # five samples before learning. One valid completed generation is enough.
+        durations = [item[0] for item in samples]
+        if len(durations) >= 4:
+            center = median(durations)
+            lower = max(center * 0.5, 0.001)
+            upper = center * 2.0
+            filtered = [item for item in samples if lower <= item[0] <= upper]
+            if filtered:
+                samples = filtered
+
+        # Store service returns newest first. Give recent runs a progressively
+        # larger weight so workflow/GPU changes are reflected without discarding history.
+        count = len(samples)
+        weighted_total = 0.0
+        total_weight = 0
+        for index, (duration, _row) in enumerate(samples):
+            weight = count - index
+            weighted_total += duration * weight
+            total_weight += weight
+        estimate = weighted_total / total_weight
+        confidence = "high" if count >= 10 else "medium" if count >= 2 else "low"
+        latest = samples[0][1]
+        latest_at = latest.finished_at or latest.updated_at or latest.created_at
+        return round(estimate, 3), "historical_weighted_average", count, confidence, latest_at.isoformat() if latest_at else None
 
     def get_applied_rule_for_module(self, db: Session, module_id: int) -> AppliedPricingRuleResponse | None:
         return next((item for item in self.list_applied_rules(db) if item.generation_module_id == module_id), None)
@@ -352,7 +414,9 @@ class PricingService:
             gpu_key = settings.modal_gpu if provider == "modal" else None
             scaledown = settings.modal_scaledown_window_seconds if provider == "modal" else 0
             gpu_cost = provider_pricing_service.get_cost(db, provider=provider, gpu_key=gpu_key)
-            duration, source = self._historical_duration(module.id, int(rule.initial_estimated_duration_seconds or 30))
+            duration, source, sample_count, confidence, estimate_updated_at = self._historical_duration(
+                module.id, int(rule.initial_estimated_duration_seconds or 30)
+            )
             billable = duration + scaledown + int(rule.technical_margin_seconds or 0)
             infra = billable * gpu_cost if gpu_cost is not None else None
             profit_per_token = float(rule.desired_profit_per_token_usd or 0)
@@ -382,6 +446,9 @@ class PricingService:
                 gpu_cost_usd_per_second=gpu_cost,
                 estimated_duration_seconds=duration,
                 estimate_source=source,
+                historical_samples_used=sample_count,
+                estimate_confidence=confidence,
+                estimate_updated_at=estimate_updated_at,
                 scaledown_seconds=scaledown,
                 technical_margin_seconds=int(rule.technical_margin_seconds or 0),
                 estimated_billable_seconds=round(billable, 3),
