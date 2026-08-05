@@ -38,6 +38,7 @@ class StorageFileRepository(BaseRepository[StorageFile]):
         role: str | None = None,
         provider: str | None = None,
         file_type: str | None = None,
+        asset_kind: str | None = None,
     ) -> list[dict]:
         statement = (
             select(StorageFile, User)
@@ -47,6 +48,21 @@ class StorageFileRepository(BaseRepository[StorageFile]):
 
         if provider:
             statement = statement.where(StorageFile.provider == provider)
+
+        if asset_kind:
+            normalized_kind = asset_kind.strip().lower()
+            if normalized_kind == "generation_inputs":
+                statement = statement.where(StorageFile.object_key.like("generation-inputs/%"))
+            elif normalized_kind == "generation_results":
+                statement = statement.where(StorageFile.object_key.like("generation-results/%"))
+            elif normalized_kind == "user_library":
+                statement = statement.where(StorageFile.object_key.like("user-library/%"))
+            elif normalized_kind == "other":
+                statement = statement.where(
+                    ~StorageFile.object_key.like("generation-inputs/%"),
+                    ~StorageFile.object_key.like("generation-results/%"),
+                    ~StorageFile.object_key.like("user-library/%"),
+                )
 
         if role:
             if role == "system":

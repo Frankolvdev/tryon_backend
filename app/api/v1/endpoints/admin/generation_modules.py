@@ -64,6 +64,7 @@ def list_generation_modules(
 # be parsed as an integer module_id and return HTTP 422.
 from app.schemas.generation_module_operations import GenerationExecutionListResponse, GenerationExecutionBulkRequest, GenerationExecutionBulkResponse
 from app.services.generation_module_runtime_service import generation_module_runtime_service
+from app.services.generation_execution_media_service import generation_execution_media_service
 
 
 @router.get("/generation-module-executions", response_model=GenerationExecutionListResponse)
@@ -396,6 +397,7 @@ def delete_generation_module_step(
 from uuid import UUID
 from app.schemas.generation_module_runtime import GenerationModuleExecutionCreate, GenerationModuleExecutionResponse
 from app.services.generation_module_runtime_service import generation_module_runtime_service
+from app.services.generation_execution_media_service import generation_execution_media_service
 
 
 @router.post("/generation-modules/{module_id}/executions", response_model=GenerationModuleExecutionResponse, status_code=202)
@@ -455,9 +457,10 @@ def bulk_delete_generation_module_executions(data: GenerationExecutionBulkReques
 @router.get("/generation-modules/executions/{execution_id}", response_model=GenerationModuleExecutionResponse)
 def get_generation_module_execution(
     execution_id: UUID,
+    db: Session = Depends(get_db),
     current_admin: User = Depends(admin_guard),
 ):
-    return generation_module_runtime_service.get(execution_id)
+    return generation_execution_media_service.hydrate(db, generation_module_runtime_service.get(execution_id))
 
 
 @router.post("/generation-modules/executions/{execution_id}/cancel", response_model=GenerationModuleExecutionResponse)

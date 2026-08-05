@@ -60,6 +60,7 @@ def list_storage_files(
     role: str | None = Query(default=None, max_length=50),
     provider: str | None = Query(default=None, max_length=50),
     file_type: str | None = Query(default=None, max_length=50),
+    asset_kind: str | None = Query(default=None, max_length=50),
 ):
     return storage_file_repository.list_admin_filtered(
         db,
@@ -70,6 +71,7 @@ def list_storage_files(
         role=role,
         provider=provider,
         file_type=file_type,
+        asset_kind=asset_kind,
     )
 
 

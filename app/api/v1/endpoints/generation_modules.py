@@ -13,6 +13,7 @@ from app.services.generation_module_runtime_service import generation_module_run
 from app.services.generation_module_upload_service import generation_module_upload_service
 from app.services.generation_module_service import generation_module_service
 from app.services.audit_service import audit_service
+from app.services.generation_execution_media_service import generation_execution_media_service
 
 router = APIRouter()
 
@@ -33,9 +34,11 @@ def list_available_generation_modules(
 @router.get("/executions/{execution_id}/status", response_model=GenerationModuleExecutionResponse)
 def get_my_generation_execution(
     execution_id: UUID,
+    db: Session = Depends(get_db),
     current_user: User = Depends(auth_guard),
 ):
-    return generation_module_runtime_service.get_for_user(execution_id, user_id=current_user.id)
+    execution = generation_module_runtime_service.get_for_user(execution_id, user_id=current_user.id)
+    return generation_execution_media_service.hydrate(db, execution)
 
 
 @router.post("/executions/{execution_id}/cancel", response_model=GenerationModuleExecutionResponse)
@@ -53,19 +56,20 @@ from app.schemas.generation_module_operations import GenerationExecutionListResp
 def list_my_active_generation_executions(
     module_id: int | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=100),
+    db: Session = Depends(get_db),
     current_user: User = Depends(auth_guard),
 ):
     items, _ = generation_module_runtime_service.list(
         user_id=current_user.id, module_id=module_id, skip=0, limit=limit
     )
     active = [item for item in items if item.status in {"queued", "running"}]
-    return GenerationExecutionListResponse(items=active, total=len(active), skip=0, limit=limit)
+    return GenerationExecutionListResponse(items=generation_execution_media_service.hydrate_many(db, active), total=len(active), skip=0, limit=limit)
 
 
 @router.get("/execution-history", response_model=GenerationExecutionListResponse)
-def list_my_generation_executions(module_id: int | None = Query(default=None), status: str | None = Query(default=None), skip: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100), current_user: User = Depends(auth_guard)):
+def list_my_generation_executions(module_id: int | None = Query(default=None), status: str | None = Query(default=None), skip: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100), db: Session = Depends(get_db), current_user: User = Depends(auth_guard)):
     items, total = generation_module_runtime_service.list(user_id=current_user.id, module_id=module_id, status=status, skip=skip, limit=limit)
-    return GenerationExecutionListResponse(items=items, total=total, skip=skip, limit=limit)
+    return GenerationExecutionListResponse(items=generation_execution_media_service.hydrate_many(db, items), total=total, skip=skip, limit=limit)
 
 
 
@@ -96,7 +100,7 @@ async def execute_available_generation_module(
         db, module_id=module_id, data=payload, user_id=current_user.id
     )
     audit_service.create_log(db, actor_user_id=current_user.id, action="generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started generation for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
-    return result
+    return generation_execution_media_service.hydrate(db, result)
 
 @router.post("/executions/{execution_id}/retry", response_model=GenerationModuleExecutionResponse, status_code=202)
 def retry_my_generation_execution(execution_id: UUID, data: GenerationExecutionRetryRequest, db: Session = Depends(get_db), current_user: User = Depends(auth_guard)):
