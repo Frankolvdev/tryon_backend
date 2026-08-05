@@ -22,6 +22,43 @@ class FinanceCashboxService:
     def _meta(self, lot):
         try: return json.loads(lot.metadata_json or '{}')
         except Exception: return {}
+    def _historical_bag_usage(self,db,lot_id):
+        """Read-only compatibility for records created before cashbox lifecycle fields.
+
+        Current executions are sourced from net token allocations. Older executions may
+        have allocations fully reversed by legacy reconciliation while their immutable
+        financial breakdown still proves that a bag paid tokens. This evidence blocks
+        an unsafe refund and releases the bag's commercial profit, but never mutates the
+        user's token balance.
+        """
+        tokens=0; generations=[]
+        records=db.execute(
+            select(GenerationFinancialRecord)
+            .where(GenerationFinancialRecord.breakdown_json.is_not(None))
+            .order_by(GenerationFinancialRecord.created_at)
+        ).scalars().all()
+        for rec in records:
+            try: breakdown=json.loads(rec.breakdown_json or '{}')
+            except Exception: continue
+            bags=breakdown.get('token_bags_used') or breakdown.get('allocations') or []
+            for bag in bags:
+                try: bag_id=int(bag.get('token_bag_id') or 0)
+                except (TypeError,ValueError): continue
+                if bag_id != int(lot_id): continue
+                used=max(int(bag.get('tokens_used') or bag.get('tokens') or 0),0)
+                if used<=0: continue
+                tokens += used
+                generations.append({
+                    'execution_id':rec.execution_id,
+                    'tokens_used':used,
+                    'created_at':rec.created_at,
+                    'infrastructure_cost_usd':float(rec.infrastructure_cost_usd or 0),
+                    'company_profit_usd':float(rec.gross_profit_usd or 0),
+                    'rounding_surplus_usd':float(breakdown.get('rounding_surplus_for_company_usd') or breakdown.get('profit_rounding_surplus_usd') or 0),
+                    'status':rec.status,
+                    'historical_reconstruction':True,
+                })
+        return tokens,generations
     def expiration_settings(self,db):
         rows={x.key:x for x in db.execute(select(SystemSetting).where(SystemSetting.key.in_([self.EXPIRY_ENABLED,self.EXPIRY_DAYS]))).scalars()}
         return {'enabled': bool(rows.get(self.EXPIRY_ENABLED).value_boolean) if rows.get(self.EXPIRY_ENABLED) else True,'days': int(rows.get(self.EXPIRY_DAYS).value_integer or 730) if rows.get(self.EXPIRY_DAYS) else 730}
@@ -55,7 +92,8 @@ class FinanceCashboxService:
         consumed=max(lot.original_tokens-lot.remaining_tokens,0)
         allocations=db.execute(select(TokenConsumptionAllocation).where(TokenConsumptionAllocation.lot_id==lot.id)).scalars().all()
         net_alloc=sum(max(a.tokens_allocated-a.tokens_reversed,0) for a in allocations)
-        consumed=max(consumed,net_alloc)
+        historical_consumed,_=self._historical_bag_usage(db,lot.id) if net_alloc==0 else (0,[])
+        consumed=max(consumed,net_alloc,historical_consumed)
         infra_used=D('0'); rounding=D('0')
         for a in allocations:
             if max(a.tokens_allocated-a.tokens_reversed,0)<=0: continue
@@ -106,7 +144,9 @@ class FinanceCashboxService:
             if rec:
                 try:b=json.loads(rec.breakdown_json or '{}')
                 except:pass
-            gens.append({'execution_id':a.execution_id,'tokens_used':net,'created_at':a.created_at,'infrastructure_cost_usd':float(rec.infrastructure_cost_usd or 0) if rec else 0,'company_profit_usd':float(rec.gross_profit_usd or 0) if rec else 0,'rounding_surplus_usd':float(b.get('rounding_surplus_for_company_usd') or 0),'status':rec.status if rec else None})
+            gens.append({'execution_id':a.execution_id,'tokens_used':net,'created_at':a.created_at,'infrastructure_cost_usd':float(rec.infrastructure_cost_usd or 0) if rec else 0,'company_profit_usd':float(rec.gross_profit_usd or 0) if rec else 0,'rounding_surplus_usd':float(b.get('rounding_surplus_for_company_usd') or 0),'status':rec.status if rec else None,'historical_reconstruction':False})
+        if not gens:
+            _,gens=self._historical_bag_usage(db,lot.id)
         timeline=[{'type':'purchase','at':lot.created_at.isoformat(),'label':'Bolsa creada'}]
         if lot.activated_at:timeline.append({'type':'activation','at':lot.activated_at.isoformat(),'label':'Primer consumo: utilidad comercial liberada'})
         if lot.expired_at:timeline.append({'type':'expiration','at':lot.expired_at.isoformat(),'label':'Bolsa expirada y saldo restante liberado'})

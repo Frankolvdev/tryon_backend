@@ -317,6 +317,8 @@ class TokenValueLedgerService:
                         "benefit_given_usd":0.0,
                         "company_profit_usd":0.0,
                         "effective_token_value_usd":float(value),
+                        "infrastructure_capacity_per_token_usd":float(max(value-effective_per_token,Decimal("0"))),
+                        "infrastructure_capacity_from_tokens_usd":0.0,
                         "cash_value_at_purchase_usd":0.0,
                         "coupon_code":metadata.get("coupon_code"),
                         "plan_name":metadata.get("plan_name"),
