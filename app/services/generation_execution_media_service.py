@@ -14,19 +14,58 @@ class GenerationExecutionMediaService:
 
     URL_FIELDS = ("preview_url", "download_url", "public_url", "source_url", "url")
 
-    def hydrate(self, db: Session, execution: GenerationModuleExecutionResponse) -> GenerationModuleExecutionResponse:
+    def hydrate(
+        self,
+        db: Session,
+        execution: GenerationModuleExecutionResponse,
+        *,
+        allow_locked: bool = False,
+    ) -> GenerationModuleExecutionResponse:
         item = execution.model_copy(deep=True)
+        locked = bool(item.result_locked or (item.billing_breakdown or {}).get("result_locked"))
+        item.result_locked = locked
+        item.billing_access_status = "payment_pending" if locked else "unlocked"
+        item.estimated_pending_tokens = (item.billing_breakdown or {}).get("estimated_pending_tokens")
+
         item.inputs = self._hydrate_value(db, item.inputs)
-        item.outputs = self._hydrate_value(db, item.outputs)
         item.context = self._hydrate_value(db, item.context)
-        item.steps = [
-            step.model_copy(update={"outputs": self._hydrate_value(db, step.outputs)}, deep=True)
-            for step in item.steps
-        ]
+        if locked and not allow_locked:
+            item.outputs = self._lock_value(item.outputs)
+            item.steps = [
+                step.model_copy(update={"outputs": self._lock_value(step.outputs)}, deep=True)
+                for step in item.steps
+            ]
+        else:
+            item.outputs = self._hydrate_value(db, item.outputs)
+            item.steps = [
+                step.model_copy(update={"outputs": self._hydrate_value(db, step.outputs)}, deep=True)
+                for step in item.steps
+            ]
         return item
 
-    def hydrate_many(self, db: Session, executions: list[GenerationModuleExecutionResponse]) -> list[GenerationModuleExecutionResponse]:
-        return [self.hydrate(db, execution) for execution in executions]
+    def hydrate_many(
+        self,
+        db: Session,
+        executions: list[GenerationModuleExecutionResponse],
+        *,
+        allow_locked: bool = False,
+    ) -> list[GenerationModuleExecutionResponse]:
+        return [self.hydrate(db, execution, allow_locked=allow_locked) for execution in executions]
+
+    def _lock_value(self, value: Any) -> Any:
+        if isinstance(value, list):
+            return [self._lock_value(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        locked = {key: self._lock_value(nested) for key, nested in value.items()}
+        for field in self.URL_FIELDS:
+            locked.pop(field, None)
+        # Do not expose durable storage coordinates through user execution APIs.
+        locked.pop("bucket", None)
+        locked.pop("object_key", None)
+        if locked.get("storage_file_id") is not None:
+            locked["locked"] = True
+        return locked
 
     def _hydrate_value(self, db: Session, value: Any) -> Any:
         if isinstance(value, list):

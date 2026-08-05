@@ -73,5 +73,8 @@ class GenerationModuleExecutionResponse(BaseModel):
     estimated_final_price_usd: float | None = None
     estimated_tokens_before_execution: int | None = None
     billing_breakdown: dict[str, Any] = Field(default_factory=dict)
+    result_locked: bool = False
+    billing_access_status: Literal["unlocked", "payment_pending"] = "unlocked"
+    estimated_pending_tokens: int | None = None
     recovery_count: int = 0
     recovered_at: datetime | None = None

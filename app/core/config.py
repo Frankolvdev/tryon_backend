@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     GENERATION_QUEUE_BLOCK_SECONDS: int = 2
     GENERATION_HEARTBEAT_SECONDS: int = 10
 
+    # Non-production diagnostic switch. It changes billing math only; it never
+    # delays or modifies the provider execution. Disabled by default.
+    TEST_FORCE_BILLING_OVERRUN: bool = False
+    TEST_FORCE_BILLING_OVERRUN_MULTIPLIER: float = 1.0
+    TEST_BILLING_USER_ID: int | None = None
+    TEST_BILLING_EXECUTION_ID: str | None = None
+
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
     SMTP_USERNAME: str = ""

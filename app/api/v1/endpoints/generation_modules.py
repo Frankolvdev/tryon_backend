@@ -41,6 +41,20 @@ def get_my_generation_execution(
     return generation_execution_media_service.hydrate(db, execution)
 
 
+
+
+@router.post("/executions/{execution_id}/settle-pending-billing", response_model=GenerationModuleExecutionResponse)
+def settle_my_pending_generation_billing(
+    execution_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(auth_guard),
+):
+    execution = generation_module_runtime_service.settle_pending_billing(
+        db, execution_id, user_id=current_user.id
+    )
+    return generation_execution_media_service.hydrate(db, execution)
+
+
 @router.post("/executions/{execution_id}/cancel", response_model=GenerationModuleExecutionResponse)
 def cancel_my_generation_execution(
     execution_id: UUID,

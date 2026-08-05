@@ -460,7 +460,7 @@ def get_generation_module_execution(
     db: Session = Depends(get_db),
     current_admin: User = Depends(admin_guard),
 ):
-    return generation_execution_media_service.hydrate(db, generation_module_runtime_service.get(execution_id))
+    return generation_execution_media_service.hydrate(db, generation_module_runtime_service.get(execution_id), allow_locked=True)
 
 
 @router.post("/generation-modules/executions/{execution_id}/cancel", response_model=GenerationModuleExecutionResponse)

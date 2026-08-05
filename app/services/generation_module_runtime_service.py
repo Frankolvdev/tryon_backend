@@ -15,11 +15,12 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
 
-from app.common.exceptions import AppException, NotFoundException
+from app.common.exceptions import AppException, ConflictException, NotFoundException
 from app.common.generation_module_enums import GenerationExecutionEngine, GenerationModuleStepType
 from app.common.time import utc_now
 from app.common.generation_execution_state_machine import transition_execution
 from app.db.database import SessionLocal
+from app.core.config import settings
 from app.schemas.generation_module_runtime import (
     GenerationModuleExecutionCreate,
     GenerationModuleExecutionLog,
@@ -656,7 +657,27 @@ class GenerationModuleRuntimeService:
         margin_seconds = int(getattr(rule, "technical_margin_seconds", 0) or 0)
         profit_per_token_usd = float(getattr(rule, "desired_profit_per_token_usd", 0) or 0)
         actual_seconds = round(item.real_provider_duration_ms / 1000, 3)
-        billable_seconds = round(actual_seconds + scaledown_seconds + margin_seconds, 3)
+        pending_snapshot = dict(item.billing_breakdown or {})
+        billing_seconds = actual_seconds
+        test_override_applied = False
+        test_multiplier = 1.0
+        if pending_snapshot.get("settlement_pending"):
+            billing_seconds = float(pending_snapshot.get("billing_simulated_seconds") or actual_seconds)
+            test_override_applied = bool(pending_snapshot.get("billing_test_override_applied"))
+            test_multiplier = float(pending_snapshot.get("billing_test_multiplier") or 1.0)
+        else:
+            configured_execution_id = str(settings.TEST_BILLING_EXECUTION_ID or "").strip()
+            test_override_applied = (
+                settings.APP_ENV.lower() not in {"production", "prod"}
+                and bool(settings.TEST_FORCE_BILLING_OVERRUN)
+                and settings.TEST_BILLING_USER_ID is not None
+                and item.user_id == settings.TEST_BILLING_USER_ID
+                and (not configured_execution_id or configured_execution_id == str(item.id))
+            )
+            if test_override_applied:
+                test_multiplier = max(float(settings.TEST_FORCE_BILLING_OVERRUN_MULTIPLIER or 1.0), 1.0)
+                billing_seconds = round(actual_seconds * test_multiplier, 3)
+        billable_seconds = round(billing_seconds + scaledown_seconds + margin_seconds, 3)
         raw_infrastructure_cost = (billable_seconds * gpu_cost) if gpu_cost is not None else None
         billing_policy = pricing_service.get_execution_billing_policy(db)
         failure_origin = None
@@ -683,12 +704,61 @@ class GenerationModuleRuntimeService:
         final_bag_quote = None
         if raw_infrastructure_cost is not None:
             if item.user_id is not None:
-                final_bag_quote = token_value_ledger_service.quote_fifo_infrastructure_charge(
-                    db, user_id=item.user_id, execution_id=str(item.id),
-                    infrastructure_cost_usd=float(infrastructure_cost or 0),
-                    apply_profit=bool(policy.apply_profit),
-                    fallback_profit_per_token_usd=profit_per_token_usd,
-                )
+                try:
+                    final_bag_quote = token_value_ledger_service.quote_fifo_infrastructure_charge(
+                        db, user_id=item.user_id, execution_id=str(item.id),
+                        infrastructure_cost_usd=float(infrastructure_cost or 0),
+                        apply_profit=bool(policy.apply_profit),
+                        fallback_profit_per_token_usd=profit_per_token_usd,
+                    )
+                except ConflictException:
+                    if item.status != "completed":
+                        raise
+                    estimated_total_tokens = max(
+                        int(math.ceil(float(infrastructure_cost or 0) / max(float(token_value or 0), 0.000000001))),
+                        int(item.tokens_charged or 0),
+                    )
+                    estimated_pending_tokens = max(estimated_total_tokens - int(item.tokens_charged or 0), 1)
+                    item.result_locked = True
+                    item.billing_access_status = "payment_pending"
+                    item.estimated_pending_tokens = estimated_pending_tokens
+                    item.billing_breakdown = {
+                        **pending_snapshot,
+                        "finalized": False,
+                        "settlement_pending": True,
+                        "settlement_reason": "insufficient_funded_capacity",
+                        "result_locked": True,
+                        "billing_access_status": "payment_pending",
+                        "estimated_pending_tokens": estimated_pending_tokens,
+                        "settlement_target_infrastructure_cost_usd": round(float(infrastructure_cost or 0), 9),
+                        "provider": provider,
+                        "gpu_key": gpu_key,
+                        "gpu_cost_usd_per_second": gpu_cost,
+                        "real_provider_seconds": actual_seconds,
+                        "billing_simulated_seconds": billing_seconds,
+                        "billing_test_override_applied": test_override_applied,
+                        "billing_test_multiplier": test_multiplier,
+                        "duration_source": duration_source,
+                        "configured_scaledown_seconds": scaledown_seconds,
+                        "technical_margin_seconds": margin_seconds,
+                        "billable_seconds": billable_seconds,
+                        "raw_infrastructure_cost_usd": round(raw_infrastructure_cost, 9) if raw_infrastructure_cost is not None else None,
+                        "infrastructure_cost_usd": round(float(infrastructure_cost or 0), 9),
+                        "profit_applied": bool(policy.apply_profit),
+                        "infrastructure_charge_applied": bool(policy.charge_infrastructure),
+                        "billing_policy_key": policy_key,
+                        "termination_status": item.status,
+                    }
+                    item.logs.append(GenerationModuleExecutionLog(
+                        timestamp=utc_now(),
+                        level="warning",
+                        message=(
+                            "Result locked because the final infrastructure charge exceeds "
+                            "the funded capacity of the user's token bags."
+                        ),
+                    ))
+                    db.commit()
+                    return
                 final_tokens = int(final_bag_quote["tokens"])
                 final_price = float(final_bag_quote["charged_usd"])
                 applied_profit_usd = float(final_bag_quote["configured_profit_usd"])
@@ -735,6 +805,9 @@ class GenerationModuleRuntimeService:
             "gpu_key": gpu_key,
             "gpu_cost_usd_per_second": gpu_cost,
             "real_provider_seconds": actual_seconds,
+            "billing_simulated_seconds": billing_seconds,
+            "billing_test_override_applied": test_override_applied,
+            "billing_test_multiplier": test_multiplier,
             "duration_source": duration_source,
             "configured_scaledown_seconds": scaledown_seconds,
             "technical_margin_seconds": margin_seconds,
@@ -761,13 +834,39 @@ class GenerationModuleRuntimeService:
             "tokens_refunded": refunded,
             "termination_status": item.status,
             "pricing_rule_id": item.pricing_rule_id,
+            "settlement_pending": False,
+            "settlement_reason": None,
+            "result_locked": False,
+            "billing_access_status": "unlocked",
+            "estimated_pending_tokens": None,
         }
+        item.result_locked = False
+        item.billing_access_status = "unlocked"
+        item.estimated_pending_tokens = None
         generation_finance_service.finalize(
             db, execution_id=str(item.id), module_id=item.module_id, module_key=item.module_key,
             user_id=item.user_id, status=item.status, infrastructure_cost_usd=infrastructure_cost,
             billing_breakdown=item.billing_breakdown,
         )
         db.commit()
+
+
+    def settle_pending_billing(
+        self,
+        db: Session,
+        execution_id: UUID,
+        *,
+        user_id: int,
+    ) -> GenerationModuleExecutionResponse:
+        with self._lock:
+            item = self.get_for_user(execution_id, user_id=user_id)
+            if not bool(item.result_locked or (item.billing_breakdown or {}).get("settlement_pending")):
+                return item
+            self._finalize_dynamic_billing(db, item)
+            self._items[item.id] = item.model_copy(deep=True)
+            self._owners[item.id] = item.user_id
+            generation_module_execution_store_service.save(item)
+            return item.model_copy(deep=True)
 
 
     @staticmethod
