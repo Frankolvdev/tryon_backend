@@ -353,7 +353,7 @@ class SubscriptionService:
             "price_paid_per_period_usd": float(plan.price_amount),
             "currency": plan.currency,
             "billing_interval": plan.billing_interval,
-            "billing_interval_count": int(plan.billing_interval_count or 1),
+            "billing_interval_count": int(getattr(plan, "billing_interval_count", 1) or 1),
         }
         commercial_snapshot_json = self._serialize_json(commercial_terms_snapshot)
 
@@ -385,7 +385,7 @@ class SubscriptionService:
                             "unit_amount": int((Decimal(str(plan.price_amount)) * 100).quantize(Decimal("1"))),
                             "recurring": {
                                 "interval": plan.billing_interval,
-                                "interval_count": int(plan.billing_interval_count or 1),
+                                "interval_count": int(getattr(plan, "billing_interval_count", 1) or 1),
                             },
                         },
                         "quantity": 1,

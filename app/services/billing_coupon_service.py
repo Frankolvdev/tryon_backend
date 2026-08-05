@@ -43,6 +43,17 @@ class BillingCouponService:
         except (json.JSONDecodeError, TypeError):
             return {}
 
+
+    def _applies_to(self, metadata: dict[str, Any]) -> list[str]:
+        raw = metadata.get("applies_to", ["token_packages"])
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            raw = []
+        allowed = {"token_packages", "free_token_purchase"}
+        values = [str(item) for item in raw if str(item) in allowed]
+        return list(dict.fromkeys(values)) or ["token_packages"]
+
     def _response(
         self,
         coupon: BillingCoupon,
@@ -75,7 +86,7 @@ class BillingCouponService:
             valid_from=coupon.valid_from,
             valid_until=coupon.valid_until,
             is_active=coupon.is_active,
-            applies_to=(self._parse(coupon.metadata_json).get("applies_to") if self._parse(coupon.metadata_json).get("applies_to") in {"token_packages", "free_token_purchase"} else "token_packages"),
+            applies_to=self._applies_to(self._parse(coupon.metadata_json)),
             eligible_item_ids=self._parse(coupon.metadata_json).get("eligible_item_ids", []),
             metadata=self._parse(coupon.metadata_json),
             created_at=coupon.created_at,
@@ -450,11 +461,11 @@ class BillingCouponService:
             )
 
         metadata = self._parse(coupon.metadata_json)
-        applies_to = metadata.get("applies_to", "token_packages")
+        applies_to = self._applies_to(metadata)
         eligible_item_ids = metadata.get("eligible_item_ids", [])
         requested_scope = {"token_package": "token_packages", "free_token_purchase": "free_token_purchase"}.get(purchase_type)
 
-        if requested_scope and applies_to != requested_scope:
+        if requested_scope and requested_scope not in applies_to:
             return BillingCouponValidationResponse(valid=False, coupon=self._response(coupon), message="Coupon does not apply to this purchase type.")
 
         if item_id is not None and eligible_item_ids and item_id not in eligible_item_ids:
