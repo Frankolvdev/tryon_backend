@@ -152,3 +152,9 @@ class BillingCouponValidationResponse(BaseModel):
     valid: bool
     coupon: BillingCouponResponse | None = None
     message: str
+    discount_amount: Decimal | None = None
+    final_amount: Decimal | None = None
+    requested_discount_percent: Decimal | None = None
+    effective_discount_percent: Decimal | None = None
+    protected_discount_percent: Decimal | None = None
+    potential_loss_usd: Decimal | None = None
