@@ -43,17 +43,17 @@ class GenerationDataResetService:
                 GenerationDataResetService._collect_file_ids(item, found)
 
     def _file_ids(self, db: Session) -> set[int]:
-        found: set[int] = set()
-        if self._table_exists(db, "generation_module_executions"):
-            for row in db.query(GenerationModuleExecution).all():
-                try:
-                    self._collect_file_ids(json.loads(row.snapshot_json or "{}"), found)
-                except (TypeError, ValueError):
-                    pass
-        if self._table_exists(db, "tryon_jobs"):
-            for row in db.query(TryOnJob).all():
-                found.update(v for v in (row.person_image_file_id, row.item_image_file_id, row.result_file_id) if v)
-        return found
+        """Return every stored file that belongs to test/user activity.
+
+        The previous implementation only inspected execution snapshots and legacy TryOn
+        rows. Gallery references and orphaned uploads therefore remained visible in the
+        storage administrator after a reset. A full commercial reset intentionally leaves
+        the user accounts but clears their uploaded/generated files, so every storage row
+        is included.
+        """
+        if not self._table_exists(db, "storage_files"):
+            return set()
+        return {int(value) for value in db.execute(text("SELECT id FROM storage_files")).scalars().all()}
 
     def preview(self, db: Session) -> dict[str, Any]:
         active_execution_ids: list[str] = []
@@ -66,7 +66,7 @@ class GenerationDataResetService:
         token_balance = int(db.execute(text("SELECT COALESCE(SUM(token_balance), 0) FROM users")).scalar() or 0)
         counts = {
             "generation_module_executions": self._count(db, "generation_module_executions"),
-            "tryon_jobs": self._count(db, "tryon_jobs"),
+            "legacy_generation_jobs": self._count(db, "tryon_jobs"),
             "generation_financial_records": self._count(db, "generation_financial_records"),
             "token_consumption_allocations": self._count(db, "token_consumption_allocations"),
             "token_transactions": self._count(db, "token_transactions"),
@@ -79,6 +79,9 @@ class GenerationDataResetService:
             "billing_customers": self._count(db, "billing_customers"),
             "external_ai_jobs": self._count(db, "external_ai_jobs"),
             "background_jobs": self._count(db, "background_jobs"),
+            "user_gallery_items": self._count(db, "user_gallery_items"),
+            "finance_withdrawals": self._count(db, "finance_withdrawals"),
+            "legal_acceptances": self._count(db, "legal_acceptances"),
             "storage_files": len(file_ids),
             "tokens_to_zero": token_balance,
         }
@@ -91,7 +94,8 @@ class GenerationDataResetService:
         }
 
     def execute(self, db: Session, *, confirmation: str, delete_storage_files: bool = True,
-                cancel_stripe_subscriptions: bool = False) -> dict[str, Any]:
+                cancel_stripe_subscriptions: bool = False,
+                refund_stripe_payments: bool = False) -> dict[str, Any]:
         if confirmation.strip() != CONFIRMATION_TEXT:
             raise ValueError(f"Confirmation must exactly match: {CONFIRMATION_TEXT}")
         preview = self.preview(db)
@@ -111,6 +115,35 @@ class GenerationDataResetService:
                     stripe_failures.append(f"{subscription_id}: {exc}")
             if stripe_failures:
                 raise RuntimeError("Stripe cancellation failed; no local data was deleted. " + " | ".join(stripe_failures[:5]))
+
+        stripe_refunded = 0
+        stripe_refund_failures: list[str] = []
+        if refund_stripe_payments and self._table_exists(db, "billing_payments"):
+            rows = db.execute(text("""
+                SELECT id, provider_payment_intent_id, amount, refunded_amount
+                FROM billing_payments
+                WHERE provider = 'stripe'
+                  AND provider_payment_intent_id IS NOT NULL
+                  AND COALESCE(amount, 0) > COALESCE(refunded_amount, 0)
+            """)).mappings().all()
+            for row in rows:
+                remaining = max(float(row["amount"] or 0) - float(row["refunded_amount"] or 0), 0.0)
+                if remaining <= 0:
+                    continue
+                try:
+                    stripe_client_service.refund_payment_intent(
+                        db,
+                        payment_intent_id=str(row["provider_payment_intent_id"]),
+                        amount_cents=int(round(remaining * 100)),
+                        reason="requested_by_customer",
+                        metadata={"source": "admin_test_activity_reset", "local_payment_id": str(row["id"])},
+                        idempotency_key=f"test-reset-payment-{row['id']}",
+                    )
+                    stripe_refunded += 1
+                except Exception as exc:
+                    stripe_refund_failures.append(f"{row['provider_payment_intent_id']}: {exc}")
+            if stripe_refund_failures:
+                raise RuntimeError("Stripe refund failed; no local data or files were deleted. " + " | ".join(stripe_refund_failures[:5]))
 
         file_ids = self._file_ids(db)
         storage_rows = db.query(StorageFile).filter(StorageFile.id.in_(file_ids)).all() if file_ids else []
@@ -139,6 +172,10 @@ class GenerationDataResetService:
             delete_all("background_jobs")
             delete_all("external_ai_jobs")
 
+            # Purchase/legal/cash dependencies must be removed before their parents.
+            delete_all("legal_acceptances")
+            delete_all("finance_withdrawals")
+
             # Financial and token ledger dependencies.
             delete_all("token_consumption_allocations")
             delete_all("generation_financial_records")
@@ -151,12 +188,13 @@ class GenerationDataResetService:
             delete_all("billing_events")
             delete_all("billing_customers")
 
-            # Generation records and optional gallery.
+            # Generation records and gallery. "tryon_jobs" is a legacy table kept
+            # for compatibility; it is not presented as a Try-On-only product anymore.
             delete_all("user_gallery_items")
             delete_all("generation_module_executions")
             delete_all("tryon_jobs")
 
-            if file_ids and self._table_exists(db, "storage_files"):
+            if delete_storage_files and file_ids and self._table_exists(db, "storage_files"):
                 result = db.execute(text("DELETE FROM storage_files WHERE id = ANY(:ids)"), {"ids": list(file_ids)})
                 deleted["storage_files"] = int(result.rowcount or 0)
 
@@ -174,6 +212,7 @@ class GenerationDataResetService:
             "deleted_storage_files": deleted_storage_files,
             "zeroed_users": zeroed_users,
             "stripe_subscriptions_cancelled": stripe_cancelled,
+            "stripe_payments_refunded": stripe_refunded,
             "completed_at": utc_now().isoformat(),
         }
 

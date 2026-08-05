@@ -55,12 +55,20 @@ class TokenBagResponse(BaseModel):
     infrastructure_capacity_per_token_usd: float
     commercial_profit_total_usd: float
     commercial_profit_released_usd: float
+    realized_extra_profit_usd: float
+    total_available_from_bag_usd: float
     protected_infrastructure_remaining_usd: float
     infrastructure_used_usd: float
     rounding_surplus_usd: float
     expiration_release_usd: float
     coupon_code: str | None = None
     plan_name: str | None = None
+    package_name: str | None = None
+    benefit_source: str | None = None
+    benefit_label: str | None = None
+    profit_discount_percent: float = 0.0
+    snapshot_version: int | None = None
+    snapshot_source: str | None = None
     payment_status: str | None = None
     refundable: bool
     refund_reason: str

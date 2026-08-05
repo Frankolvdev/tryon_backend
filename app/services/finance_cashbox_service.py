@@ -11,6 +11,7 @@ from app.models.generation_financial_record import GenerationFinancialRecord
 from app.models.system_setting import SystemSetting
 from app.models.token_consumption_allocation import TokenConsumptionAllocation
 from app.models.token_purchase import TokenPurchase
+from app.models.token_package import TokenPackage
 from app.models.token_value_lot import TokenValueLot
 from app.models.user import User
 from app.schemas.finance_cashbox import WithdrawalCreate
@@ -142,9 +143,18 @@ class FinanceCashboxService:
         try: purchase=db.get(TokenPurchase,int(lot.reference_id)) if lot.source in ('free_token_purchase','token_package','subscription','plan') and lot.reference_id else None
         except Exception: pass
         pstatus=getattr(purchase,'status',None)
+        package_name=m.get('package_name') or m.get('token_package_name')
+        if not package_name and purchase and getattr(purchase,'token_package_id',None):
+            package=db.get(TokenPackage,purchase.token_package_id)
+            package_name=getattr(package,'name',None)
         refundable=lot.status=='new' and consumed==0 and not lot.refunded_at and pstatus not in ('refunded','partially_refunded')
         reason='Reembolso total disponible: todavía no se ha usado ningún token de esta bolsa.' if refundable else ('No se puede reembolsar automáticamente porque esta bolsa ya se utilizó.' if consumed else 'No se puede reembolsar por el estado actual del pago o de la bolsa.')
-        return {'id':lot.id,'user_id':lot.user_id,'user_email':user_email,'source':lot.source,'source_label':m.get('source_label') or m.get('plan_name') or m.get('package_name') or lot.source,'reference_id':lot.reference_id,'status':lot.status,'original_tokens':lot.original_tokens,'remaining_tokens':lot.remaining_tokens,'consumed_tokens':consumed,'amount_paid_usd':float(lot.amount_paid_usd or 0),'effective_token_value_usd':float(snap['paid_value_per_token']),'normal_profit_per_token_usd':float(snap['normal_profit_per_token']),'effective_profit_per_token_usd':float(snap['effective_profit_per_token']),'infrastructure_capacity_per_token_usd':float(snap['infrastructure_capacity_per_token']),'commercial_profit_total_usd':float(total_profit),'commercial_profit_released_usd':float(released),'protected_infrastructure_remaining_usd':float(protected),'infrastructure_used_usd':float(infra_used),'rounding_surplus_usd':float(rounding),'expiration_release_usd':float(lot.released_expiration_usd or 0),'coupon_code':m.get('coupon_code'),'plan_name':m.get('plan_name'),'payment_status':str(pstatus) if pstatus else None,'refundable':refundable,'refund_reason':reason,'activated_at':lot.activated_at,'expires_at':lot.expires_at,'expired_at':lot.expired_at,'created_at':lot.created_at}
+        realized_extra=max(rounding,D('0'))
+        total_available=released+realized_extra+D(str(lot.released_expiration_usd or 0))
+        discount=D(str(m.get('profit_discount_percent') or 0))
+        benefit_source=m.get('benefit_source') or ('coupon' if m.get('coupon_code') else ('plan' if m.get('plan_name') else ('package' if package_name else None)))
+        benefit_label=m.get('benefit_label') or m.get('coupon_code') or m.get('plan_name') or package_name
+        return {'id':lot.id,'user_id':lot.user_id,'user_email':user_email,'source':lot.source,'source_label':m.get('source_label') or m.get('plan_name') or package_name or lot.source,'reference_id':lot.reference_id,'status':lot.status,'original_tokens':lot.original_tokens,'remaining_tokens':lot.remaining_tokens,'consumed_tokens':consumed,'amount_paid_usd':float(lot.amount_paid_usd or 0),'effective_token_value_usd':float(snap['paid_value_per_token']),'normal_profit_per_token_usd':float(snap['normal_profit_per_token']),'effective_profit_per_token_usd':float(snap['effective_profit_per_token']),'infrastructure_capacity_per_token_usd':float(snap['infrastructure_capacity_per_token']),'commercial_profit_total_usd':float(total_profit),'commercial_profit_released_usd':float(released),'realized_extra_profit_usd':float(realized_extra),'total_available_from_bag_usd':float(total_available),'protected_infrastructure_remaining_usd':float(protected),'infrastructure_used_usd':float(infra_used),'rounding_surplus_usd':float(rounding),'expiration_release_usd':float(lot.released_expiration_usd or 0),'coupon_code':m.get('coupon_code'),'plan_name':m.get('plan_name'),'package_name':package_name,'benefit_source':benefit_source,'benefit_label':benefit_label,'profit_discount_percent':float(discount),'snapshot_version':int(m.get('financial_snapshot_version')) if str(m.get('financial_snapshot_version') or '').isdigit() else None,'snapshot_source':snap.get('snapshot_source'),'payment_status':str(pstatus) if pstatus else None,'refundable':refundable,'refund_reason':reason,'activated_at':lot.activated_at,'expires_at':lot.expires_at,'expired_at':lot.expired_at,'created_at':lot.created_at}
     def list_bags(self,db,*,status=None,user_id=None,skip=0,limit=100):
         self.ensure_expirations(db); q=select(TokenValueLot,User.email).join(User,User.id==TokenValueLot.user_id)
         if status:q=q.where(TokenValueLot.status==status)

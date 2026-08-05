@@ -113,6 +113,7 @@ class GenerationResetRequest(BaseModel):
     confirmation: str = Field(min_length=1, max_length=100)
     delete_storage_files: bool = True
     cancel_stripe_subscriptions: bool = False
+    refund_stripe_payments: bool = False
 
 
 @router.get("/maintenance/generation-reset/preview")
@@ -134,6 +135,7 @@ def reset_generation_data(
         result = generation_data_reset_service.execute(
             db, confirmation=data.confirmation, delete_storage_files=data.delete_storage_files,
             cancel_stripe_subscriptions=data.cancel_stripe_subscriptions,
+            refund_stripe_payments=data.refund_stripe_payments,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
