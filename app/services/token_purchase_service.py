@@ -401,6 +401,7 @@ class TokenPurchaseService:
                 purchase_type="token_package" if token_package else "free_token_purchase",
                 item_id=token_package.id if token_package else None,
                 tokens_amount=tokens_amount + bonus_tokens,
+                user_id=user.id,
             )
             if not validation.valid or validation.final_amount is None:
                 raise ConflictException(validation.message)
@@ -659,6 +660,11 @@ class TokenPurchaseService:
             purchase.tokens_amount
             + purchase.bonus_tokens
         )
+
+        purchase_meta = self._parse_json(purchase.metadata_json)
+        coupon_code = purchase_meta.get("coupon_code")
+        if coupon_code:
+            billing_coupon_service.record_redemption(db, code=str(coupon_code), user_id=purchase.user_id)
 
         token_service.credit_tokens(
             db=db,

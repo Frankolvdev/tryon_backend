@@ -87,7 +87,8 @@ class BillingCouponService:
             valid_until=coupon.valid_until,
             is_active=coupon.is_active,
             applies_to=self._applies_to(self._parse(coupon.metadata_json)),
-            eligible_item_ids=self._parse(coupon.metadata_json).get("eligible_item_ids", []),
+            eligible_user_ids=self._parse(coupon.metadata_json).get("eligible_user_ids", []),
+            max_redemptions_per_user=self._parse(coupon.metadata_json).get("max_redemptions_per_user"),
             metadata=self._parse(coupon.metadata_json),
             created_at=coupon.created_at,
             updated_at=coupon.updated_at,
@@ -168,8 +169,8 @@ class BillingCouponService:
                 "name": data.name,
                 "description": data.description,
                 "discount_type": CouponDiscountType.PERCENTAGE.value,
-                "duration": data.duration.value,
-                "duration_in_months": data.duration_in_months,
+                "duration": "forever",
+                "duration_in_months": None,
                 "percentage_off": data.percentage_off,
                 "amount_off": None,
                 "currency": None,
@@ -178,14 +179,15 @@ class BillingCouponService:
                 "first_time_transaction_only": (
                     data.first_time_transaction_only
                 ),
-                "minimum_amount": data.minimum_amount,
+                "minimum_amount": None,
                 "valid_from": data.valid_from,
                 "valid_until": data.valid_until,
                 "is_active": data.is_active,
                 "metadata_json": self._serialize({
                     **data.metadata,
                     "applies_to": data.applies_to,
-                    "eligible_item_ids": data.eligible_item_ids,
+                    "eligible_user_ids": data.eligible_user_ids,
+                    "max_redemptions_per_user": data.max_redemptions_per_user,
                 }),
             },
         )
@@ -212,7 +214,6 @@ class BillingCouponService:
             "description",
             "max_redemptions",
             "first_time_transaction_only",
-            "minimum_amount",
             "valid_from",
             "valid_until",
             "is_active",
@@ -220,14 +221,16 @@ class BillingCouponService:
             if field in values:
                 final_data[field] = values[field]
 
-        if any(key in values for key in ["metadata", "applies_to", "eligible_item_ids"]):
+        if any(key in values for key in ["metadata", "applies_to", "eligible_user_ids", "max_redemptions_per_user"]):
             merged_metadata = self._parse(coupon.metadata_json)
             if "metadata" in values and values["metadata"] is not None:
                 merged_metadata.update(values["metadata"])
             if "applies_to" in values:
                 merged_metadata["applies_to"] = values["applies_to"]
-            if "eligible_item_ids" in values:
-                merged_metadata["eligible_item_ids"] = values["eligible_item_ids"] or []
+            if "eligible_user_ids" in values:
+                merged_metadata["eligible_user_ids"] = values["eligible_user_ids"] or []
+            if "max_redemptions_per_user" in values:
+                merged_metadata["max_redemptions_per_user"] = values["max_redemptions_per_user"]
             final_data["metadata_json"] = self._serialize(merged_metadata)
 
         updated = billing_coupon_repository.update(
@@ -400,6 +403,7 @@ class BillingCouponService:
         purchase_type: str | None = None,
         item_id: int | None = None,
         tokens_amount: int | None = None,
+        user_id: int | None = None,
     ) -> BillingCouponValidationResponse:
         coupon = billing_coupon_repository.get_by_code(
             db,
@@ -447,29 +451,20 @@ class BillingCouponService:
                 message="Coupon redemption limit was reached.",
             )
 
-        if (
-            coupon.minimum_amount is not None
-            and purchase_amount is not None
-            and purchase_amount < coupon.minimum_amount
-        ):
-            return BillingCouponValidationResponse(
-                valid=False,
-                coupon=self._response(coupon),
-                message=(
-                    "Purchase amount does not meet the coupon minimum."
-                ),
-            )
-
         metadata = self._parse(coupon.metadata_json)
         applies_to = self._applies_to(metadata)
-        eligible_item_ids = metadata.get("eligible_item_ids", [])
+        eligible_user_ids = metadata.get("eligible_user_ids", [])
+        max_per_user = metadata.get("max_redemptions_per_user")
+        user_redemptions = metadata.get("user_redemptions", {}) if isinstance(metadata.get("user_redemptions", {}), dict) else {}
         requested_scope = {"token_package": "token_packages", "free_token_purchase": "free_token_purchase"}.get(purchase_type)
 
         if requested_scope and requested_scope not in applies_to:
             return BillingCouponValidationResponse(valid=False, coupon=self._response(coupon), message="Coupon does not apply to this purchase type.")
 
-        if item_id is not None and eligible_item_ids and item_id not in eligible_item_ids:
-            return BillingCouponValidationResponse(valid=False, coupon=self._response(coupon), message="Coupon does not apply to the selected item.")
+        if eligible_user_ids and (user_id is None or user_id not in eligible_user_ids):
+            return BillingCouponValidationResponse(valid=False, coupon=self._response(coupon), message="Coupon is not available for this user.")
+        if max_per_user is not None and user_id is not None and int(user_redemptions.get(str(user_id), 0)) >= int(max_per_user):
+            return BillingCouponValidationResponse(valid=False, coupon=self._response(coupon), message="You have reached the usage limit for this coupon.")
 
 
         if coupon.discount_type != CouponDiscountType.PERCENTAGE.value:
@@ -521,6 +516,23 @@ class BillingCouponService:
             requested_discount_percent=requested_percent, effective_discount_percent=effective_percent,
             protected_discount_percent=protected_percent,
         )
+
+
+    def record_redemption(self, db: Session, *, code: str, user_id: int) -> None:
+        coupon = billing_coupon_repository.get_by_code(db, code.upper())
+        if not coupon:
+            return
+        metadata = self._parse(coupon.metadata_json)
+        user_redemptions = metadata.get("user_redemptions", {})
+        if not isinstance(user_redemptions, dict):
+            user_redemptions = {}
+        key = str(user_id)
+        user_redemptions[key] = int(user_redemptions.get(key, 0)) + 1
+        metadata["user_redemptions"] = user_redemptions
+        coupon.redemption_count = int(coupon.redemption_count or 0) + 1
+        coupon.metadata_json = self._serialize(metadata)
+        db.add(coupon)
+        db.flush()
 
 
 billing_coupon_service = BillingCouponService()

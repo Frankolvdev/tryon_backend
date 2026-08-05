@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
+from app.api.v1.guards.auth_guard import auth_guard
+from app.models.user import User
 from app.schemas.billing_coupon import (
     BillingCouponValidationRequest,
     BillingCouponValidationResponse,
@@ -20,6 +22,7 @@ router = APIRouter()
 def validate_billing_coupon(
     data: BillingCouponValidationRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(auth_guard),
 ):
     return billing_coupon_service.validate_code(
         db,
@@ -28,4 +31,5 @@ def validate_billing_coupon(
         purchase_type=data.purchase_type,
         item_id=data.item_id,
         tokens_amount=data.tokens_amount,
+        user_id=current_user.id,
     )

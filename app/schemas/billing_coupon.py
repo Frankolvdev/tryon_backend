@@ -21,8 +21,6 @@ class BillingCouponCreate(BaseModel):
     description: str | None = None
 
     discount_type: Literal[CouponDiscountType.PERCENTAGE] = CouponDiscountType.PERCENTAGE
-    duration: CouponDuration = CouponDuration.ONCE
-    duration_in_months: int | None = Field(default=None, ge=1)
 
     percentage_off: Decimal | None = Field(
         default=None,
@@ -32,14 +30,14 @@ class BillingCouponCreate(BaseModel):
 
     max_redemptions: int | None = Field(default=None, ge=1)
     first_time_transaction_only: bool = False
-    minimum_amount: Decimal | None = Field(default=None, ge=0)
 
     valid_from: datetime | None = None
     valid_until: datetime | None = None
 
     is_active: bool = True
     applies_to: list[Literal["token_packages", "free_token_purchase"]] = Field(default_factory=lambda: ["token_packages"])
-    eligible_item_ids: list[int] = Field(default_factory=list)
+    eligible_user_ids: list[int] = Field(default_factory=list)
+    max_redemptions_per_user: int | None = Field(default=None, ge=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -48,14 +46,6 @@ class BillingCouponCreate(BaseModel):
 
         if self.percentage_off is None:
             raise ValueError("percentage_off is required.")
-
-        if self.duration == CouponDuration.REPEATING:
-            if self.duration_in_months is None:
-                raise ValueError(
-                    "duration_in_months is required for repeating coupons."
-                )
-        else:
-            self.duration_in_months = None
 
         if (
             self.valid_from
@@ -79,12 +69,12 @@ class BillingCouponUpdate(BaseModel):
     description: str | None = None
     max_redemptions: int | None = Field(default=None, ge=1)
     first_time_transaction_only: bool | None = None
-    minimum_amount: Decimal | None = Field(default=None, ge=0)
     valid_from: datetime | None = None
     valid_until: datetime | None = None
     is_active: bool | None = None
     applies_to: list[Literal["token_packages", "free_token_purchase"]] | None = None
-    eligible_item_ids: list[int] | None = None
+    eligible_user_ids: list[int] | None = None
+    max_redemptions_per_user: int | None = Field(default=None, ge=1)
     metadata: dict[str, Any] | None = None
 
 
@@ -117,7 +107,8 @@ class BillingCouponResponse(BaseModel):
     is_active: bool
 
     applies_to: list[Literal["token_packages", "free_token_purchase"]]
-    eligible_item_ids: list[int]
+    eligible_user_ids: list[int]
+    max_redemptions_per_user: int | None
     metadata: dict[str, Any]
 
     created_at: datetime
