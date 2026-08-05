@@ -9,12 +9,24 @@ from app.services.token_value_ledger_service import token_value_ledger_service
 class GenerationFinanceService:
     def finalize(self,db:Session,*,execution_id:str,module_id:int|None,module_key:str,user_id:int|None,status:str,infrastructure_cost_usd:float|None,billing_breakdown:dict)->GenerationFinancialRecord:
         existing=db.execute(select(GenerationFinancialRecord).where(GenerationFinancialRecord.execution_id==execution_id)).scalar_one_or_none()
-        summary=token_value_ledger_service.execution_summary(db,execution_id) if user_id else {'tokens':0,'recognized_revenue_usd':0,'allocations':[],'traceability_status':'unavailable'}
+        summary=token_value_ledger_service.execution_summary(db,execution_id,expected_tokens=int(billing_breakdown.get('final_tokens') or 0)) if user_id else {'tokens':0,'recognized_revenue_usd':0,'allocations':[],'traceability_status':'unavailable'}
         cash_revenue=float(summary["recognized_revenue_usd"])
         infra=float(infrastructure_cost_usd or 0)
         normal_profit=float(summary.get("profit_without_benefits_usd") or 0)
         benefit=float(summary.get("customer_benefits_usd") or 0)
         profit_after_benefits=float(summary.get("company_profit_usd") or 0)
+        profit_applied=bool(billing_breakdown.get("profit_applied", True))
+        if not profit_applied:
+            normal_profit=0.0
+            benefit=0.0
+            profit_after_benefits=0.0
+            for bag in summary.get("allocations") or []:
+                bag["benefit_percent"]=0.0
+                bag["normal_profit_per_token_usd"]=0.0
+                bag["profit_per_token_after_benefit_usd"]=0.0
+                bag["profit_without_benefit_usd"]=0.0
+                bag["benefit_given_usd"]=0.0
+                bag["company_profit_usd"]=0.0
         rounding_surplus=max(float(billing_breakdown.get("profit_rounding_surplus_usd") or 0),0.0)
         company_profit=profit_after_benefits+rounding_surplus
         economic_total=infra+company_profit
@@ -51,12 +63,29 @@ class GenerationFinanceService:
         except (TypeError, ValueError):
             breakdown = {}
 
-        summary = token_value_ledger_service.execution_summary(db, record.execution_id)
+        expected_tokens = int(breakdown.get("final_tokens") or record.tokens_consumed or 0)
+        summary = token_value_ledger_service.execution_summary(
+            db, record.execution_id, expected_tokens=expected_tokens
+        )
         if summary.get("traceability_status") == "unavailable":
             return
 
         infra = float(record.infrastructure_cost_usd or 0)
         profit_after_benefits = float(summary.get("company_profit_usd") or 0)
+        profit_applied = bool(breakdown.get("profit_applied", True))
+        normal_profit = float(summary.get("profit_without_benefits_usd") or 0)
+        benefit = float(summary.get("customer_benefits_usd") or 0)
+        if not profit_applied:
+            normal_profit = 0.0
+            benefit = 0.0
+            profit_after_benefits = 0.0
+            for bag in summary.get("allocations") or []:
+                bag["benefit_percent"] = 0.0
+                bag["normal_profit_per_token_usd"] = 0.0
+                bag["profit_per_token_after_benefit_usd"] = 0.0
+                bag["profit_without_benefit_usd"] = 0.0
+                bag["benefit_given_usd"] = 0.0
+                bag["company_profit_usd"] = 0.0
         rounding_surplus = max(
             float(
                 breakdown.get("rounding_surplus_for_company_usd")
@@ -76,10 +105,10 @@ class GenerationFinanceService:
                     float(summary.get("recognized_revenue_usd") or 0), 6
                 ),
                 "profit_without_benefits_usd": round(
-                    float(summary.get("profit_without_benefits_usd") or 0), 6
+                    normal_profit, 6
                 ),
                 "benefit_given_to_customer_usd": round(
-                    float(summary.get("customer_benefits_usd") or 0), 6
+                    benefit, 6
                 ),
                 "profit_after_customer_benefits_usd": round(
                     profit_after_benefits, 6

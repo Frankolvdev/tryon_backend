@@ -44,7 +44,7 @@ class TokenValueLedgerService:
             db.add(allocation); remaining-=give
         db.flush()
 
-    def execution_summary(self, db:Session, execution_id:str) -> dict:
+    def execution_summary(self, db:Session, execution_id:str, expected_tokens:int|None=None) -> dict:
         rows=db.execute(
             select(TokenConsumptionAllocation,TokenValueLot)
             .join(TokenValueLot,TokenValueLot.id==TokenConsumptionAllocation.lot_id)
@@ -108,6 +108,66 @@ class TokenValueLedgerService:
             current["benefit_given_usd"]+=float(row_discount)
             current["company_profit_usd"]+=float(row_net)
             current["cash_value_at_purchase_usd"]+=float(value*net)
+        # Historical/cancelled executions may have all reservation allocations marked
+        # as reversed even though billing finalized with a minimum non-zero token charge.
+        # Rebuild a read-only FIFO presentation from the original rows; do not mutate lots.
+        expected=max(int(expected_tokens or 0),0)
+        if tokens == 0 and expected > 0 and rows:
+            remaining_expected=expected
+            grouped={}
+            for allocation,lot in rows:
+                if remaining_expected<=0:
+                    break
+                original=max(int(allocation.tokens_allocated or 0),0)
+                take=min(original,remaining_expected)
+                if take<=0:
+                    continue
+                try:
+                    metadata=json.loads(lot.metadata_json or "{}")
+                except (TypeError,ValueError):
+                    metadata={}
+                normal_per_token=Decimal(str(metadata.get("normal_profit_per_token_usd") or 0))
+                discount_percent=Decimal(str(metadata.get("profit_discount_percent") or 0))
+                effective_per_token=Decimal(str(
+                    metadata.get("effective_profit_per_token_usd")
+                    if metadata.get("effective_profit_per_token_usd") is not None
+                    else normal_per_token*(Decimal("1")-discount_percent/Decimal("100"))
+                ))
+                value=Decimal(allocation.effective_token_value_usd or 0)
+                current=grouped.get(lot.id)
+                if current is None:
+                    current={
+                        "token_bag_id":lot.id,
+                        "source":lot.source,
+                        "source_label":metadata.get("source_label") or metadata.get("source") or lot.source,
+                        "reference_id":lot.reference_id,
+                        "tokens_used":0,
+                        "benefit_percent":float(discount_percent),
+                        "normal_profit_per_token_usd":float(normal_per_token),
+                        "profit_per_token_after_benefit_usd":float(effective_per_token),
+                        "profit_without_benefit_usd":0.0,
+                        "benefit_given_usd":0.0,
+                        "company_profit_usd":0.0,
+                        "effective_token_value_usd":float(value),
+                        "cash_value_at_purchase_usd":0.0,
+                        "coupon_code":metadata.get("coupon_code"),
+                        "plan_name":metadata.get("plan_name"),
+                    }
+                    grouped[lot.id]=current
+                row_normal=normal_per_token*take
+                row_net=effective_per_token*take
+                current["tokens_used"]+=take
+                current["profit_without_benefit_usd"]+=float(row_normal)
+                current["benefit_given_usd"]+=float(max(Decimal("0"),row_normal-row_net))
+                current["company_profit_usd"]+=float(row_net)
+                current["cash_value_at_purchase_usd"]+=float(value*take)
+                tokens+=take
+                cash_revenue+=value*take
+                normal_profit+=row_normal
+                discount_given+=max(Decimal("0"),row_normal-row_net)
+                net_profit+=row_net
+                legacy=legacy or lot.source=="legacy_untraced_balance"
+                remaining_expected-=take
         allocations=list(grouped.values())
         return {
             "tokens":tokens,
