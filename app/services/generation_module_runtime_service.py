@@ -808,6 +808,11 @@ class GenerationModuleRuntimeService:
                         billing_breakdown=item.billing_breakdown,
                     )
                     db.commit()
+                    # Persist the complete pending snapshot immediately. The normal
+                    # outer finalizer also saves it, but doing it here prevents a
+                    # status poll from observing the lock before the exact pending
+                    # totals have reached the execution store.
+                    generation_module_execution_store_service.save(item.model_copy(deep=True))
                     return
                 final_tokens = int(final_bag_quote["tokens"])
                 final_price = float(final_bag_quote["charged_usd"])
