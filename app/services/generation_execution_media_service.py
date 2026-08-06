@@ -22,14 +22,28 @@ class GenerationExecutionMediaService:
         allow_locked: bool = False,
     ) -> GenerationModuleExecutionResponse:
         item = execution.model_copy(deep=True)
-        locked = bool(item.result_locked or (item.billing_breakdown or {}).get("result_locked"))
+        billing = dict(item.billing_breakdown or {})
+        locked = bool(item.result_locked or billing.get("result_locked"))
+        billing_finalizing = bool(
+            item.status == "completed"
+            and not billing.get("finalized")
+            and not billing.get("settlement_pending")
+        )
         item.result_locked = locked
-        item.billing_access_status = "payment_pending" if locked else "unlocked"
-        item.estimated_pending_tokens = (item.billing_breakdown or {}).get("estimated_pending_tokens")
+        item.billing_access_status = (
+            "finalizing"
+            if billing_finalizing
+            else ("payment_pending" if locked else "unlocked")
+        )
+        item.estimated_pending_tokens = billing.get("estimated_pending_tokens")
 
         item.inputs = self._hydrate_value(db, item.inputs)
         item.context = self._hydrate_value(db, item.context)
-        if locked and not allow_locked:
+        # A provider can finish milliseconds before dynamic billing. During that
+        # narrow window the execution is technically completed, but the result
+        # must never receive readable URLs until billing decides whether it is
+        # unlocked or payment-pending. Admin APIs keep their explicit access.
+        if (locked or billing_finalizing) and not allow_locked:
             item.outputs = self._lock_value(item.outputs)
             item.steps = [
                 step.model_copy(update={"outputs": self._lock_value(step.outputs)}, deep=True)
