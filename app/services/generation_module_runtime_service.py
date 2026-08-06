@@ -6,7 +6,6 @@ import io
 import json
 import threading
 import time
-import math
 import tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -714,11 +713,33 @@ class GenerationModuleRuntimeService:
                 except ConflictException:
                     if item.status != "completed":
                         raise
-                    estimated_total_tokens = max(
-                        int(math.ceil(float(infrastructure_cost or 0) / max(float(token_value or 0), 0.000000001))),
-                        int(item.tokens_charged or 0),
+
+                    # The provider cost already happened, but the user's funded bags
+                    # cannot cover it yet. Keep the existing FIFO/discount algorithms
+                    # untouched and store a pending financial snapshot. The exact final
+                    # token count will be recalculated from the real bags available when
+                    # the user retries settlement.
+                    (
+                        estimated_total_tokens,
+                        estimated_final_price,
+                        estimated_profit_usd,
+                        estimated_rounding_surplus_usd,
+                    ) = pricing_service.token_charge_for_infrastructure(
+                        db,
+                        infrastructure_cost_usd=float(infrastructure_cost or 0),
+                        desired_profit_per_token_usd=profit_per_token_usd,
+                        apply_profit=bool(policy.apply_profit),
                     )
-                    estimated_pending_tokens = max(estimated_total_tokens - int(item.tokens_charged or 0), 1)
+                    charged_tokens = int(item.tokens_charged or 0)
+                    estimated_total_tokens = max(int(estimated_total_tokens), charged_tokens)
+                    estimated_pending_tokens = max(estimated_total_tokens - charged_tokens, 1)
+                    initial_estimated_tokens = int(
+                        pending_snapshot.get("estimated_tokens_before_execution")
+                        or item.estimated_tokens_before_execution
+                        or charged_tokens
+                        or 0
+                    )
+
                     item.result_locked = True
                     item.billing_access_status = "payment_pending"
                     item.estimated_pending_tokens = estimated_pending_tokens
@@ -729,7 +750,19 @@ class GenerationModuleRuntimeService:
                         "settlement_reason": "insufficient_funded_capacity",
                         "result_locked": True,
                         "billing_access_status": "payment_pending",
+                        "estimated_tokens_before_execution": initial_estimated_tokens,
+                        "tokens_actually_charged": charged_tokens,
+                        "final_tokens": charged_tokens,
+                        "estimated_final_tokens": estimated_total_tokens,
                         "estimated_pending_tokens": estimated_pending_tokens,
+                        "pending_tokens_not_charged": estimated_pending_tokens,
+                        "extra_tokens_debited": 0,
+                        "tokens_refunded": 0,
+                        "estimated_final_price_usd": round(float(estimated_final_price or 0), 9),
+                        "estimated_profit_usd": round(float(estimated_profit_usd or 0), 9),
+                        "estimated_rounding_surplus_usd": round(
+                            float(estimated_rounding_surplus_usd or 0), 9
+                        ),
                         "settlement_target_infrastructure_cost_usd": round(float(infrastructure_cost or 0), 9),
                         "provider": provider,
                         "gpu_key": gpu_key,
@@ -748,6 +781,7 @@ class GenerationModuleRuntimeService:
                         "infrastructure_charge_applied": bool(policy.charge_infrastructure),
                         "billing_policy_key": policy_key,
                         "termination_status": item.status,
+                        "token_charge_basis": "pending_exact_fifo_recalculation",
                     }
                     item.logs.append(GenerationModuleExecutionLog(
                         timestamp=utc_now(),
@@ -757,6 +791,22 @@ class GenerationModuleRuntimeService:
                             "the funded capacity of the user's token bags."
                         ),
                     ))
+
+                    # Create/update the same financial record immediately. This makes the
+                    # provider cost visible in Cashbox and Generation Finances while the
+                    # unpaid token difference remains explicit. A successful later
+                    # settlement updates this exact record and adds allocations from the
+                    # real FIFO bags used at that time.
+                    generation_finance_service.finalize(
+                        db,
+                        execution_id=str(item.id),
+                        module_id=item.module_id,
+                        module_key=item.module_key,
+                        user_id=item.user_id,
+                        status=item.status,
+                        infrastructure_cost_usd=infrastructure_cost,
+                        billing_breakdown=item.billing_breakdown,
+                    )
                     db.commit()
                     return
                 final_tokens = int(final_bag_quote["tokens"])
