@@ -24,9 +24,12 @@ class GenerationExecutionMediaService:
         item = execution.model_copy(deep=True)
         billing = dict(item.billing_breakdown or {})
         locked = bool(item.result_locked or billing.get("result_locked"))
+        # Only a snapshot that explicitly says finalized=False is still in the
+        # billing window. Historical executions may not contain this field and
+        # must remain readable exactly as before.
         billing_finalizing = bool(
             item.status == "completed"
-            and not billing.get("finalized")
+            and billing.get("finalized") is False
             and not billing.get("settlement_pending")
         )
         item.result_locked = locked
@@ -36,6 +39,14 @@ class GenerationExecutionMediaService:
             else ("payment_pending" if locked else "unlocked")
         )
         item.estimated_pending_tokens = billing.get("estimated_pending_tokens")
+
+        # Keep the existing AppWeb polling contract intact. The persisted row may
+        # already be completed because the provider finished, but the public API
+        # temporarily reports it as running until billing reaches its definitive
+        # unlocked/payment_pending state. No database state is rewritten.
+        if billing_finalizing and not allow_locked:
+            item.status = "running"
+            item.progress = min(int(item.progress or 0), 99)
 
         item.inputs = self._hydrate_value(db, item.inputs)
         item.context = self._hydrate_value(db, item.context)
