@@ -69,15 +69,46 @@ class TokenValueLedgerService:
         snapshot=dict(metadata or {})
         normal_profit=self._decimal(snapshot.get("normal_profit_per_token_usd"))
         discount=self._decimal(snapshot.get("profit_discount_percent"))
-        effective_profit=self._decimal(
+        requested_effective_profit=self._decimal(
             snapshot.get("effective_profit_per_token_usd"),
             normal_profit*(Decimal("1")-discount/Decimal("100")),
         )
-        effective_profit=max(min(effective_profit,paid_per_token),Decimal("0"))
+
+        # Commercial discounts may consume profit, never infrastructure.
+        # New commercial snapshots include the undiscounted token value and the
+        # normal protected profit. Their difference is the fixed amount reserved
+        # for AI for every token in the lot, regardless of coupon/plan/promotion.
+        token_value=self._decimal(snapshot.get("token_value_usd"))
+        has_protected_terms=(token_value>0 and normal_profit>=0 and token_value>normal_profit)
+        if has_protected_terms:
+            protected_capacity=token_value-normal_profit
+            if paid_per_token+Decimal("0.000000001")<protected_capacity:
+                raise ConflictException(
+                    "The paid amount does not cover the protected AI infrastructure reserve."
+                )
+            maximum_real_profit=max(paid_per_token-protected_capacity,Decimal("0"))
+            effective_profit=max(
+                min(requested_effective_profit,maximum_real_profit),
+                Decimal("0"),
+            )
+            infrastructure_capacity=protected_capacity
+        else:
+            # Compatibility for non-commercial and legacy credits without a
+            # complete protected commercial snapshot.
+            effective_profit=max(
+                min(requested_effective_profit,paid_per_token),
+                Decimal("0"),
+            )
+            infrastructure_capacity=max(paid_per_token-effective_profit,Decimal("0"))
+
         snapshot.update({
             "financial_snapshot_version": 2,
             "effective_paid_token_value_usd": str(paid_per_token),
-            "infrastructure_capacity_per_token_usd": str(max(paid_per_token-effective_profit,Decimal("0"))),
+            "requested_effective_profit_per_token_usd": str(max(requested_effective_profit,Decimal("0"))),
+            "effective_profit_per_token_usd": str(effective_profit),
+            "infrastructure_capacity_per_token_usd": str(infrastructure_capacity),
+            "infrastructure_reserve_source": "pricing_rule_fixed" if has_protected_terms else "legacy_paid_minus_profit",
+            "profit_adjusted_to_protect_infrastructure": bool(has_protected_terms and effective_profit<max(requested_effective_profit,Decimal("0"))),
         })
         db.add(TokenValueLot(user_id=user_id,source=source,reference_id=reference_id,original_tokens=tokens,remaining_tokens=tokens,amount_paid_usd=Decimal(str(amount)),effective_token_value_usd=paid_per_token,metadata_json=json.dumps(snapshot,ensure_ascii=False,default=str)))
         db.flush()
