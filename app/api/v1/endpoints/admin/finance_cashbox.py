@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.models.user import User
+from app.common.exceptions import ConflictException
 from app.schemas.finance_cashbox import *
 from app.services.audit_service import audit_service
 from app.services.finance_cashbox_service import finance_cashbox_service
@@ -25,3 +26,9 @@ def create_withdrawal(data:WithdrawalCreate,request:Request,db:Session=Depends(g
 def expiry(db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)): return finance_cashbox_service.expiration_settings(db)
 @router.put('/token-bag-expiration',response_model=ExpirationSettingsResponse)
 def update_expiry(data:ExpirationSettingsUpdate,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)): result=finance_cashbox_service.set_expiration_settings(db,enabled=data.enabled,days=data.days); db.commit(); return result
+@router.post('/token-bags/{bag_id}/simulate-expiration',response_model=TokenBagExpirationSimulationResponse)
+def simulate_expiration(bag_id:int,data:TokenBagExpirationSimulationRequest,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+ if not data.confirm: raise ConflictException('Explicit confirmation is required to simulate expiration.')
+ result=finance_cashbox_service.simulate_expiration(db,bag_id)
+ audit_service.create_log(db,actor_user_id=current_admin.id,action='token_bag_expiration_simulated',entity_type='token_value_lot',entity_id=str(bag_id),description=f'Expiration was simulated for token bag #{bag_id}.',ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
+ db.commit(); return result

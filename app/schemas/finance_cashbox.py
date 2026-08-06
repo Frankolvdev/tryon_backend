@@ -99,6 +99,21 @@ class TokenBagDetailResponse(BaseModel):
 class ExpirationSettingsResponse(BaseModel):
     enabled: bool
     days: int
+    simulation_enabled: bool = False
+
+class TokenBagExpirationSimulationRequest(BaseModel):
+    confirm: bool = False
+
+class TokenBagExpirationSimulationResponse(BaseModel):
+    bag_id: int
+    previous_status: str
+    current_status: str
+    expired_tokens: int
+    commercial_profit_released_usd: float
+    infrastructure_reserve_released_usd: float
+    total_available_from_bag_usd: float
+    expires_at: datetime | None
+    expired_at: datetime
 
 class ExpirationSettingsUpdate(BaseModel):
     enabled: bool = True

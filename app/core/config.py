@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     TEST_BILLING_USER_ID: int | None = None
     TEST_BILLING_EXECUTION_ID: str | None = None
 
+    # Non-production, admin-only switch for testing the complete token-bag
+    # expiration accounting flow against one explicitly selected bag.
+    TEST_FORCE_TOKEN_BAG_EXPIRATION: bool = False
+
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
     SMTP_USERNAME: str = ""

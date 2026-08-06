@@ -4,8 +4,9 @@ from datetime import timedelta
 from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
-from app.common.exceptions import ConflictException, NotFoundException
+from app.common.exceptions import ConflictException, ForbiddenException, NotFoundException
 from app.common.time import utc_now
+from app.core.config import settings
 from app.models.finance_withdrawal import FinanceWithdrawal
 from app.models.generation_financial_record import GenerationFinancialRecord
 from app.models.system_setting import SystemSetting
@@ -16,6 +17,7 @@ from app.models.token_value_lot import TokenValueLot
 from app.models.user import User
 from app.schemas.finance_cashbox import WithdrawalCreate
 from app.services.token_value_ledger_service import token_value_ledger_service
+from app.services.token_bag_expiration_accounting import calculate_token_bag_expiration_amounts
 
 D=Decimal
 class FinanceCashboxService:
@@ -25,7 +27,15 @@ class FinanceCashboxService:
         except Exception: return {}
     def expiration_settings(self,db):
         rows={x.key:x for x in db.execute(select(SystemSetting).where(SystemSetting.key.in_([self.EXPIRY_ENABLED,self.EXPIRY_DAYS]))).scalars()}
-        return {'enabled': bool(rows.get(self.EXPIRY_ENABLED).value_boolean) if rows.get(self.EXPIRY_ENABLED) else True,'days': int(rows.get(self.EXPIRY_DAYS).value_integer or 730) if rows.get(self.EXPIRY_DAYS) else 730}
+        simulation_enabled=(
+            settings.APP_ENV.lower() not in {'production','prod'}
+            and bool(settings.TEST_FORCE_TOKEN_BAG_EXPIRATION)
+        )
+        return {
+            'enabled': bool(rows.get(self.EXPIRY_ENABLED).value_boolean) if rows.get(self.EXPIRY_ENABLED) else True,
+            'days': int(rows.get(self.EXPIRY_DAYS).value_integer or 730) if rows.get(self.EXPIRY_DAYS) else 730,
+            'simulation_enabled': simulation_enabled,
+        }
     def set_expiration_settings(self,db,*,enabled,days):
         specs=[(self.EXPIRY_ENABLED,'Caducidad de bolsas habilitada','boolean',enabled),(self.EXPIRY_DAYS,'Caducidad de bolsas en días','integer',days)]
         for key,label,typ,val in specs:
@@ -35,22 +45,73 @@ class FinanceCashboxService:
             else: row.value_integer=int(val)
             db.add(row)
         db.flush(); return self.expiration_settings(db)
+    def _expire_lot(self,db,lot,*,expired_at):
+        if lot.status in ('expired','refunded') or int(lot.remaining_tokens or 0)<=0:
+            return None
+        snap=token_value_ledger_service._snapshot_for_lot(lot)
+        expired_tokens=int(lot.remaining_tokens or 0)
+        amounts=calculate_token_bag_expiration_amounts(
+            original_tokens=int(lot.original_tokens or 0),
+            remaining_tokens=expired_tokens,
+            infrastructure_capacity_per_token_usd=snap['infrastructure_capacity_per_token'],
+            effective_profit_per_token_usd=snap['effective_profit_per_token'],
+            commercial_profit_released=bool(lot.commercial_profit_released),
+            released_commercial_profit_usd=D(str(lot.released_commercial_profit_usd or 0)),
+        )
+        # Commercial profit and unused infrastructure are separate buckets.
+        # Mixing both into released_expiration_usd makes Caja add the profit twice
+        # when a never-used bag expires.
+        lot.released_commercial_profit_usd=amounts.commercial_profit_released_usd
+        lot.commercial_profit_released=True
+        lot.released_expiration_usd=amounts.infrastructure_reserve_released_usd
+        infrastructure_release=amounts.infrastructure_reserve_released_usd
+        lot.remaining_tokens=0
+        lot.status='expired'
+        lot.expired_at=expired_at
+        db.add(lot)
+        return {
+            'expired_tokens': expired_tokens,
+            'commercial_profit_released_usd': D(str(lot.released_commercial_profit_usd or 0)),
+            'infrastructure_reserve_released_usd': infrastructure_release,
+        }
+
     def ensure_expirations(self,db):
         cfg=self.expiration_settings(db); now=utc_now()
         lots=db.execute(select(TokenValueLot).where(TokenValueLot.remaining_tokens>0,TokenValueLot.status.notin_(['expired','refunded']))).scalars().all()
         changed=0
         for lot in lots:
-            if cfg['enabled'] and not lot.expires_at: lot.expires_at=lot.created_at+timedelta(days=cfg['days']); db.add(lot)
+            if cfg['enabled'] and not lot.expires_at:
+                lot.expires_at=lot.created_at+timedelta(days=cfg['days']); db.add(lot)
             if cfg['enabled'] and lot.expires_at and lot.expires_at<=now:
-                snap=token_value_ledger_service._snapshot_for_lot(lot)
-                release=snap['infrastructure_capacity_per_token']*lot.remaining_tokens
-                if not lot.commercial_profit_released:
-                    release += snap['effective_profit_per_token']*lot.remaining_tokens
-                    lot.released_commercial_profit_usd=(snap['effective_profit_per_token']*lot.original_tokens).quantize(D('0.000001'))
-                lot.released_expiration_usd=D(str(release)); lot.remaining_tokens=0; lot.status='expired'; lot.expired_at=now
-                lot.commercial_profit_released=True
-                db.add(lot); changed+=1
+                if self._expire_lot(db,lot,expired_at=now): changed+=1
         if changed: db.flush()
+
+    def simulate_expiration(self,db,bag_id):
+        if settings.APP_ENV.lower() in {'production','prod'} or not settings.TEST_FORCE_TOKEN_BAG_EXPIRATION:
+            raise ForbiddenException('Token bag expiration simulation is disabled.')
+        lot=db.get(TokenValueLot,bag_id)
+        if not lot: raise NotFoundException('Token bag not found.')
+        if lot.status in ('expired','refunded'):
+            raise ConflictException('This token bag cannot be simulated in its current status.')
+        if int(lot.remaining_tokens or 0)<=0:
+            raise ConflictException('An exhausted token bag has no remaining tokens to expire.')
+        previous_status=str(lot.status)
+        now=utc_now()
+        lot.expires_at=now
+        result=self._expire_lot(db,lot,expired_at=now)
+        db.flush()
+        bag=self._bag_values(db,lot)
+        return {
+            'bag_id': lot.id,
+            'previous_status': previous_status,
+            'current_status': lot.status,
+            'expired_tokens': int(result['expired_tokens']),
+            'commercial_profit_released_usd': float(result['commercial_profit_released_usd']),
+            'infrastructure_reserve_released_usd': float(result['infrastructure_reserve_released_usd']),
+            'total_available_from_bag_usd': float(bag['total_available_from_bag_usd']),
+            'expires_at': lot.expires_at,
+            'expired_at': lot.expired_at,
+        }
     def _generation_rows_for_bag(self,db,lot):
         """Return one consolidated row per execution for this bag.
 
@@ -126,6 +187,17 @@ class FinanceCashboxService:
         infra_used=sum(D(str(x['infrastructure_cost_usd'])) for x in generation_rows)
         rounding=sum(D(str(x['rounding_surplus_usd'])) for x in generation_rows)
         total_profit=snap['effective_profit_per_token']*lot.original_tokens
+        # Repair only the unmistakable historical double-count signature: the
+        # expiration bucket can never exceed the complete AI reserve of the bag.
+        # This leaves valid partially-used historical bags untouched.
+        if lot.status=='expired':
+            max_expiration_release=(
+                snap['infrastructure_capacity_per_token']*int(lot.original_tokens or 0)
+            ).quantize(D('0.000001'))
+            current_expiration_release=D(str(lot.released_expiration_usd or 0))
+            if current_expiration_release>max_expiration_release:
+                lot.released_expiration_usd=max_expiration_release
+                db.add(lot); db.flush()
         # Repair both modern and historical bags.  Older flows sometimes set the
         # boolean flag but left the released amount at zero.
         released_amount=D(str(lot.released_commercial_profit_usd or 0))
