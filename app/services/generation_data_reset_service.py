@@ -81,6 +81,9 @@ class GenerationDataResetService:
             "background_jobs": self._count(db, "background_jobs"),
             "user_gallery_items": self._count(db, "user_gallery_items"),
             "finance_withdrawals": self._count(db, "finance_withdrawals"),
+            "infrastructure_funding_movements": self._count(db, "infrastructure_funding_movements"),
+            "infrastructure_funding_allocations": self._count(db, "infrastructure_funding_allocations"),
+            "infrastructure_provider_credit_releases": self._count(db, "infrastructure_provider_credit_releases"),
             "legal_acceptances": self._count(db, "legal_acceptances"),
             "storage_files": len(file_ids),
             "tokens_to_zero": token_balance,
@@ -175,6 +178,9 @@ class GenerationDataResetService:
             # Purchase/legal/cash dependencies must be removed before their parents.
             delete_all("legal_acceptances")
             delete_all("finance_withdrawals")
+            delete_all("infrastructure_provider_credit_releases")
+            delete_all("infrastructure_funding_allocations")
+            delete_all("infrastructure_funding_movements")
 
             # Financial and token ledger dependencies.
             delete_all("token_consumption_allocations")

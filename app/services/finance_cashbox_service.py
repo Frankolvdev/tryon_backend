@@ -8,6 +8,11 @@ from app.common.exceptions import ConflictException, ForbiddenException, NotFoun
 from app.common.time import utc_now
 from app.core.config import settings
 from app.models.finance_withdrawal import FinanceWithdrawal
+from app.models.infrastructure_funding import (
+    InfrastructureFundingMovement,
+    InfrastructureFundingAllocation,
+    InfrastructureProviderCreditRelease,
+)
 from app.models.generation_financial_record import GenerationFinancialRecord
 from app.models.system_setting import SystemSetting
 from app.models.token_consumption_allocation import TokenConsumptionAllocation
@@ -15,9 +20,13 @@ from app.models.token_purchase import TokenPurchase
 from app.models.token_package import TokenPackage
 from app.models.token_value_lot import TokenValueLot
 from app.models.user import User
-from app.schemas.finance_cashbox import WithdrawalCreate
+from app.schemas.finance_cashbox import WithdrawalCreate, InfrastructureFundingCreate
 from app.services.token_value_ledger_service import token_value_ledger_service
 from app.services.token_bag_expiration_accounting import calculate_token_bag_expiration_amounts
+from app.services.infrastructure_cashbox_accounting import (
+    calculate_infrastructure_funding_state,
+    calculate_expiration_infrastructure_split,
+)
 
 D=Decimal
 class FinanceCashboxService:
@@ -45,6 +54,148 @@ class FinanceCashboxService:
             else: row.value_integer=int(val)
             db.add(row)
         db.flush(); return self.expiration_settings(db)
+
+    def _funding_rows_for_lot(self, db: Session, lot_id: int):
+        return db.execute(
+            select(InfrastructureFundingAllocation, InfrastructureFundingMovement)
+            .join(
+                InfrastructureFundingMovement,
+                InfrastructureFundingMovement.id == InfrastructureFundingAllocation.movement_id,
+            )
+            .where(InfrastructureFundingAllocation.lot_id == lot_id)
+            .order_by(
+                InfrastructureFundingAllocation.created_at,
+                InfrastructureFundingAllocation.id,
+            )
+        ).all()
+
+    def _infrastructure_used_by_provider(self, db: Session, lot: TokenValueLot) -> dict[str, D]:
+        result: dict[str, D] = {}
+        for row in self._generation_rows_for_bag(db, lot):
+            provider = str(row.get("provider") or "unknown").lower()
+            result[provider] = result.get(provider, D("0")) + D(
+                str(row.get("infrastructure_cost_usd") or 0)
+            )
+        return result
+
+
+
+    def _funding_state_for_lot(
+        self,
+        db: Session,
+        lot: TokenValueLot,
+        *,
+        protected: D | None = None,
+        infrastructure_used: D | None = None,
+    ) -> dict:
+        if protected is None:
+            snap = token_value_ledger_service._snapshot_for_lot(lot)
+            protected = (
+                snap["infrastructure_capacity_per_token"]
+                * max(int(lot.remaining_tokens or 0), 0)
+            )
+
+        funding_rows = self._funding_rows_for_lot(db, lot.id)
+        funded_by_provider: dict[str, D] = {}
+        for allocation, movement in funding_rows:
+            provider = str(movement.provider or "unknown").lower()
+            funded_by_provider[provider] = funded_by_provider.get(provider, D("0")) + D(
+                str(allocation.amount_usd or 0)
+            )
+
+        used_by_provider = self._infrastructure_used_by_provider(db, lot)
+        state = calculate_infrastructure_funding_state(
+            protected_reserve_usd=D(str(protected or 0)),
+            infrastructure_used_by_provider_usd=used_by_provider,
+            funded_by_provider_usd=funded_by_provider,
+        )
+        released_credit = db.execute(
+            select(
+                func.coalesce(
+                    func.sum(InfrastructureProviderCreditRelease.amount_usd), 0
+                )
+            ).where(InfrastructureProviderCreditRelease.lot_id == lot.id)
+        ).scalar_one()
+        return {
+            "funded_usd": state.funded_usd,
+            "unfunded_usd": state.unfunded_usd,
+            "unfunded_cost_usd": state.unfunded_provider_cost_usd,
+            "unfunded_future_reserve_usd": state.unfunded_future_reserve_usd,
+            "provider_excess_credit_usd": state.provider_excess_credit_usd,
+            "provider_credit_released_usd": D(str(released_credit or 0)),
+            "funded_by_provider": funded_by_provider,
+            "used_by_provider": used_by_provider,
+            "funding_rows": funding_rows,
+        }
+
+
+    def _split_expiration_infrastructure(
+        self,
+        db: Session,
+        lot: TokenValueLot,
+        *,
+        protected_reserve: D,
+    ) -> dict:
+        """Split expiring reserve into bank cash and already-funded provider credit."""
+        protected = max(D(str(protected_reserve or 0)), D("0")).quantize(D("0.000001"))
+        if protected <= 0:
+            return {
+                "cash_release_usd": D("0"),
+                "provider_credit_release_usd": D("0"),
+                "provider_credit_by_provider": {},
+            }
+
+        existing = db.execute(
+            select(InfrastructureProviderCreditRelease).where(
+                InfrastructureProviderCreditRelease.lot_id == lot.id
+            )
+        ).scalars().all()
+        if existing:
+            by_provider: dict[str, D] = {}
+            for row in existing:
+                by_provider[row.provider] = by_provider.get(row.provider, D("0")) + D(
+                    str(row.amount_usd or 0)
+                )
+            credit = min(sum(by_provider.values()), protected)
+            return {
+                "cash_release_usd": max(protected - credit, D("0")),
+                "provider_credit_release_usd": credit,
+                "provider_credit_by_provider": by_provider,
+            }
+
+        funding_rows = self._funding_rows_for_lot(db, lot.id)
+        split = calculate_expiration_infrastructure_split(
+            protected_reserve_usd=protected,
+            infrastructure_used_by_provider_usd=self._infrastructure_used_by_provider(db, lot),
+            funding_allocations=[
+                (
+                    allocation.id,
+                    str(movement.provider or "unknown").lower(),
+                    D(str(allocation.amount_usd or 0)),
+                )
+                for allocation, movement in funding_rows
+            ],
+        )
+        by_provider: dict[str, D] = {}
+        for release in split.credit_allocations:
+            db.add(
+                InfrastructureProviderCreditRelease(
+                    lot_id=lot.id,
+                    funding_allocation_id=release.funding_allocation_id,
+                    provider=release.provider,
+                    amount_usd=release.amount_usd,
+                    reason="token_bag_expiration",
+                )
+            )
+            by_provider[release.provider] = (
+                by_provider.get(release.provider, D("0")) + release.amount_usd
+            )
+        return {
+            "cash_release_usd": split.cash_release_usd,
+            "provider_credit_release_usd": split.provider_credit_release_usd,
+            "provider_credit_by_provider": by_provider,
+        }
+
     def _expire_lot(self,db,lot,*,expired_at):
         if lot.status in ('expired','refunded') or int(lot.remaining_tokens or 0)<=0:
             return None
@@ -63,7 +214,14 @@ class FinanceCashboxService:
         # when a never-used bag expires.
         lot.released_commercial_profit_usd=amounts.commercial_profit_released_usd
         lot.commercial_profit_released=True
-        lot.released_expiration_usd=amounts.infrastructure_reserve_released_usd
+        expiration_split=self._split_expiration_infrastructure(
+            db,
+            lot,
+            protected_reserve=amounts.infrastructure_reserve_released_usd,
+        )
+        # Only cash that remains outside providers can become withdrawable profit.
+        # Already-funded money remains provider credit and is never counted in Caja verde.
+        lot.released_expiration_usd=expiration_split["cash_release_usd"]
         infrastructure_release=amounts.infrastructure_reserve_released_usd
         lot.remaining_tokens=0
         lot.status='expired'
@@ -73,11 +231,22 @@ class FinanceCashboxService:
             'expired_tokens': expired_tokens,
             'commercial_profit_released_usd': D(str(lot.released_commercial_profit_usd or 0)),
             'infrastructure_reserve_released_usd': infrastructure_release,
+            'infrastructure_cash_released_usd': expiration_split["cash_release_usd"],
+            'provider_credit_released_usd': expiration_split["provider_credit_release_usd"],
+            'provider_credit_released_by_provider': expiration_split["provider_credit_by_provider"],
         }
 
     def ensure_expirations(self,db):
         cfg=self.expiration_settings(db); now=utc_now()
-        lots=db.execute(select(TokenValueLot).where(TokenValueLot.remaining_tokens>0,TokenValueLot.status.notin_(['expired','refunded']))).scalars().all()
+        lots=db.execute(
+            select(TokenValueLot)
+            .where(
+                TokenValueLot.remaining_tokens>0,
+                TokenValueLot.status.notin_(['expired','refunded']),
+            )
+            .order_by(TokenValueLot.created_at,TokenValueLot.id)
+            .with_for_update()
+        ).scalars().all()
         changed=0
         for lot in lots:
             if cfg['enabled'] and not lot.expires_at:
@@ -89,7 +258,11 @@ class FinanceCashboxService:
     def simulate_expiration(self,db,bag_id):
         if settings.APP_ENV.lower() in {'production','prod'} or not settings.TEST_FORCE_TOKEN_BAG_EXPIRATION:
             raise ForbiddenException('Token bag expiration simulation is disabled.')
-        lot=db.get(TokenValueLot,bag_id)
+        lot=db.execute(
+            select(TokenValueLot)
+            .where(TokenValueLot.id==bag_id)
+            .with_for_update()
+        ).scalar_one_or_none()
         if not lot: raise NotFoundException('Token bag not found.')
         if lot.status in ('expired','refunded'):
             raise ConflictException('This token bag cannot be simulated in its current status.')
@@ -108,6 +281,12 @@ class FinanceCashboxService:
             'expired_tokens': int(result['expired_tokens']),
             'commercial_profit_released_usd': float(result['commercial_profit_released_usd']),
             'infrastructure_reserve_released_usd': float(result['infrastructure_reserve_released_usd']),
+            'infrastructure_cash_released_usd': float(result['infrastructure_cash_released_usd']),
+            'provider_credit_released_usd': float(result['provider_credit_released_usd']),
+            'provider_credit_released_by_provider': {
+                provider: float(amount)
+                for provider, amount in result['provider_credit_released_by_provider'].items()
+            },
             'total_available_from_bag_usd': float(bag['total_available_from_bag_usd']),
             'expires_at': lot.expires_at,
             'expired_at': lot.expired_at,
@@ -175,6 +354,7 @@ class FinanceCashboxService:
                 'rounding_surplus_usd':float(rounding),
                 'company_profit_usd':float(commercial+rounding),
                 'status':rec.status if rec else None,
+                'provider': str(breakdown.get('provider') or 'unknown').lower(),
             })
         rows.sort(key=lambda x:x['created_at'] or utc_now(),reverse=True)
         return rows
@@ -210,6 +390,17 @@ class FinanceCashboxService:
                 released_amount=D(str(lot.released_commercial_profit_usd))
             db.add(lot); db.flush()
         protected=snap['infrastructure_capacity_per_token']*lot.remaining_tokens
+        funding_state=self._funding_state_for_lot(
+            db,
+            lot,
+            protected=protected,
+            infrastructure_used=infra_used,
+        )
+        provider_rounding_credit=min(
+            max(rounding,D('0')),
+            max(D(str(funding_state['provider_excess_credit_usd'])),D('0')),
+        )
+        cash_rounding=max(rounding-provider_rounding_credit,D('0'))
         released=D(str(lot.released_commercial_profit_usd or 0))
         purchase=None
         try: purchase=db.get(TokenPurchase,int(lot.reference_id)) if lot.source in ('free_token_purchase','token_package','subscription','plan') and lot.reference_id else None
@@ -219,14 +410,27 @@ class FinanceCashboxService:
         if not package_name and purchase and getattr(purchase,'token_package_id',None):
             package=db.get(TokenPackage,purchase.token_package_id)
             package_name=getattr(package,'name',None)
-        refundable=lot.status=='new' and consumed==0 and not lot.refunded_at and pstatus not in ('refunded','partially_refunded')
-        reason='Reembolso total disponible: todavía no se ha usado ningún token de esta bolsa.' if refundable else ('No se puede reembolsar automáticamente porque esta bolsa ya se utilizó.' if consumed else 'No se puede reembolsar por el estado actual del pago o de la bolsa.')
-        realized_extra=max(rounding,D('0'))
+        has_infrastructure_funding=D(str(funding_state['funded_usd']))>0
+        refundable=lot.status=='new' and consumed==0 and not lot.refunded_at and pstatus not in ('refunded','partially_refunded') and not has_infrastructure_funding
+        reason=(
+            'Reembolso total disponible: todavía no se ha usado ningún token de esta bolsa.'
+            if refundable
+            else (
+                'No se puede reembolsar automáticamente porque parte de la reserva de IA ya fue fondeada a un proveedor.'
+                if has_infrastructure_funding
+                else (
+                    'No se puede reembolsar automáticamente porque esta bolsa ya se utilizó.'
+                    if consumed
+                    else 'No se puede reembolsar por el estado actual del pago o de la bolsa.'
+                )
+            )
+        )
+        realized_extra=cash_rounding
         total_available=released+realized_extra+D(str(lot.released_expiration_usd or 0))
         discount=D(str(m.get('profit_discount_percent') or 0))
         benefit_source=m.get('benefit_source') or ('coupon' if m.get('coupon_code') else ('plan' if m.get('plan_name') else ('package' if package_name else None)))
         benefit_label=m.get('benefit_label') or m.get('coupon_code') or m.get('plan_name') or package_name
-        return {'id':lot.id,'user_id':lot.user_id,'user_email':user_email,'source':lot.source,'source_label':m.get('source_label') or m.get('plan_name') or package_name or lot.source,'reference_id':lot.reference_id,'status':lot.status,'original_tokens':lot.original_tokens,'remaining_tokens':lot.remaining_tokens,'consumed_tokens':consumed,'amount_paid_usd':float(lot.amount_paid_usd or 0),'effective_token_value_usd':float(snap['paid_value_per_token']),'normal_profit_per_token_usd':float(snap['normal_profit_per_token']),'effective_profit_per_token_usd':float(snap['effective_profit_per_token']),'infrastructure_capacity_per_token_usd':float(snap['infrastructure_capacity_per_token']),'commercial_profit_total_usd':float(total_profit),'commercial_profit_released_usd':float(released),'realized_extra_profit_usd':float(realized_extra),'total_available_from_bag_usd':float(total_available),'protected_infrastructure_remaining_usd':float(protected),'infrastructure_used_usd':float(infra_used),'rounding_surplus_usd':float(rounding),'expiration_release_usd':float(lot.released_expiration_usd or 0),'coupon_code':m.get('coupon_code'),'plan_name':m.get('plan_name'),'package_name':package_name,'benefit_source':benefit_source,'benefit_label':benefit_label,'profit_discount_percent':float(discount),'snapshot_version':int(m.get('financial_snapshot_version')) if str(m.get('financial_snapshot_version') or '').isdigit() else None,'snapshot_source':snap.get('snapshot_source'),'payment_status':str(pstatus) if pstatus else None,'refundable':refundable,'refund_reason':reason,'activated_at':lot.activated_at,'expires_at':lot.expires_at,'expired_at':lot.expired_at,'created_at':lot.created_at}
+        return {'id':lot.id,'user_id':lot.user_id,'user_email':user_email,'source':lot.source,'source_label':m.get('source_label') or m.get('plan_name') or package_name or lot.source,'reference_id':lot.reference_id,'status':lot.status,'original_tokens':lot.original_tokens,'remaining_tokens':lot.remaining_tokens,'consumed_tokens':consumed,'amount_paid_usd':float(lot.amount_paid_usd or 0),'effective_token_value_usd':float(snap['paid_value_per_token']),'normal_profit_per_token_usd':float(snap['normal_profit_per_token']),'effective_profit_per_token_usd':float(snap['effective_profit_per_token']),'infrastructure_capacity_per_token_usd':float(snap['infrastructure_capacity_per_token']),'commercial_profit_total_usd':float(total_profit),'commercial_profit_released_usd':float(released),'realized_extra_profit_usd':float(realized_extra),'total_available_from_bag_usd':float(total_available),'protected_infrastructure_remaining_usd':float(protected),'infrastructure_used_usd':float(infra_used),'infrastructure_funded_usd':float(funding_state['funded_usd']),'infrastructure_unfunded_usd':float(funding_state['unfunded_usd']),'provider_credit_released_usd':float(funding_state['provider_credit_released_usd']),'rounding_surplus_usd':float(cash_rounding),'rounding_surplus_total_usd':float(max(rounding,D('0'))),'provider_rounding_credit_usd':float(provider_rounding_credit),'expiration_release_usd':float(lot.released_expiration_usd or 0),'coupon_code':m.get('coupon_code'),'plan_name':m.get('plan_name'),'package_name':package_name,'benefit_source':benefit_source,'benefit_label':benefit_label,'profit_discount_percent':float(discount),'snapshot_version':int(m.get('financial_snapshot_version')) if str(m.get('financial_snapshot_version') or '').isdigit() else None,'snapshot_source':snap.get('snapshot_source'),'payment_status':str(pstatus) if pstatus else None,'refundable':refundable,'refund_reason':reason,'activated_at':lot.activated_at,'expires_at':lot.expires_at,'expired_at':lot.expired_at,'created_at':lot.created_at}
     def list_bags(self,db,*,status=None,user_id=None,skip=0,limit=100):
         self.ensure_expirations(db); q=select(TokenValueLot,User.email).join(User,User.id==TokenValueLot.user_id)
         if status:q=q.where(TokenValueLot.status==status)
@@ -242,14 +446,258 @@ class FinanceCashboxService:
         gens=self._generation_rows_for_bag(db,lot)
         timeline=[{'type':'purchase','at':lot.created_at.isoformat(),'label':'Se creó la bolsa'}]
         if lot.activated_at:timeline.append({'type':'activation','at':lot.activated_at.isoformat(),'label':'Se usó por primera vez y su ganancia quedó disponible'})
-        if lot.expired_at:timeline.append({'type':'expiration','at':lot.expired_at.isoformat(),'label':'La bolsa venció y el dinero restante se liberó'})
+        for allocation,movement in self._funding_rows_for_lot(db,lot.id):
+            timeline.append({
+                'type':'infrastructure_funding',
+                'at':movement.funded_at.isoformat(),
+                'label':f'Se fondearon USD {D(str(allocation.amount_usd or 0))} a {movement.provider} desde esta bolsa',
+            })
+        credit_releases=db.execute(
+            select(InfrastructureProviderCreditRelease)
+            .where(InfrastructureProviderCreditRelease.lot_id==lot.id)
+            .order_by(InfrastructureProviderCreditRelease.created_at,InfrastructureProviderCreditRelease.id)
+        ).scalars().all()
+        for release in credit_releases:
+            timeline.append({
+                'type':'provider_credit_release',
+                'at':release.created_at.isoformat(),
+                'label':f'USD {D(str(release.amount_usd or 0))} quedó como crédito liberado en {release.provider}',
+            })
+        if lot.expired_at:timeline.append({'type':'expiration','at':lot.expired_at.isoformat(),'label':'La bolsa venció; solo el efectivo no fondeado pasó a utilidad'})
         if lot.refunded_at:timeline.append({'type':'refund','at':lot.refunded_at.isoformat(),'label':'La bolsa fue reembolsada'})
         purchase_id=int(lot.reference_id) if lot.reference_id and str(lot.reference_id).isdigit() else None
         return {'bag':bag,'generations':gens,'timeline':sorted(timeline,key=lambda x:x['at']),'purchase_id':purchase_id}
+
+    def _provider_costs(self, db: Session, lots: list[TokenValueLot]) -> dict[str, D]:
+        costs: dict[str, D] = {}
+        for lot in lots:
+            for row in self._generation_rows_for_bag(db, lot):
+                provider = str(row.get("provider") or "unknown").lower()
+                costs[provider] = costs.get(provider, D("0")) + D(
+                    str(row.get("infrastructure_cost_usd") or 0)
+                )
+        return costs
+
+    def _provider_funding_totals(self, db: Session) -> dict[str, D]:
+        rows = db.execute(
+            select(
+                InfrastructureFundingMovement.provider,
+                func.coalesce(func.sum(InfrastructureFundingMovement.amount_usd), 0),
+            ).group_by(InfrastructureFundingMovement.provider)
+        ).all()
+        return {
+            str(provider or "unknown").lower(): D(str(amount or 0))
+            for provider, amount in rows
+        }
+
+    def _provider_credit_release_totals(self, db: Session) -> dict[str, D]:
+        rows = db.execute(
+            select(
+                InfrastructureProviderCreditRelease.provider,
+                func.coalesce(func.sum(InfrastructureProviderCreditRelease.amount_usd), 0),
+            ).group_by(InfrastructureProviderCreditRelease.provider)
+        ).all()
+        return {
+            str(provider or "unknown").lower(): D(str(amount or 0))
+            for provider, amount in rows
+        }
+
+    def _funding_response(self, db: Session, movement: InfrastructureFundingMovement) -> dict:
+        allocations = db.execute(
+            select(InfrastructureFundingAllocation)
+            .where(InfrastructureFundingAllocation.movement_id == movement.id)
+            .order_by(InfrastructureFundingAllocation.id)
+        ).scalars().all()
+        return {
+            "id": movement.id,
+            "amount_usd": float(movement.amount_usd or 0),
+            "currency": movement.currency,
+            "provider": movement.provider,
+            "beneficiary": movement.beneficiary,
+            "concept": movement.concept,
+            "method": movement.method,
+            "proof_url": movement.proof_url,
+            "notes": movement.notes,
+            "created_by_user_id": movement.created_by_user_id,
+            "funded_at": movement.funded_at,
+            "created_at": movement.created_at,
+            "allocations": [
+                {
+                    "id": allocation.id,
+                    "lot_id": allocation.lot_id,
+                    "amount_usd": float(allocation.amount_usd or 0),
+                }
+                for allocation in allocations
+            ],
+        }
+
+    def infrastructure_fundings(self, db: Session) -> list[dict]:
+        movements = db.execute(
+            select(InfrastructureFundingMovement).order_by(
+                InfrastructureFundingMovement.funded_at.desc(),
+                InfrastructureFundingMovement.id.desc(),
+            )
+        ).scalars().all()
+        return [self._funding_response(db, movement) for movement in movements]
+
+    def create_infrastructure_funding(
+        self,
+        db: Session,
+        data: InfrastructureFundingCreate,
+        admin_id: int,
+    ) -> dict:
+        self.ensure_expirations(db)
+        amount = D(str(data.amount_usd)).quantize(D("0.000001"))
+        if amount <= 0:
+            raise ConflictException("Infrastructure funding amount must be positive.")
+
+        provider = str(data.provider or "").strip().lower()
+        # Lock lots so two simultaneous funding registrations cannot allocate the same
+        # infrastructure cash twice.
+        lots = db.execute(
+            select(TokenValueLot)
+            .where(TokenValueLot.status != "refunded")
+            .order_by(TokenValueLot.created_at, TokenValueLot.id)
+            .with_for_update()
+        ).scalars().all()
+
+        candidates: list[tuple[TokenValueLot, D]] = []
+        available = D("0")
+        for lot in lots:
+            snap = token_value_ledger_service._snapshot_for_lot(lot)
+            protected = (
+                snap["infrastructure_capacity_per_token"]
+                * max(int(lot.remaining_tokens or 0), 0)
+            )
+            infra_used = sum(
+                D(str(row.get("infrastructure_cost_usd") or 0))
+                for row in self._generation_rows_for_bag(db, lot)
+            )
+            state = self._funding_state_for_lot(
+                db,
+                lot,
+                protected=protected,
+                infrastructure_used=infra_used,
+            )
+            provider_unfunded_cost = max(
+                D(str(state["used_by_provider"].get(provider, D("0"))))
+                - D(str(state["funded_by_provider"].get(provider, D("0")))),
+                D("0"),
+            )
+            fundable = max(
+                provider_unfunded_cost
+                + D(str(state["unfunded_future_reserve_usd"])),
+                D("0"),
+            ).quantize(D("0.000001"))
+            if fundable > 0:
+                candidates.append((lot, fundable))
+                available += fundable
+
+        if amount > available:
+            raise ConflictException(
+                f"Infrastructure funding exceeds cash assignable to {provider}. Available: USD {available}."
+            )
+
+        movement = InfrastructureFundingMovement(
+            amount_usd=amount,
+            currency="USD",
+            provider=provider,
+            beneficiary=data.beneficiary,
+            concept=data.concept,
+            method=data.method,
+            proof_url=data.proof_url,
+            notes=data.notes,
+            created_by_user_id=admin_id,
+            funded_at=data.funded_at or utc_now(),
+        )
+        db.add(movement)
+        db.flush()
+
+        remaining = amount
+        for lot, fundable in candidates:
+            take = min(remaining, fundable).quantize(D("0.000001"))
+            if take <= 0:
+                continue
+            db.add(
+                InfrastructureFundingAllocation(
+                    movement_id=movement.id,
+                    lot_id=lot.id,
+                    amount_usd=take,
+                )
+            )
+            remaining -= take
+            if remaining <= 0:
+                break
+
+        if remaining > D("0.000001"):
+            raise ConflictException(
+                "Infrastructure funding could not be fully allocated to token bags."
+            )
+        db.flush()
+        return self._funding_response(db, movement)
+
     def summary(self,db):
-        self.ensure_expirations(db); lots=db.execute(select(TokenValueLot)).scalars().all(); values=[self._bag_values(db,l) for l in lots]
-        released=sum(D(str(x['commercial_profit_released_usd'])) for x in values); protected=sum(D(str(x['protected_infrastructure_remaining_usd'])) for x in values); blocked=sum(D(str(x['commercial_profit_total_usd'])) for x in values if x['status']=='new'); rounding=sum(D(str(x['rounding_surplus_usd'])) for x in values); expir=sum(D(str(x['expiration_release_usd'])) for x in values); withdrawals=db.execute(select(func.coalesce(func.sum(FinanceWithdrawal.amount_usd),0))).scalar_one(); available=max(D('0'),released+rounding+expir-D(str(withdrawals)))
-        return {'collected_usd':float(sum(D(str(x['amount_paid_usd'])) for x in values)),'available_usd':float(available),'protected_infrastructure_usd':float(protected),'blocked_profit_usd':float(blocked),'released_commercial_profit_usd':float(released),'rounding_and_operational_surplus_usd':float(rounding),'expiration_releases_usd':float(expir),'withdrawals_usd':float(withdrawals),'active_bags':sum(x['status']=='active' for x in values),'new_bags':sum(x['status']=='new' for x in values),'expired_bags':sum(x['status']=='expired' for x in values)}
+        self.ensure_expirations(db)
+        lots=db.execute(select(TokenValueLot)).scalars().all()
+        values=[self._bag_values(db,l) for l in lots]
+        released=sum(D(str(x['commercial_profit_released_usd'])) for x in values)
+        protected=sum(D(str(x['protected_infrastructure_remaining_usd'])) for x in values)
+        blocked=sum(D(str(x['commercial_profit_total_usd'])) for x in values if x['status']=='new')
+        rounding=sum(D(str(x['rounding_surplus_usd'])) for x in values)
+        expir=sum(D(str(x['expiration_release_usd'])) for x in values)
+        withdrawals=db.execute(select(func.coalesce(func.sum(FinanceWithdrawal.amount_usd),0))).scalar_one()
+        available=max(D('0'),released+rounding+expir-D(str(withdrawals)))
+
+        infrastructure_cash_available=sum(
+            D(str(x['infrastructure_unfunded_usd'])) for x in values
+        )
+        funded_by_provider=self._provider_funding_totals(db)
+        costs_by_provider=self._provider_costs(db,lots)
+        released_credit_by_provider=self._provider_credit_release_totals(db)
+        providers=sorted(
+            set(funded_by_provider)
+            | set(costs_by_provider)
+            | set(released_credit_by_provider)
+        )
+        provider_balances=[]
+        for provider in providers:
+            funded=funded_by_provider.get(provider,D('0'))
+            cost=costs_by_provider.get(provider,D('0'))
+            provider_balances.append({
+                'provider':provider,
+                'funded_usd':float(funded),
+                'infrastructure_cost_usd':float(cost),
+                'credit_available_usd':float(max(funded-cost,D('0'))),
+                'unfunded_cost_usd':float(max(cost-funded,D('0'))),
+                'released_credit_usd':float(released_credit_by_provider.get(provider,D('0'))),
+            })
+
+        return {
+            'collected_usd':float(sum(D(str(x['amount_paid_usd'])) for x in values)),
+            'available_usd':float(available),
+            'protected_infrastructure_usd':float(protected),
+            'blocked_profit_usd':float(blocked),
+            'released_commercial_profit_usd':float(released),
+            'rounding_and_operational_surplus_usd':float(rounding),
+            'expiration_releases_usd':float(expir),
+            'withdrawals_usd':float(withdrawals),
+            'infrastructure_cash_available_usd':float(infrastructure_cash_available),
+            'infrastructure_funded_usd':float(sum(funded_by_provider.values())),
+            'provider_credit_available_usd':float(sum(max(
+                funded_by_provider.get(provider,D('0'))-costs_by_provider.get(provider,D('0')),
+                D('0'),
+            ) for provider in providers)),
+            'provider_cost_unfunded_usd':float(sum(max(
+                costs_by_provider.get(provider,D('0'))-funded_by_provider.get(provider,D('0')),
+                D('0'),
+            ) for provider in providers)),
+            'provider_credit_released_usd':float(sum(released_credit_by_provider.values())),
+            'provider_balances':provider_balances,
+            'active_bags':sum(x['status']=='active' for x in values),
+            'new_bags':sum(x['status']=='new' for x in values),
+            'expired_bags':sum(x['status']=='expired' for x in values),
+        }
+
     def withdrawals(self,db): return db.execute(select(FinanceWithdrawal).order_by(FinanceWithdrawal.withdrawn_at.desc())).scalars().all()
     def create_withdrawal(self,db,data,admin_id):
         available=D(str(self.summary(db)['available_usd'])); amount=D(str(data.amount_usd))

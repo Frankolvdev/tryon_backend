@@ -10,7 +10,7 @@ CONFIG=(ROOT/'app/core/config.py').read_text(encoding='utf-8')
 
 
 def test_expiration_never_mixes_commercial_profit_into_expiration_release():
-    assert "lot.released_expiration_usd=amounts.infrastructure_reserve_released_usd" in SERVICE
+    assert 'lot.released_expiration_usd=expiration_split["cash_release_usd"]' in SERVICE
     assert "release += snap['effective_profit_per_token']" not in SERVICE
     assert "lot.released_commercial_profit_usd=amounts.commercial_profit_released_usd" in SERVICE
 

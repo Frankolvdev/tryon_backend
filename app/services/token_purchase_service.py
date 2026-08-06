@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.common.billing_enums import (
@@ -20,6 +20,7 @@ from app.common.time import utc_now
 from app.models.billing_payment import BillingPayment
 from app.models.token_purchase import TokenPurchase
 from app.models.token_value_lot import TokenValueLot
+from app.models.infrastructure_funding import InfrastructureFundingAllocation
 from app.models.user import User
 from app.repositories.billing_customer_repository import (
     billing_customer_repository,
@@ -945,6 +946,17 @@ class TokenPurchaseService:
         if any(lot.remaining_tokens < lot.original_tokens or lot.activated_at is not None for lot in purchase_lots):
             raise ConflictException(
                 "This token bag already consumed tokens and is no longer refundable under the active commercial policy."
+            )
+        lot_ids=[lot.id for lot in purchase_lots]
+        funded_infrastructure=Decimal("0")
+        if lot_ids:
+            funded_infrastructure=Decimal(str(db.execute(
+                select(func.coalesce(func.sum(InfrastructureFundingAllocation.amount_usd),0))
+                .where(InfrastructureFundingAllocation.lot_id.in_(lot_ids))
+            ).scalar_one() or 0))
+        if funded_infrastructure>0:
+            raise ConflictException(
+                "This token bag is no longer automatically refundable because part of its AI reserve was already funded to an infrastructure provider."
             )
 
         payment_intent_id = self._resolve_payment_intent_for_refund(

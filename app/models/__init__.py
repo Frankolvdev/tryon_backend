@@ -102,6 +102,11 @@ from app.models.token_value_lot import TokenValueLot
 from app.models.token_consumption_allocation import TokenConsumptionAllocation
 from app.models.generation_financial_record import GenerationFinancialRecord
 from app.models.finance_withdrawal import FinanceWithdrawal
+from app.models.infrastructure_funding import (
+    InfrastructureFundingMovement,
+    InfrastructureFundingAllocation,
+    InfrastructureProviderCreditRelease,
+)
 from app.models.legal_document import LegalDocument
 from app.models.legal_acceptance import LegalAcceptance
 from app.models.tryon_job import TryOnJob
@@ -199,6 +204,9 @@ __all__ = [
     "TokenConsumptionAllocation",
     "GenerationFinancialRecord",
     "FinanceWithdrawal",
+    "InfrastructureFundingMovement",
+    "InfrastructureFundingAllocation",
+    "InfrastructureProviderCreditRelease",
     "LegalDocument",
     "LegalAcceptance",
     "TryOnJob",

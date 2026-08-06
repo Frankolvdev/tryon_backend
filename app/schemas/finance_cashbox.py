@@ -1,5 +1,16 @@
 from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class InfrastructureProviderBalanceResponse(BaseModel):
+    provider: str
+    funded_usd: float
+    infrastructure_cost_usd: float
+    credit_available_usd: float
+    unfunded_cost_usd: float
+    released_credit_usd: float
+
 
 class CashboxSummaryResponse(BaseModel):
     collected_usd: float
@@ -10,9 +21,16 @@ class CashboxSummaryResponse(BaseModel):
     rounding_and_operational_surplus_usd: float
     expiration_releases_usd: float
     withdrawals_usd: float
+    infrastructure_cash_available_usd: float = 0.0
+    infrastructure_funded_usd: float = 0.0
+    provider_credit_available_usd: float = 0.0
+    provider_cost_unfunded_usd: float = 0.0
+    provider_credit_released_usd: float = 0.0
+    provider_balances: list[InfrastructureProviderBalanceResponse] = Field(default_factory=list)
     active_bags: int
     new_bags: int
     expired_bags: int
+
 
 class WithdrawalCreate(BaseModel):
     amount_usd: float = Field(gt=0)
@@ -23,8 +41,10 @@ class WithdrawalCreate(BaseModel):
     notes: str | None = None
     withdrawn_at: datetime | None = None
 
+
 class WithdrawalResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
     id: int
     amount_usd: float
     currency: str
@@ -36,6 +56,7 @@ class WithdrawalResponse(BaseModel):
     created_by_user_id: int | None
     withdrawn_at: datetime
     created_at: datetime
+
 
 class TokenBagResponse(BaseModel):
     id: int
@@ -59,7 +80,12 @@ class TokenBagResponse(BaseModel):
     total_available_from_bag_usd: float
     protected_infrastructure_remaining_usd: float
     infrastructure_used_usd: float
+    infrastructure_funded_usd: float = 0.0
+    infrastructure_unfunded_usd: float = 0.0
+    provider_credit_released_usd: float = 0.0
     rounding_surplus_usd: float
+    rounding_surplus_total_usd: float = 0.0
+    provider_rounding_credit_usd: float = 0.0
     expiration_release_usd: float
     coupon_code: str | None = None
     plan_name: str | None = None
@@ -77,9 +103,11 @@ class TokenBagResponse(BaseModel):
     expired_at: datetime | None
     created_at: datetime
 
+
 class TokenBagListResponse(BaseModel):
     items: list[TokenBagResponse]
     total: int
+
 
 class TokenBagGenerationResponse(BaseModel):
     execution_id: str
@@ -90,19 +118,23 @@ class TokenBagGenerationResponse(BaseModel):
     rounding_surplus_usd: float
     status: str | None = None
 
+
 class TokenBagDetailResponse(BaseModel):
     bag: TokenBagResponse
     generations: list[TokenBagGenerationResponse]
     timeline: list[dict]
     purchase_id: int | None = None
 
+
 class ExpirationSettingsResponse(BaseModel):
     enabled: bool
     days: int
     simulation_enabled: bool = False
 
+
 class TokenBagExpirationSimulationRequest(BaseModel):
     confirm: bool = False
+
 
 class TokenBagExpirationSimulationResponse(BaseModel):
     bag_id: int
@@ -111,10 +143,47 @@ class TokenBagExpirationSimulationResponse(BaseModel):
     expired_tokens: int
     commercial_profit_released_usd: float
     infrastructure_reserve_released_usd: float
+    infrastructure_cash_released_usd: float = 0.0
+    provider_credit_released_usd: float = 0.0
+    provider_credit_released_by_provider: dict[str, float] = Field(default_factory=dict)
     total_available_from_bag_usd: float
     expires_at: datetime | None
     expired_at: datetime
 
+
 class ExpirationSettingsUpdate(BaseModel):
     enabled: bool = True
     days: int = Field(default=730, ge=1, le=3650)
+
+
+class InfrastructureFundingCreate(BaseModel):
+    amount_usd: float = Field(gt=0)
+    provider: str = Field(min_length=2, max_length=50)
+    beneficiary: str | None = None
+    concept: str = Field(min_length=2, max_length=255)
+    method: str | None = None
+    proof_url: str | None = None
+    notes: str | None = None
+    funded_at: datetime | None = None
+
+
+class InfrastructureFundingAllocationResponse(BaseModel):
+    id: int
+    lot_id: int
+    amount_usd: float
+
+
+class InfrastructureFundingResponse(BaseModel):
+    id: int
+    amount_usd: float
+    currency: str
+    provider: str
+    beneficiary: str | None
+    concept: str
+    method: str | None
+    proof_url: str | None
+    notes: str | None
+    created_by_user_id: int | None
+    funded_at: datetime
+    created_at: datetime
+    allocations: list[InfrastructureFundingAllocationResponse] = Field(default_factory=list)
