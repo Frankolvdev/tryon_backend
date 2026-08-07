@@ -19,6 +19,7 @@ from app.models.user import User
 from app.repositories.system_setting_repository import system_setting_repository
 from app.services.financial_protection_service import financial_protection_service
 from app.services.pricing_service import pricing_service
+from app.services.token_financial_snapshot_service import token_financial_snapshot_service
 from app.services.token_service import token_service
 from app.services.token_value_ledger_service import token_value_ledger_service
 
@@ -65,11 +66,10 @@ class PromotionalCreditService:
     def generation_infrastructure_reserve_per_token(self, db: Session) -> D:
         report = financial_protection_service.report(db)
         financial_protection_service.assert_report_safe(report, action="fund promotional tokens")
-        token_value = D(str(pricing_service._token_value(db)))
-        safe_profit = D(str(report.safe_profit_per_token_usd or 0))
-        reserve = (token_value - safe_profit).quantize(D("0.000000001"))
-        if reserve <= 0:
-            raise ConflictException("The pricing rules do not leave a positive AI infrastructure reserve per token.")
+        reserve = token_financial_snapshot_service.generation_infrastructure_capacity(
+            token_value_usd=pricing_service._token_value(db),
+            normal_profit_per_token_usd=report.safe_profit_per_token_usd or 0,
+        ).quantize(D("0.000000001"))
         return reserve
 
     def _ensure_settings(self, db: Session) -> None:
@@ -156,22 +156,24 @@ class PromotionalCreditService:
 
     def _commercial_snapshot(self, db: Session, *, provider: str, funding_per_token: D) -> dict:
         generation_reserve=self.generation_infrastructure_reserve_per_token(db)
-        return {
-            "financial_snapshot_version": 2,
-            "source_label": "Crédito promocional",
-            "benefit_source": "promotional_credit",
-            "benefit_label": "Crédito promocional financiado",
-            "token_value_usd": str(pricing_service._token_value(db)),
-            "normal_profit_per_token_usd": "0",
-            "effective_profit_per_token_usd": "0",
-            "profit_discount_percent": "0",
-            "promotional_credit_funded": True,
-            "promotional_provider": self.normalize_provider(provider),
-            "infrastructure_capacity_per_token_usd": str(generation_reserve),
-            "promotional_funding_per_token_usd": str(funding_per_token),
-            "infrastructure_reserve_source": "promotional_credit_pool",
-            "customer_paid_usd": "0",
-        }
+        snapshot = token_financial_snapshot_service.build_commercial_terms(
+            token_value_usd=pricing_service._token_value(db),
+            normal_profit_per_token_usd=0,
+            profit_discount_percent=0,
+            operational_reserve_per_token_usd=0,
+            source_label="Crédito promocional",
+            benefit_source="promotional_credit",
+            benefit_label="Crédito promocional financiado",
+            promotional_credit_funded=True,
+            promotional_provider=self.normalize_provider(provider),
+            promotional_funding_per_token_usd=str(funding_per_token),
+            customer_paid_usd="0",
+        )
+        # Promotional lots have zero company profit, but generation-token math
+        # must use the same frozen AI reserve as commercial tokens.
+        snapshot["infrastructure_capacity_per_token_usd"] = str(generation_reserve)
+        snapshot["infrastructure_reserve_source"] = "promotional_credit_pool"
+        return snapshot
 
     def grant(self, db: Session, *, user_id: int, tokens: int, provider: str, grant_type: str, created_by_user_id: int | None = None, allow_partial: bool = False) -> dict:
         requested = max(int(tokens), 0)

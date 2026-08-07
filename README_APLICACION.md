@@ -1,100 +1,114 @@
-# MegaZIP 2A — Backend — Créditos promocionales respaldados
+# MegaZIP 3A — Backend — Blindaje financiero V3
 
-BASE EXACTA:
-tryon_backend-main - 2026-08-07T123540.522.zip
-(con MegaZIP 1 ya aplicado por el usuario)
+BASE EXACTA
+tryon_backend-main - 2026-08-07T130411.041.zip
+(MegaZIP 1 y MegaZIP 2 ya aplicados por el usuario)
 
 OBJETIVO
-Añadir una caja separada de créditos promocionales/gratuitos sin alterar:
-- pricing comercial;
-- cantidad de tokens por generación;
-- FIFO comercial;
-- snapshots comerciales;
-- Caja verde;
-- Caja IA comercial;
+Centralizar los componentes económicos de cada token antes de introducir la
+Caja de Gastos Operativos del MegaZIP 4. Este MegaZIP NO activa todavía ningún
+recargo operativo.
+
+ARQUITECTURA V3
+Cada bolsa nueva congela explícitamente:
+- token_value_usd: base económica que usa la generación;
+- infrastructure_capacity_per_token_usd;
+- operational_reserve_per_token_usd (0 por ahora);
+- normal_profit_per_token_usd;
+- effective_profit_per_token_usd;
+- profit_discount_percent;
+- financial_economics_schema = explicit_components_v3.
+
+REGLA CENTRAL
+La infraestructura de una bolsa nueva NO se reconstruye como:
+    precio_pagado - ganancia
+Los consumidores leen el componente congelado.
+
+La única compatibilidad "paid - profit" que queda está encapsulada dentro de
+token_financial_snapshot_service y se usa exclusivamente como fallback para
+bolsas genuinamente antiguas que no tienen componentes congelados.
+
+GENERACIONES
+El número de tokens continúa calculándose solamente desde:
+    token_value_usd - ganancia protegida de la regla
+El futuro componente operativo NO participa en esta fórmula.
+
+PRECIO COMERCIAL PREPARADO PARA MEGAZIP 4
+Se separan:
+- token_value_usd: base de generación;
+- operational_reserve_per_token_usd: 0 actualmente;
+- commercial_sale_value_per_token_usd: base + operación.
+
+price_for_tokens() usa commercial_sale_value_per_token_usd. Como operación
+todavía vale 0, este MegaZIP no cambia ningún precio actual.
+
+DESCUENTOS
+Siguen reduciendo únicamente la ganancia. No modifican infraestructura ni
+el futuro componente operativo.
+
+SNAPSHOTS HISTÓRICOS
+No se migran ni recalculan. V2 y legacy continúan siendo legibles.
+Las bolsas nuevas pasan a financial_snapshot_version=3.
+
+PROMOCIONALES
+Mantienen:
+- cliente pagó = 0;
+- ganancia = 0;
+- respaldo promocional propio;
+- capacidad IA congelada independiente;
+- operational_reserve = 0.
+No se modifica su política de deudas del MegaZIP 2.
+
+SIMULADOR
+Queda preparado para separar la reserva operativa del redondeo y de la
+ganancia. Con operación=0 el resultado actual es idéntico.
+
+NO MODIFICA
+- FIFO de consumo;
+- generación runtime;
+- generation_module_billing_service;
 - Stripe;
-- Modal / RunPod / Beam;
-- bloqueo/desbloqueo existente.
+- Modal;
+- RunPod;
+- Beam;
+- Caja verde;
+- Caja IA/fondeos;
+- pérdidas pendientes/auto-desbloqueo;
+- vencimientos;
+- migraciones de base de datos.
 
-MODELO PROMOCIONAL
-1. Un fondo promocional se registra en USD y tiene proveedor:
-   modal / runpod / beam / general.
-2. Los tokens promocionales tienen:
-   - cliente pagó = USD 0;
-   - ganancia empresa = USD 0;
-   - provider funding trazable;
-   - snapshot propio e inmutable.
-3. Los tokens promocionales sirven para GENERACIONES NUEVAS.
-4. Por defecto NO sirven para deudas/generaciones bloqueadas anteriores.
-5. El switch `promotional_allow_pending_settlement` permite cambiar
-   explícitamente esa política.
-6. Los créditos Modal solo financian ejecuciones Modal; RunPod solo RunPod;
-   Beam solo Beam; General puede financiar cualquier proveedor.
-7. El bono de registro reutiliza `free_signup_tokens`, pero solo entrega tokens
-   si `promotional_signup_enabled=true` y existe respaldo real.
-8. Si se configuran 12 tokens y solo quedan 4 financiables, signup recibe 4.
-9. Una asignación manual es exacta: si no alcanza el fondo, no crea tokens.
-10. Al vencer tokens promocionales, su respaldo NO pasa a Caja verde:
-    regresa al mismo fondo promocional.
-
-PROTECCIÓN IMPORTANTE
-Un token promocional contiene CERO ganancia. Por eso al entregarlo se reserva
-temporalmente del fondo promocional el valor comercial completo del token
-(p.ej. USD 0.11), no solamente los USD 0.007 de capacidad IA de una generación
-completed.
-
-Esto NO cambia la fórmula comercial ni el precio en tokens de una generación.
-El snapshot conserva por separado:
-- `infrastructure_capacity_per_token_usd`: reserva normal usada por la regla
-  de generación (p.ej. USD 0.007);
-- `promotional_funding_per_token_usd`: respaldo promocional temporal completo
-  (p.ej. USD 0.11).
-
-Al terminar una ejecución, el costo real proporcional consumido por esos tokens
-permanece gastado y TODO respaldo promocional no utilizado vuelve a su fondo.
-Esto protege también cancelaciones/fallos, donde la política puede no aplicar
-ganancia y un token puede cubrir una fracción de infraestructura distinta.
-
-VENCIMIENTO
-Este MegaZIP corrige además una inconsistencia preexistente necesaria para que
-los créditos promocionales sean seguros: al expirar una bolsa, ahora también se
-restan esos tokens del `User.token_balance` en la misma transacción. Antes podía
-ponerse el lote en cero pero dejar saldo gastable que luego reaparecía como
-legacy/untraced.
-
-ENTORNO DE PRUEBAS
-Se agrega `pytest.ini`:
-[pytest]
-pythonpath = .
-testpaths = tests
-
-Aun así se recomienda ejecutar `python -m pytest`.
-
-MIGRACIÓN OBLIGATORIA
-alembic upgrade head
-
-Head esperado:
-05b_promo_credits (head)
+MIGRACIÓN
+NO hay migración Alembic en MegaZIP 3.
 
 VALIDACIÓN REALIZADA
-- python compileall: OK
-- Alembic head: 05b_promo_credits
-- 53 contratos directamente relacionados: PASSED
-- Batería financiera ampliada: 65 PASSED
-- 2 contratos históricos fallan también en el ZIP base SIN MegaZIP 2:
-  * test_finance_bag_historical_compatibility_contract.py
+- python -m compileall: OK
+- 68 contratos directamente relacionados: PASSED
+- Suite amplia ejecutable en este entorno:
+    123 PASSED
+    5 FAILED
+  Los mismos 5 fallos existen en el ZIP BASE sin MegaZIP 3:
+  * test_financial_limiting_rule_contract.py
+  * test_finance_bag_historical_compatibility_contract.py (su segundo contrato)
+  * test_financial_protection_engine_contract.py
+  * test_financial_limiting_rule_all_active_contract.py
   * test_generation_finance_contract.py
-  Se confirmó contra una extracción limpia y NO se maquillaron.
+- 5 pruebas Runtime Builder adicionales no pudieron coleccionarse en este
+  entorno por falta de psycopg2; no fueron modificadas por este MegaZIP.
 
 PRUEBA RECOMENDADA
-python -m pytest -q \
-  tests/test_promotional_credit_cashbox_contract.py \
-  tests/test_promotional_credit_no_regression_contract.py \
-  tests/test_pending_generation_auto_settlement_contract.py \
-  tests/test_pending_recovery_cashbox_contract.py \
-  tests/test_infrastructure_cashbox_fifo_contract.py \
-  tests/test_token_bag_expiration_accounting_contract.py \
-  tests/test_finance_cashbox_contract.py \
-  tests/test_fifo_token_bag_pricing_v2_contract.py \
-  tests/test_execution_billing_policy_contract.py \
+python -m pytest -q `
+  tests/test_token_financial_snapshot_v3_values.py `
+  tests/test_financial_components_v3_contract.py `
+  tests/test_fifo_token_bag_pricing_v2_contract.py `
+  tests/test_token_lot_infrastructure_protection_contract.py `
+  tests/test_promotional_credit_cashbox_contract.py `
+  tests/test_promotional_credit_no_regression_contract.py `
+  tests/test_pending_generation_auto_settlement_contract.py `
+  tests/test_pending_recovery_cashbox_contract.py `
+  tests/test_infrastructure_cashbox_fifo_contract.py `
+  tests/test_token_bag_expiration_accounting_contract.py `
+  tests/test_finance_cashbox_contract.py `
+  tests/test_execution_billing_policy_contract.py `
   tests/test_commercial_snapshots_and_finance_contract.py
+
+Resultado validado para ese conjunto: 68 passed.

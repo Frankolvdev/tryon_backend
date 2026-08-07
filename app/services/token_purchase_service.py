@@ -51,6 +51,7 @@ from app.services.billing_customer_service import (
 from app.services.integration_service import integration_service
 from app.services.billing_coupon_service import billing_coupon_service
 from app.services.pricing_service import pricing_service
+from app.services.token_financial_snapshot_service import token_financial_snapshot_service
 from app.services.stripe_client_service import (
     stripe_client_service,
 )
@@ -430,15 +431,15 @@ class TokenPurchaseService:
         package_discount = float(getattr(token_package, "requested_discount_percent", 0) or 0) if token_package else 0.0
         coupon_discount = float(coupon_snapshot.get("requested_discount_percent") or 0)
         total_profit_discount = min(100.0, package_discount + coupon_discount)
-        purchase_metadata["commercial_terms_snapshot"] = {
-            "token_value_usd": str(pricing_service._token_value(db)),
-            "normal_profit_per_token_usd": str(safe_profit_per_token),
-            "profit_discount_percent": str(total_profit_discount),
-            "effective_profit_per_token_usd": str(safe_profit_per_token * (1 - total_profit_discount / 100.0)),
-            "tokens": int(tokens_amount + bonus_tokens),
-            "amount_paid_usd": str(amount),
-            "source": "token_package" if token_package else "free_token_purchase",
-        }
+        purchase_metadata["commercial_terms_snapshot"] = token_financial_snapshot_service.build_commercial_terms(
+            token_value_usd=pricing_service._token_value(db),
+            normal_profit_per_token_usd=safe_profit_per_token,
+            profit_discount_percent=total_profit_discount,
+            operational_reserve_per_token_usd=pricing_service._operational_reserve(db),
+            tokens=int(tokens_amount + bonus_tokens),
+            amount_paid_usd=str(amount),
+            source="token_package" if token_package else "free_token_purchase",
+        )
 
         customer = billing_customer_service.get_or_create_stripe_customer(
             db,

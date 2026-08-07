@@ -9,23 +9,29 @@ from app.schemas.pricing_simulator import (
     PricingSimulatorScenarioResponse, PricingSimulatorRecommendation,
 )
 from app.services.pricing_service import pricing_service
+from app.services.token_financial_snapshot_service import token_financial_snapshot_service
 
 
 class PricingSimulatorService:
     @staticmethod
-    def _scenario(*, token_value: float, profit_per_token: float, infra: float, discount: float, label: str):
-        if profit_per_token >= token_value:
-            raise ConflictException("Desired profit per token must be lower than token value.")
-        capacity = token_value - profit_per_token
+    def _scenario(*, token_value: float, profit_per_token: float, operational_per_token: float, infra: float, discount: float, label: str):
+        capacity = float(
+            token_financial_snapshot_service.generation_infrastructure_capacity(
+                token_value_usd=token_value,
+                normal_profit_per_token_usd=profit_per_token,
+            )
+        )
         tokens = max(1, math.ceil(infra / capacity)) if infra > 0 else 0
         normal_profit = tokens * profit_per_token
         discount_given = normal_profit * (discount / 100.0)
         profit_after = normal_profit - discount_given
-        customer_value = tokens * token_value - discount_given
-        rounding = max(0.0, customer_value - infra - profit_after)
+        operational_total = tokens * max(float(operational_per_token or 0), 0.0)
+        customer_value = tokens * (token_value + max(float(operational_per_token or 0), 0.0)) - discount_given
+        rounding = max(0.0, customer_value - infra - operational_total - profit_after)
         return PricingSimulatorScenarioResponse(
             label=label, discount_percent=round(discount, 4), tokens=tokens,
             customer_value_usd=round(customer_value, 9), infrastructure_cost_usd=round(infra, 9),
+            operational_reserve_usd=round(operational_total, 9),
             normal_profit_usd=round(normal_profit, 9), discount_given_usd=round(discount_given, 9),
             profit_after_discount_usd=round(profit_after, 9), rounding_surplus_usd=round(rounding, 9),
             company_total_usd=round(profit_after + rounding, 9),
@@ -60,6 +66,7 @@ class PricingSimulatorService:
         billable = duration + int(applied.scaledown_seconds or 0) + int(applied.technical_margin_seconds or 0)
         infra = billable * float(applied.gpu_cost_usd_per_second)
         current_token = float(applied.token_value_usd)
+        current_operational = float(pricing_service._operational_reserve(db))
         current_profit = float(applied.desired_profit_per_token_usd)
         token_value = float(data.token_value_usd if data.token_value_usd is not None else current_token)
         profit = float(data.desired_profit_per_token_usd if data.desired_profit_per_token_usd is not None else current_profit)
@@ -70,7 +77,7 @@ class PricingSimulatorService:
             {"label": "Sin descuento", "discount_percent": 0},
             {"label": "Descuento habitual", "discount_percent": data.worst_discount_percent},
         ]
-        scenarios = [self._scenario(token_value=token_value, profit_per_token=profit, infra=infra,
+        scenarios = [self._scenario(token_value=token_value, profit_per_token=profit, operational_per_token=current_operational, infra=infra,
                                    discount=float(s.discount_percent if hasattr(s, 'discount_percent') else s['discount_percent']),
                                    label=str(s.label if hasattr(s, 'label') else s['label'])) for s in requested]
 
@@ -88,7 +95,7 @@ class PricingSimulatorService:
                     pp = tv - gap
                     if pp <= 0 or pp >= tv:
                         continue
-                    scenario = self._scenario(token_value=tv, profit_per_token=pp, infra=infra,
+                    scenario = self._scenario(token_value=tv, profit_per_token=pp, operational_per_token=current_operational, infra=infra,
                                               discount=data.worst_discount_percent, label="Objetivo")
                     if not (min_tokens <= scenario.tokens <= max_tokens):
                         continue
@@ -96,7 +103,7 @@ class PricingSimulatorService:
                     candidates.append((distance, abs(tv-base), scenario, pp))
             for distance, _token_distance, scenario, pp in sorted(candidates, key=lambda x: (x[0], x[1], x[2].tokens))[:8]:
                 recommendations.append(PricingSimulatorRecommendation(
-                    token_value_usd=round(scenario.customer_value_usd / scenario.tokens + scenario.discount_given_usd / scenario.tokens, 6),
+                    token_value_usd=round(tv, 6),
                     desired_profit_per_token_usd=round(pp, 6), tokens=scenario.tokens,
                     worst_discount_percent=round(data.worst_discount_percent, 4),
                     estimated_company_profit_usd=scenario.company_total_usd,
@@ -115,8 +122,12 @@ class PricingSimulatorService:
             duration_source=source, historical_samples_used=samples, estimate_confidence=confidence,
             scaledown_seconds=int(applied.scaledown_seconds or 0), technical_margin_seconds=int(applied.technical_margin_seconds or 0),
             billable_seconds=round(billable, 3), infrastructure_cost_usd=round(infra, 9),
-            current_token_value_usd=round(current_token, 9), current_profit_per_token_usd=round(current_profit, 9),
-            simulated_token_value_usd=round(token_value, 9), simulated_profit_per_token_usd=round(profit, 9),
+            current_token_value_usd=round(current_token, 9),
+            current_operational_reserve_per_token_usd=round(current_operational, 9),
+            current_profit_per_token_usd=round(current_profit, 9),
+            simulated_token_value_usd=round(token_value, 9),
+            simulated_operational_reserve_per_token_usd=round(current_operational, 9),
+            simulated_profit_per_token_usd=round(profit, 9),
             scenarios=scenarios, recommendations=recommendations, warnings=warnings,
         )
 

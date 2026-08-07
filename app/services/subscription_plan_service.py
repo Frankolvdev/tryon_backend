@@ -26,6 +26,7 @@ from app.schemas.subscription_plan import (
 from app.services.integration_service import integration_service
 from app.services.financial_protection_service import financial_protection_service
 from app.services.pricing_service import pricing_service
+from app.services.token_financial_snapshot_service import token_financial_snapshot_service
 from app.services.stripe_client_service import stripe_client_service
 
 
@@ -634,20 +635,20 @@ class SubscriptionPlanService:
             safe_profit = float(report.safe_profit_per_token_usd or 0)
             plan_metadata = self._parse_dict(plan.metadata_json)
             discount = float(plan_metadata.get("requested_discount_percent") or 0)
-            next_terms = {
-                "plan_id": plan.id,
-                "plan_key": plan.key,
-                "plan_name": plan.name,
-                "tokens_per_period": int(plan.tokens_per_period),
-                "token_value_usd": float(pricing_service._token_value(db)),
-                "normal_profit_per_token_usd": safe_profit,
-                "profit_discount_percent": discount,
-                "effective_profit_per_token_usd": safe_profit * (1 - discount / 100.0),
-                "price_paid_per_period_usd": float(plan.price_amount),
-                "currency": plan.currency,
-                "billing_interval": plan.billing_interval,
-                "billing_interval_count": int(getattr(plan, "billing_interval_count", 1) or 1),
-            }
+            next_terms = token_financial_snapshot_service.build_commercial_terms(
+                token_value_usd=pricing_service._token_value(db),
+                normal_profit_per_token_usd=safe_profit,
+                profit_discount_percent=discount,
+                operational_reserve_per_token_usd=pricing_service._operational_reserve(db),
+                plan_id=plan.id,
+                plan_key=plan.key,
+                plan_name=plan.name,
+                tokens_per_period=int(plan.tokens_per_period),
+                price_paid_per_period_usd=float(plan.price_amount),
+                currency=plan.currency,
+                billing_interval=plan.billing_interval,
+                billing_interval_count=int(getattr(plan, "billing_interval_count", 1) or 1),
+            )
             for subscription in subscriptions:
                 if not subscription.provider_subscription_id:
                     continue

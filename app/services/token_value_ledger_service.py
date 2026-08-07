@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import ConflictException
 from app.models.token_value_lot import TokenValueLot
 from app.models.token_consumption_allocation import TokenConsumptionAllocation
+from app.services.token_financial_snapshot_service import token_financial_snapshot_service
 
 class TokenValueLedgerService:
     @staticmethod
@@ -30,116 +31,43 @@ class TokenValueLedgerService:
         *,
         fallback_profit_per_token_usd: float = 0.0,
     ) -> dict:
-        metadata = self._parse_metadata(lot)
-        paid_value = self._decimal(lot.effective_token_value_usd)
-        has_frozen_profit = (
-            metadata.get("effective_profit_per_token_usd") is not None
-            or metadata.get("normal_profit_per_token_usd") is not None
+        components = token_financial_snapshot_service.read_lot_snapshot(
+            metadata=self._parse_metadata(lot),
+            paid_value_per_token=lot.effective_token_value_usd,
+            fallback_profit_per_token_usd=fallback_profit_per_token_usd,
         )
-        normal_profit = self._decimal(metadata.get("normal_profit_per_token_usd"))
-        discount = self._decimal(metadata.get("profit_discount_percent"))
-        if metadata.get("effective_profit_per_token_usd") is not None:
-            effective_profit = self._decimal(metadata.get("effective_profit_per_token_usd"))
-        elif has_frozen_profit:
-            effective_profit = normal_profit * (Decimal("1") - discount / Decimal("100"))
-        else:
-            # Compatibility only for genuinely old lots that predate commercial snapshots.
-            effective_profit = min(
-                max(self._decimal(fallback_profit_per_token_usd), Decimal("0")),
-                max(paid_value - Decimal("0.000000001"), Decimal("0")),
-            )
-        frozen_capacity = metadata.get("infrastructure_capacity_per_token_usd")
-        if frozen_capacity is not None:
-            capacity = max(self._decimal(frozen_capacity), Decimal("0"))
-        else:
-            capacity = max(paid_value - effective_profit, Decimal("0"))
         return {
-            "paid_value_per_token": paid_value,
-            "normal_profit_per_token": normal_profit,
-            "effective_profit_per_token": effective_profit,
-            "infrastructure_capacity_per_token": capacity,
-            "snapshot_source": "frozen_v2" if frozen_capacity is not None else ("frozen_legacy" if has_frozen_profit else "legacy_current_rule_fallback"),
-            "metadata": metadata,
+            "paid_value_per_token": components.paid_value_per_token,
+            "token_value_per_token": components.token_value_per_token,
+            "normal_profit_per_token": components.normal_profit_per_token,
+            "effective_profit_per_token": components.effective_profit_per_token,
+            "infrastructure_capacity_per_token": components.infrastructure_capacity_per_token,
+            "operational_reserve_per_token": components.operational_reserve_per_token,
+            "profit_discount_percent": components.profit_discount_percent,
+            "snapshot_source": components.snapshot_source,
+            "metadata": components.metadata,
         }
 
     def create_lot(self, db: Session, *, user_id:int, tokens:int, source:str, reference_id:str|None, amount_paid_usd:float=0.0, metadata:dict|None=None) -> TokenValueLot | None:
-        if tokens <= 0: return None
+        if tokens <= 0:
+            return None
         amount=max(float(amount_paid_usd or 0),0.0)
         paid_per_token=Decimal(str(amount/tokens if tokens else 0))
-        snapshot=dict(metadata or {})
-        normal_profit=self._decimal(snapshot.get("normal_profit_per_token_usd"))
-        discount=self._decimal(snapshot.get("profit_discount_percent"))
-        requested_effective_profit=self._decimal(
-            snapshot.get("effective_profit_per_token_usd"),
-            normal_profit*(Decimal("1")-discount/Decimal("100")),
+        snapshot=token_financial_snapshot_service.normalize_new_lot_snapshot(
+            metadata,
+            paid_value_per_token=paid_per_token,
         )
-
-        # Promotional token lots are externally funded. The customer paid value
-        # and company profit are zero, while the frozen AI reserve comes from the
-        # promotional provider-credit pool. This branch intentionally bypasses
-        # commercial paid-price validation without changing commercial lots.
-        if bool(snapshot.get("promotional_credit_funded")):
-            infrastructure_capacity=max(
-                self._decimal(snapshot.get("infrastructure_capacity_per_token_usd")),
-                Decimal("0"),
-            )
-            if infrastructure_capacity <= 0:
-                raise ConflictException("Promotional tokens require a positive frozen infrastructure reserve.")
-            effective_profit=Decimal("0")
-            snapshot.update({
-                "financial_snapshot_version": 2,
-                "effective_paid_token_value_usd": "0",
-                "requested_effective_profit_per_token_usd": "0",
-                "effective_profit_per_token_usd": "0",
-                "infrastructure_capacity_per_token_usd": str(infrastructure_capacity),
-                "infrastructure_reserve_source": "promotional_credit_pool",
-                "profit_adjusted_to_protect_infrastructure": False,
-            })
-            lot=TokenValueLot(
-                user_id=user_id,source=source,reference_id=reference_id,
-                original_tokens=tokens,remaining_tokens=tokens,amount_paid_usd=Decimal("0"),
-                effective_token_value_usd=Decimal("0"),
-                metadata_json=json.dumps(snapshot,ensure_ascii=False,default=str),
-            )
-            db.add(lot); db.flush(); return lot
-
-        # Commercial discounts may consume profit, never infrastructure.
-        # New commercial snapshots include the undiscounted token value and the
-        # normal protected profit. Their difference is the fixed amount reserved
-        # for AI for every token in the lot, regardless of coupon/plan/promotion.
-        token_value=self._decimal(snapshot.get("token_value_usd"))
-        has_protected_terms=(token_value>0 and normal_profit>=0 and token_value>normal_profit)
-        if has_protected_terms:
-            protected_capacity=token_value-normal_profit
-            if paid_per_token+Decimal("0.000000001")<protected_capacity:
-                raise ConflictException(
-                    "The paid amount does not cover the protected AI infrastructure reserve."
-                )
-            maximum_real_profit=max(paid_per_token-protected_capacity,Decimal("0"))
-            effective_profit=max(
-                min(requested_effective_profit,maximum_real_profit),
-                Decimal("0"),
-            )
-            infrastructure_capacity=protected_capacity
-        else:
-            # Compatibility for non-commercial and legacy credits without a
-            # complete protected commercial snapshot.
-            effective_profit=max(
-                min(requested_effective_profit,paid_per_token),
-                Decimal("0"),
-            )
-            infrastructure_capacity=max(paid_per_token-effective_profit,Decimal("0"))
-
-        snapshot.update({
-            "financial_snapshot_version": 2,
-            "effective_paid_token_value_usd": str(paid_per_token),
-            "requested_effective_profit_per_token_usd": str(max(requested_effective_profit,Decimal("0"))),
-            "effective_profit_per_token_usd": str(effective_profit),
-            "infrastructure_capacity_per_token_usd": str(infrastructure_capacity),
-            "infrastructure_reserve_source": "pricing_rule_fixed" if has_protected_terms else "legacy_paid_minus_profit",
-            "profit_adjusted_to_protect_infrastructure": bool(has_protected_terms and effective_profit<max(requested_effective_profit,Decimal("0"))),
-        })
-        lot=TokenValueLot(user_id=user_id,source=source,reference_id=reference_id,original_tokens=tokens,remaining_tokens=tokens,amount_paid_usd=Decimal(str(amount)),effective_token_value_usd=paid_per_token,metadata_json=json.dumps(snapshot,ensure_ascii=False,default=str))
+        promotional=bool(snapshot.get("promotional_credit_funded"))
+        lot=TokenValueLot(
+            user_id=user_id,
+            source=source,
+            reference_id=reference_id,
+            original_tokens=tokens,
+            remaining_tokens=tokens,
+            amount_paid_usd=Decimal("0") if promotional else Decimal(str(amount)),
+            effective_token_value_usd=Decimal("0") if promotional else paid_per_token,
+            metadata_json=json.dumps(snapshot,ensure_ascii=False,default=str),
+        )
         db.add(lot)
         db.flush()
         return lot
@@ -193,7 +121,12 @@ class TokenValueLedgerService:
             snapshot=self._snapshot_for_lot(lot,fallback_profit_per_token_usd=fallback_profit_per_token_usd)
             paid=snapshot["paid_value_per_token"]
             effective_profit=snapshot["effective_profit_per_token"] if apply_profit else Decimal("0")
-            capacity=paid-effective_profit if apply_profit else paid
+            # Compatibility-only quote. Never reconstruct infrastructure from
+            # paid value minus discounted profit; use explicit frozen components.
+            if apply_profit:
+                capacity=snapshot["infrastructure_capacity_per_token"]
+            else:
+                capacity=snapshot["token_value_per_token"] or paid
             capacity=max(capacity,Decimal("0"))
             if capacity<=0:
                 continue
@@ -393,33 +326,39 @@ class TokenValueLedgerService:
         normal_profit=Decimal("0")
         discount_given=Decimal("0")
         net_profit=Decimal("0")
+        infrastructure_capacity=Decimal("0")
+        operational_reserve=Decimal("0")
         grouped:dict[int,dict]={}
         legacy=False
-        for allocation,lot in rows:
-            net=max(allocation.tokens_allocated-allocation.tokens_reversed,0)
-            if not net:
-                continue
+
+        def apply_row(allocation, lot, take:int) -> None:
+            nonlocal tokens,cash_revenue,normal_profit,discount_given,net_profit
+            nonlocal infrastructure_capacity,operational_reserve,legacy
+            snapshot=self._snapshot_for_lot(lot)
+            metadata=snapshot["metadata"]
+            normal_per_token=snapshot["normal_profit_per_token"]
+            effective_per_token=snapshot["effective_profit_per_token"]
+            discount_percent=snapshot["profit_discount_percent"]
+            infrastructure_per_token=snapshot["infrastructure_capacity_per_token"]
+            operational_per_token=snapshot["operational_reserve_per_token"]
+            # Allocation value remains the historical cash value paid by the
+            # customer. It is deliberately NOT used to reconstruct infrastructure.
             value=Decimal(allocation.effective_token_value_usd or 0)
-            try:
-                metadata=json.loads(lot.metadata_json or "{}")
-            except (TypeError,ValueError):
-                metadata={}
-            normal_per_token=Decimal(str(metadata.get("normal_profit_per_token_usd") or 0))
-            discount_percent=Decimal(str(metadata.get("profit_discount_percent") or 0))
-            effective_per_token=Decimal(str(
-                metadata.get("effective_profit_per_token_usd")
-                if metadata.get("effective_profit_per_token_usd") is not None
-                else normal_per_token*(Decimal("1")-discount_percent/Decimal("100"))
-            ))
-            row_normal=normal_per_token*net
-            row_net=effective_per_token*net
+            row_normal=normal_per_token*take
+            row_net=effective_per_token*take
             row_discount=max(Decimal("0"),row_normal-row_net)
-            tokens+=net
-            cash_revenue+=value*net
+            row_infrastructure=infrastructure_per_token*take
+            row_operational=operational_per_token*take
+
+            tokens+=take
+            cash_revenue+=value*take
             normal_profit+=row_normal
             discount_given+=row_discount
             net_profit+=row_net
+            infrastructure_capacity+=row_infrastructure
+            operational_reserve+=row_operational
             legacy=legacy or lot.source=="legacy_untraced_balance"
+
             current=grouped.get(lot.id)
             if current is None:
                 current={
@@ -435,19 +374,30 @@ class TokenValueLedgerService:
                     "benefit_given_usd":0.0,
                     "company_profit_usd":0.0,
                     "effective_token_value_usd":float(value),
-                    "infrastructure_capacity_per_token_usd":float(max(value-effective_per_token,Decimal("0"))),
+                    "infrastructure_capacity_per_token_usd":float(infrastructure_per_token),
                     "infrastructure_capacity_from_tokens_usd":0.0,
+                    "operational_reserve_per_token_usd":float(operational_per_token),
+                    "operational_reserve_from_tokens_usd":0.0,
                     "cash_value_at_purchase_usd":0.0,
+                    "financial_economics_schema":metadata.get("financial_economics_schema"),
+                    "snapshot_source":snapshot.get("snapshot_source"),
                     "coupon_code":metadata.get("coupon_code"),
                     "plan_name":metadata.get("plan_name"),
                 }
                 grouped[lot.id]=current
-            current["tokens_used"]+=net
+            current["tokens_used"]+=take
             current["profit_without_benefit_usd"]+=float(row_normal)
             current["benefit_given_usd"]+=float(row_discount)
             current["company_profit_usd"]+=float(row_net)
-            current["infrastructure_capacity_from_tokens_usd"]+=float(max(value-effective_per_token,Decimal("0"))*net)
-            current["cash_value_at_purchase_usd"]+=float(value*net)
+            current["infrastructure_capacity_from_tokens_usd"]+=float(row_infrastructure)
+            current["operational_reserve_from_tokens_usd"]+=float(row_operational)
+            current["cash_value_at_purchase_usd"]+=float(value*take)
+
+        for allocation,lot in rows:
+            net=max(allocation.tokens_allocated-allocation.tokens_reversed,0)
+            if net:
+                apply_row(allocation,lot,net)
+
         # Historical/cancelled executions may have all reservation allocations marked
         # as reversed even though billing finalized with a minimum non-zero token charge.
         # Rebuild a read-only FIFO presentation from the original rows; do not mutate lots.
@@ -455,6 +405,15 @@ class TokenValueLedgerService:
         if tokens == 0 and expected > 0 and rows:
             remaining_expected=expected
             grouped={}
+            # Reset aggregate totals before rebuilding from original rows.
+            tokens=0
+            cash_revenue=Decimal("0")
+            normal_profit=Decimal("0")
+            discount_given=Decimal("0")
+            net_profit=Decimal("0")
+            infrastructure_capacity=Decimal("0")
+            operational_reserve=Decimal("0")
+            legacy=False
             for allocation,lot in rows:
                 if remaining_expected<=0:
                     break
@@ -462,55 +421,9 @@ class TokenValueLedgerService:
                 take=min(original,remaining_expected)
                 if take<=0:
                     continue
-                try:
-                    metadata=json.loads(lot.metadata_json or "{}")
-                except (TypeError,ValueError):
-                    metadata={}
-                normal_per_token=Decimal(str(metadata.get("normal_profit_per_token_usd") or 0))
-                discount_percent=Decimal(str(metadata.get("profit_discount_percent") or 0))
-                effective_per_token=Decimal(str(
-                    metadata.get("effective_profit_per_token_usd")
-                    if metadata.get("effective_profit_per_token_usd") is not None
-                    else normal_per_token*(Decimal("1")-discount_percent/Decimal("100"))
-                ))
-                value=Decimal(allocation.effective_token_value_usd or 0)
-                current=grouped.get(lot.id)
-                if current is None:
-                    current={
-                        "token_bag_id":lot.id,
-                        "source":lot.source,
-                        "source_label":metadata.get("source_label") or metadata.get("source") or lot.source,
-                        "reference_id":lot.reference_id,
-                        "tokens_used":0,
-                        "benefit_percent":float(discount_percent),
-                        "normal_profit_per_token_usd":float(normal_per_token),
-                        "profit_per_token_after_benefit_usd":float(effective_per_token),
-                        "profit_without_benefit_usd":0.0,
-                        "benefit_given_usd":0.0,
-                        "company_profit_usd":0.0,
-                        "effective_token_value_usd":float(value),
-                        "infrastructure_capacity_per_token_usd":float(max(value-effective_per_token,Decimal("0"))),
-                        "infrastructure_capacity_from_tokens_usd":0.0,
-                        "cash_value_at_purchase_usd":0.0,
-                        "coupon_code":metadata.get("coupon_code"),
-                        "plan_name":metadata.get("plan_name"),
-                    }
-                    grouped[lot.id]=current
-                row_normal=normal_per_token*take
-                row_net=effective_per_token*take
-                current["tokens_used"]+=take
-                current["profit_without_benefit_usd"]+=float(row_normal)
-                current["benefit_given_usd"]+=float(max(Decimal("0"),row_normal-row_net))
-                current["company_profit_usd"]+=float(row_net)
-                current["infrastructure_capacity_from_tokens_usd"]+=float(max(value-effective_per_token,Decimal("0"))*take)
-                current["cash_value_at_purchase_usd"]+=float(value*take)
-                tokens+=take
-                cash_revenue+=value*take
-                normal_profit+=row_normal
-                discount_given+=max(Decimal("0"),row_normal-row_net)
-                net_profit+=row_net
-                legacy=legacy or lot.source=="legacy_untraced_balance"
+                apply_row(allocation,lot,take)
                 remaining_expected-=take
+
         allocations=list(grouped.values())
         return {
             "tokens":tokens,
@@ -518,6 +431,8 @@ class TokenValueLedgerService:
             "profit_without_benefits_usd":float(normal_profit),
             "customer_benefits_usd":float(discount_given),
             "company_profit_usd":float(net_profit),
+            "infrastructure_capacity_from_tokens_usd":float(infrastructure_capacity),
+            "operational_reserve_from_tokens_usd":float(operational_reserve),
             "allocations":allocations,
             "traceability_status":"partial" if legacy else ("exact" if rows else "unavailable"),
         }

@@ -8,14 +8,15 @@ def read(path:str)->str:
 
 def test_promotional_tokens_are_provider_funded_zero_profit_lots():
     source=read("app/services/promotional_credit_service.py")
-    assert '"normal_profit_per_token_usd": "0"' in source
-    assert '"effective_profit_per_token_usd": "0"' in source
-    assert '"promotional_credit_funded": True' in source
-    assert '"infrastructure_capacity_per_token_usd": str(generation_reserve)' in source
-    assert '"promotional_funding_per_token_usd": str(funding_per_token)' in source
+    assert "build_commercial_terms(" in source
+    assert "normal_profit_per_token_usd=0" in source
+    assert "promotional_credit_funded=True" in source
+    assert 'snapshot["infrastructure_capacity_per_token_usd"] = str(generation_reserve)' in source
+    assert "promotional_funding_per_token_usd=str(funding_per_token)" in source
+    economics=read("app/services/token_financial_snapshot_service.py")
+    assert 'if promotional:' in economics
     ledger=read("app/services/token_value_ledger_service.py")
-    assert 'if bool(snapshot.get("promotional_credit_funded"))' in ledger
-    assert 'effective_token_value_usd=Decimal("0")' in ledger
+    assert 'Decimal("0") if promotional' in ledger
 
 
 def test_promotional_pool_reserves_full_token_value_but_generation_math_keeps_protected_ai_reserve():
@@ -23,9 +24,9 @@ def test_promotional_pool_reserves_full_token_value_but_generation_math_keeps_pr
     assert "Promotional tokens carry zero company profit" in source
     assert "return token_value" in source
     assert "generation_infrastructure_reserve_per_token" in source
-    assert "reserve = (token_value - safe_profit)" in source
-    assert '"infrastructure_capacity_per_token_usd": str(generation_reserve)' in source
-    assert '"promotional_funding_per_token_usd": str(funding_per_token)' in source
+    assert "generation_infrastructure_capacity(" in source
+    assert 'snapshot["infrastructure_capacity_per_token_usd"] = str(generation_reserve)' in source
+    assert "promotional_funding_per_token_usd=str(funding_per_token)" in source
     assert "token_charge_for_infrastructure" not in source
 
 

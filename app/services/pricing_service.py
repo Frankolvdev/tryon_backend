@@ -29,8 +29,10 @@ from app.schemas.provider_pricing import AppliedPricingRuleResponse
 from app.services.ai_engine_settings_service import ai_engine_settings_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.provider_pricing_service import provider_pricing_service
+from app.services.token_financial_snapshot_service import token_financial_snapshot_service
 
 TOKEN_VALUE_KEY = "commercial_token_value_usd"
+OPERATIONAL_RESERVE_KEY = "commercial_operational_reserve_per_token_usd"
 CURRENCY_KEY = "commercial_currency"
 DEFAULT_TOKEN_VALUE_USD = 0.10
 DEFAULT_CURRENCY = "USD"
@@ -59,6 +61,15 @@ class PricingService:
         setting = system_setting_repository.get_by_key(db, TOKEN_VALUE_KEY)
         value = setting.value_float if setting else DEFAULT_TOKEN_VALUE_USD
         return max(float(value or DEFAULT_TOKEN_VALUE_USD), 0.000001)
+
+    def _operational_reserve(self, db: Session) -> float:
+        setting = system_setting_repository.get_by_key(db, OPERATIONAL_RESERVE_KEY)
+        return max(float(setting.value_float or 0) if setting else 0.0, 0.0)
+
+    def _commercial_sale_value(self, db: Session) -> float:
+        # Operational reserve is a commercial surcharge. It is deliberately
+        # outside token_value_usd so generation-token math remains unchanged.
+        return self._token_value(db) + self._operational_reserve(db)
 
     def _currency(self, db: Session) -> str:
         setting = system_setting_repository.get_by_key(db, CURRENCY_KEY)
@@ -110,7 +121,7 @@ class PricingService:
         return ExecutionBillingPolicy.model_validate(payload)
 
     def price_for_tokens(self, db: Session, tokens: int) -> tuple[float, str]:
-        amount = max(int(tokens), 0) * self._token_value(db)
+        amount = max(int(tokens), 0) * self._commercial_sale_value(db)
         return round(amount, 6), self._currency(db)
 
 
@@ -129,15 +140,15 @@ class PricingService:
         """
         token_value = self._token_value(db)
         profit_per_token = max(float(desired_profit_per_token_usd or 0), 0.0) if apply_profit else 0.0
-        if profit_per_token >= token_value:
-            from app.common.exceptions import ConflictException
-            raise ConflictException(
-                f"Desired profit per token must be lower than token value ({token_value:.9f} USD)."
-            )
         infrastructure = max(float(infrastructure_cost_usd or 0), 0.0)
         if infrastructure <= 0:
             return 0, 0.0, 0.0, 0.0
-        capacity = token_value - profit_per_token
+        capacity = float(
+            token_financial_snapshot_service.generation_infrastructure_capacity(
+                token_value_usd=token_value,
+                normal_profit_per_token_usd=profit_per_token,
+            )
+        )
         tokens = max(1, math.ceil(infrastructure / capacity))
         charged = tokens * token_value
         configured_profit = tokens * profit_per_token
@@ -145,7 +156,12 @@ class PricingService:
         return tokens, charged, configured_profit, rounding_surplus
 
     def get_commercial_settings(self, db: Session) -> CommercialSettingsResponse:
-        return CommercialSettingsResponse(token_value_usd=self._token_value(db), currency=self._currency(db))
+        return CommercialSettingsResponse(
+            token_value_usd=self._token_value(db),
+            operational_reserve_per_token_usd=self._operational_reserve(db),
+            commercial_sale_value_per_token_usd=self._commercial_sale_value(db),
+            currency=self._currency(db),
+        )
 
     def update_commercial_settings(self, db: Session, data: CommercialSettingsUpdate) -> CommercialSettingsResponse:
         token_setting = system_setting_repository.get_by_key(db, TOKEN_VALUE_KEY)

@@ -18,11 +18,13 @@ def test_generic_credit_service_still_does_not_auto_settle_debt():
     assert "pending_generation_settlement_service" not in token
 
 
-def test_commercial_token_lot_protection_formula_is_unchanged():
+def test_commercial_token_lot_protection_is_centralized_without_changing_the_rule():
     ledger=read("app/services/token_value_ledger_service.py")
-    assert "protected_capacity=token_value-normal_profit" in ledger
-    assert "maximum_real_profit=max(paid_per_token-protected_capacity" in ledger
-    assert "infrastructure_capacity=protected_capacity" in ledger
+    economics=read("app/services/token_financial_snapshot_service.py")
+    assert "normalize_new_lot_snapshot" in ledger
+    assert "capacity = token_value - normal_profit" in economics
+    assert "maximum_real_profit = max(paid - minimum_protected" in economics
+    assert "infrastructure = max(" in economics
 
 
 def test_promotional_addition_does_not_modify_provider_engines_or_stripe_clients():

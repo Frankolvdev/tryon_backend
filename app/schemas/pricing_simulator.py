@@ -35,6 +35,7 @@ class PricingSimulatorScenarioResponse(BaseModel):
     tokens: int
     customer_value_usd: float
     infrastructure_cost_usd: float
+    operational_reserve_usd: float = 0
     normal_profit_usd: float
     discount_given_usd: float
     profit_after_discount_usd: float
@@ -70,8 +71,10 @@ class PricingSimulatorResponse(BaseModel):
     billable_seconds: float
     infrastructure_cost_usd: float
     current_token_value_usd: float
+    current_operational_reserve_per_token_usd: float = 0
     current_profit_per_token_usd: float
     simulated_token_value_usd: float
+    simulated_operational_reserve_per_token_usd: float = 0
     simulated_profit_per_token_usd: float
     scenarios: list[PricingSimulatorScenarioResponse]
     recommendations: list[PricingSimulatorRecommendation]

@@ -2,22 +2,23 @@ from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "app/services/token_value_ledger_service.py").read_text(encoding="utf-8")
+ECONOMICS = (ROOT / "app/services/token_financial_snapshot_service.py").read_text(encoding="utf-8")
+LEDGER = (ROOT / "app/services/token_value_ledger_service.py").read_text(encoding="utf-8")
 
 
-def test_new_commercial_lots_freeze_pricing_rule_infrastructure_reserve():
-    create_lot = SOURCE[SOURCE.index("def create_lot"):SOURCE.index("def quote_fifo_infrastructure_charge")]
-    assert 'token_value=self._decimal(snapshot.get("token_value_usd"))' in create_lot
-    assert "protected_capacity=token_value-normal_profit" in create_lot
-    assert '"infrastructure_capacity_per_token_usd": str(infrastructure_capacity)' in create_lot
-    assert '"infrastructure_reserve_source": "pricing_rule_fixed"' in create_lot
+def test_new_commercial_lots_delegate_to_explicit_component_snapshot_service():
+    create_lot = LEDGER[LEDGER.index("def create_lot"):LEDGER.index("def quote_fifo_infrastructure_charge")]
+    assert "normalize_new_lot_snapshot" in create_lot
+    assert "token_value - normal_profit" in ECONOMICS
+    assert '"infrastructure_capacity_per_token_usd": str(infrastructure)' in ECONOMICS
+    assert '"operational_reserve_per_token_usd": str(operational)' in ECONOMICS
+    assert '"infrastructure_reserve_source": infrastructure_source' in ECONOMICS
 
 
 def test_discount_shortfall_is_absorbed_by_profit_not_infrastructure():
-    create_lot = SOURCE[SOURCE.index("def create_lot"):SOURCE.index("def quote_fifo_infrastructure_charge")]
-    assert "maximum_real_profit=max(paid_per_token-protected_capacity" in create_lot
-    assert "min(requested_effective_profit,maximum_real_profit)" in create_lot
-    assert '"profit_adjusted_to_protect_infrastructure"' in create_lot
+    assert "maximum_real_profit = max(paid - minimum_protected" in ECONOMICS
+    assert "min(requested_effective, maximum_real_profit)" in ECONOMICS
+    assert '"profit_adjusted_to_protect_infrastructure"' in ECONOMICS
 
     token_value = Decimal("0.11")
     normal_profit = Decimal("0.103")
@@ -42,7 +43,7 @@ def test_correctly_priced_25_percent_discount_preserves_profit_and_reserve():
     assert correct_price_per_token * Decimal("660") == Decimal("55.60500")
 
 
-def test_legacy_lots_keep_compatibility_fallback():
-    create_lot = SOURCE[SOURCE.index("def create_lot"):SOURCE.index("def quote_fifo_infrastructure_charge")]
-    assert "legacy_paid_minus_profit" in create_lot
-    assert "infrastructure_capacity=max(paid_per_token-effective_profit" in create_lot
+def test_legacy_lots_keep_compatibility_fallback_only_in_snapshot_service():
+    assert "legacy_paid_minus_profit" in ECONOMICS
+    assert "paid - effective_profit - operational" in ECONOMICS
+    assert "legacy_paid_minus_profit" not in LEDGER

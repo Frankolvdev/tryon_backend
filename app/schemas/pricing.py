@@ -6,7 +6,13 @@ from app.common.enums import PricingOperationType, QualityMode, TryOnItemType
 
 
 class CommercialSettingsResponse(BaseModel):
+    # Economic base used by generation pricing: AI reserve + protected profit.
     token_value_usd: float = Field(gt=0)
+    # Explicit component reserved for non-AI operating expenses. It is zero
+    # until the operational cashbox is enabled in MegaZIP 4.
+    operational_reserve_per_token_usd: float = Field(default=0, ge=0)
+    # What commercial catalog pricing uses before profit discounts.
+    commercial_sale_value_per_token_usd: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
 
 

@@ -2,11 +2,14 @@ from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
 
-def test_cancelled_fallback_initializes_infrastructure_fields():
+def test_cancelled_fallback_reuses_the_same_explicit_component_builder():
     source=(ROOT/"app/services/token_value_ledger_service.py").read_text(encoding="utf-8")
     fallback=source[source.index("if tokens == 0 and expected > 0"):source.index("allocations=list(grouped.values())")]
-    assert '"infrastructure_capacity_per_token_usd"' in fallback
-    assert '"infrastructure_capacity_from_tokens_usd":0.0' in fallback
+    assert "apply_row(allocation,lot,take)" in fallback
+    apply_start=source.index("def apply_row")
+    apply_row=source[apply_start:source.index("for allocation,lot in rows", apply_start)]
+    assert 'snapshot["infrastructure_capacity_per_token"]' in apply_row
+    assert '"infrastructure_capacity_from_tokens_usd":0.0' in apply_row
 
 def test_cashbox_uses_historical_financial_evidence_when_net_allocations_are_zero():
     source=(ROOT/"app/services/finance_cashbox_service.py").read_text(encoding="utf-8")
