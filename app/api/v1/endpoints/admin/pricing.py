@@ -52,8 +52,9 @@ def update_commercial_settings(
         entity_type="commercial_settings",
         entity_id=None,
         description=(
-            f"Commercial settings updated: 1 token = {result.token_value_usd} "
-            f"{result.currency}."
+            f"Commercial settings updated: generation base = {result.token_value_usd} "
+            f"{result.currency}; operational reserve/token = {result.operational_reserve_per_token_usd}; "
+            f"commercial sale value/token = {result.commercial_sale_value_per_token_usd}."
         ),
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),

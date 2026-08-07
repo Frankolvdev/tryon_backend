@@ -166,9 +166,23 @@ class PricingService:
     def update_commercial_settings(self, db: Session, data: CommercialSettingsUpdate) -> CommercialSettingsResponse:
         token_setting = system_setting_repository.get_by_key(db, TOKEN_VALUE_KEY)
         currency_setting = system_setting_repository.get_by_key(db, CURRENCY_KEY)
+        operational_setting = system_setting_repository.get_by_key(db, OPERATIONAL_RESERVE_KEY)
         if not token_setting or not currency_setting:
             raise NotFoundException("Commercial settings are missing. Seed default system settings first.")
+        if operational_setting is None:
+            operational_setting = SystemSetting(
+                category="pricing", key=OPERATIONAL_RESERVE_KEY,
+                label="Operational reserve per token (USD)",
+                description="Additional protected amount for company operating expenses.",
+                value_type="float", value_float=0.0, default_value_float=0.0,
+                is_public=False, is_editable=True, is_sensitive=False,
+                requires_restart=False, sort_order=15,
+            )
+            db.add(operational_setting)
+            db.flush()
         system_setting_repository.update(db, db_obj=token_setting, data={"value_float": float(data.token_value_usd)})
+        if data.operational_reserve_per_token_usd is not None:
+            system_setting_repository.update(db, db_obj=operational_setting, data={"value_float": float(data.operational_reserve_per_token_usd)})
         system_setting_repository.update(db, db_obj=currency_setting, data={"value_string": data.currency.upper()})
         return self.get_commercial_settings(db)
 

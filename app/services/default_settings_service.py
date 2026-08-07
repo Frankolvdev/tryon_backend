@@ -196,6 +196,18 @@ class DefaultSettingsService:
             ),
             SystemSettingCreate(
                 category=SettingCategory.PRICING,
+                key="commercial_operational_reserve_per_token_usd",
+                label="Operational reserve per token (USD)",
+                description="Additional commercial amount protected for domains, hosting, email and other operating expenses. Never changes AI token-cost math.",
+                value_type=SettingValueType.FLOAT,
+                value=0.0,
+                default_value=0.0,
+                is_public=False,
+                sort_order=15,
+            ),
+
+            SystemSettingCreate(
+                category=SettingCategory.PRICING,
                 key="commercial_currency",
                 label="Commercial Currency",
                 description="ISO 4217 currency used by the commercial module.",

@@ -184,6 +184,7 @@ class GenerationDataResetService:
             delete_all("promotional_credit_returns")
             delete_all("promotional_token_grants")
             delete_all("promotional_credit_funds")
+            delete_all("operational_expenses")
 
             # Financial and token ledger dependencies.
             delete_all("token_consumption_allocations")

@@ -24,4 +24,6 @@ class TokenValueLot(Base):
     commercial_profit_released: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     released_commercial_profit_usd: Mapped[Decimal] = mapped_column(Numeric(14,6), default=0, nullable=False)
     released_expiration_usd: Mapped[Decimal] = mapped_column(Numeric(14,6), default=0, nullable=False)
+    operational_reserve_released: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    released_operational_reserve_usd: Mapped[Decimal] = mapped_column(Numeric(14,6), default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, nullable=False, index=True)

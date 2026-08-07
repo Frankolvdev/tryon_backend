@@ -79,6 +79,9 @@ class TokenBagResponse(BaseModel):
     normal_profit_per_token_usd: float
     effective_profit_per_token_usd: float
     infrastructure_capacity_per_token_usd: float
+    operational_reserve_per_token_usd: float = 0.0
+    operational_reserve_total_usd: float = 0.0
+    operational_reserve_released_usd: float = 0.0
     commercial_profit_total_usd: float
     commercial_profit_released_usd: float
     realized_extra_profit_usd: float
@@ -225,3 +228,41 @@ class PendingRecoverySummaryResponse(BaseModel):
 class PendingRecoveryListResponse(BaseModel):
     items: list[PendingRecoveryItemResponse] = Field(default_factory=list)
     summary: PendingRecoverySummaryResponse
+
+
+class OperationalCashboxSummaryResponse(BaseModel):
+    operational_reserve_per_token_usd: float
+    commercial_sale_value_per_token_usd: float
+    lifetime_operational_funds_usd: float
+    released_operational_funds_usd: float
+    blocked_operational_funds_usd: float
+    spent_operational_funds_usd: float
+    available_operational_funds_usd: float
+    contributing_bags: int
+
+
+class OperationalExpenseCreate(BaseModel):
+    amount_usd: float = Field(gt=0)
+    category: str = Field(min_length=2, max_length=80)
+    beneficiary: str | None = None
+    concept: str = Field(min_length=2, max_length=255)
+    method: str | None = None
+    proof_url: str | None = None
+    notes: str | None = None
+    spent_at: datetime | None = None
+
+
+class OperationalExpenseResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    amount_usd: float
+    currency: str
+    category: str
+    beneficiary: str | None
+    concept: str
+    method: str | None
+    proof_url: str | None
+    notes: str | None
+    created_by_user_id: int | None
+    spent_at: datetime
+    created_at: datetime

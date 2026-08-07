@@ -81,3 +81,28 @@ def create_promotional_grant(data:PromotionalGrantCreate,request:Request,db:Sess
  result=promotional_credit_service.grant(db,user_id=user.id,tokens=data.tokens,provider=data.provider,grant_type='manual_admin',created_by_user_id=current_admin.id,allow_partial=False)
  audit_service.create_log(db,actor_user_id=current_admin.id,action='promotional_tokens_granted',entity_type='user',entity_id=str(user.id),description=f"{result['granted_tokens']} promotional token(s) granted from {result['provider']} credit.",ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
  db.commit(); return result
+from app.schemas.finance_cashbox import (
+    OperationalCashboxSummaryResponse, OperationalExpenseCreate, OperationalExpenseResponse,
+)
+from app.services.operational_cashbox_service import operational_cashbox_service
+
+
+
+
+@router.get('/operational-cashbox', response_model=OperationalCashboxSummaryResponse)
+def operational_cashbox(db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+    finance_cashbox_service.ensure_expirations(db)
+    db.flush()
+    return operational_cashbox_service.summary(db)
+
+
+@router.get('/operational-expenses', response_model=list[OperationalExpenseResponse])
+def operational_expenses(db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+    return operational_cashbox_service.expenses(db)
+
+
+@router.post('/operational-expenses', response_model=OperationalExpenseResponse)
+def create_operational_expense(data:OperationalExpenseCreate,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+    result=operational_cashbox_service.create_expense(db,data,current_admin.id)
+    audit_service.create_log(db,actor_user_id=current_admin.id,action='operational_expense_created',entity_type='operational_expense',entity_id=str(result.id),description=f"Operational expense of USD {result.amount_usd} registered: {result.concept}.",ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
+    db.commit(); db.refresh(result); return result

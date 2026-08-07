@@ -266,6 +266,14 @@ class TokenValueLedgerService:
                 # Promotional credits carry no company profit. Their provider-funded
                 # reserve remains outside Caja verde for the entire lifecycle.
                 lot.released_commercial_profit_usd=(snapshot["effective_profit_per_token"]*lot.original_tokens).quantize(Decimal("0.000001"))
+                # Operating-expense funds become spendable only when the bag
+                # becomes non-refundable through first use. Use the token count
+                # that still belonged to the bag immediately before this debit so
+                # prior partial refunds can never release money twice.
+                from app.services.operational_cashbox_service import operational_cashbox_service
+                operational_cashbox_service.release_on_activation(
+                    lot, tokens_backed=int(lot.remaining_tokens or 0) + int(take)
+                )
             if lot.remaining_tokens <= 0 and lot.status not in {"expired","refunded"}:
                 lot.status="exhausted"
             db.add(TokenConsumptionAllocation(execution_id=execution_id,user_id=user_id,lot_id=lot.id,token_transaction_id=token_transaction_id,tokens_allocated=take,tokens_reversed=0,effective_token_value_usd=lot.effective_token_value_usd))

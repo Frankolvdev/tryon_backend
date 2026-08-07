@@ -1,104 +1,115 @@
-# MegaZIP 3A — Backend — Blindaje financiero V3
+# MegaZIP 4A — Backend — Caja de Gastos Operativos FINAL
 
 BASE EXACTA
-tryon_backend-main - 2026-08-07T130411.041.zip
-(MegaZIP 1 y MegaZIP 2 ya aplicados por el usuario)
+tryon_backend-main - 2026-08-07T134139.831.zip
+(MegaZIP 1, 2 y 3 ya aplicados)
 
 OBJETIVO
-Centralizar los componentes económicos de cada token antes de introducir la
-Caja de Gastos Operativos del MegaZIP 4. Este MegaZIP NO activa todavía ningún
-recargo operativo.
+Activar el componente operativo que MegaZIP 3 dejó explícitamente separado,
+sin modificar la fórmula que determina cuántos tokens cuesta una generación.
 
-ARQUITECTURA V3
-Cada bolsa nueva congela explícitamente:
-- token_value_usd: base económica que usa la generación;
-- infrastructure_capacity_per_token_usd;
-- operational_reserve_per_token_usd (0 por ahora);
-- normal_profit_per_token_usd;
-- effective_profit_per_token_usd;
-- profit_discount_percent;
-- financial_economics_schema = explicit_components_v3.
+MODELO
+Ejemplo actual:
+  base económica token:      USD 0.110
+  IA congelada:              USD 0.007
+  ganancia normal:           USD 0.103
+  operación configurada:     USD 0.002
+  precio comercial nominal:  USD 0.112
 
-REGLA CENTRAL
-La infraestructura de una bolsa nueva NO se reconstruye como:
-    precio_pagado - ganancia
-Los consumidores leen el componente congelado.
+Con descuento del 25% sobre ganancia:
+  IA:                        USD 0.00700  (NO cambia)
+  operación:                 USD 0.00200  (NO cambia)
+  ganancia efectiva:         USD 0.07725
+  cliente paga:              USD 0.08625
 
-La única compatibilidad "paid - profit" que queda está encapsulada dentro de
-token_financial_snapshot_service y se usa exclusivamente como fallback para
-bolsas genuinamente antiguas que no tienen componentes congelados.
+REGLA INVIOLABLE
+La operación es un RECARGO COMERCIAL externo a token_value_usd.
+token_charge_for_infrastructure() sigue sin leer:
+- operational_reserve;
+- commercial_sale_value.
 
-GENERACIONES
-El número de tokens continúa calculándose solamente desde:
-    token_value_usd - ganancia protegida de la regla
-El futuro componente operativo NO participa en esta fórmula.
+Por tanto una generación mantiene exactamente la misma cantidad de tokens.
 
-PRECIO COMERCIAL PREPARADO PARA MEGAZIP 4
-Se separan:
-- token_value_usd: base de generación;
-- operational_reserve_per_token_usd: 0 actualmente;
-- commercial_sale_value_per_token_usd: base + operación.
+SNAPSHOTS
+Cada bolsa nueva congela operational_reserve_per_token_usd.
+Cambiarlo mañana NO recalcula ninguna bolsa anterior.
+Bolsas históricas conservan su valor congelado (normalmente USD 0).
 
-price_for_tokens() usa commercial_sale_value_per_token_usd. Como operación
-todavía vale 0, este MegaZIP no cambia ningún precio actual.
+LIBERACIÓN A CAJA OPERATIVA
+El fondo operativo se comporta de forma parecida a la ganancia, pero en una
+caja completamente independiente:
+- bolsa nueva/reembolsable: operación BLOQUEADA;
+- primer consumo: la bolsa deja de ser reembolsable y se libera el componente
+  operativo respaldado por los tokens que realmente pertenecían a la bolsa;
+- bolsa nunca usada que vence: se libera el componente operativo de los tokens
+  vencidos;
+- bolsa reembolsada: no libera fondo operativo;
+- bolsa promocional: jamás aporta a Caja Operativa.
 
-DESCUENTOS
-Siguen reduciendo únicamente la ganancia. No modifican infraestructura ni
-el futuro componente operativo.
+Un reembolso parcial previo al primer uso tampoco puede liberar dinero
+correspondiente a los tokens devueltos.
 
-SNAPSHOTS HISTÓRICOS
-No se migran ni recalculan. V2 y legacy continúan siendo legibles.
-Las bolsas nuevas pasan a financial_snapshot_version=3.
+GASTOS / RETIROS OPERATIVOS
+Nueva tabla operational_expenses.
+Permite registrar de forma independiente:
+- hosting;
+- correo;
+- dominios;
+- storage;
+- software;
+- contabilidad;
+- otros.
 
-PROMOCIONALES
-Mantienen:
-- cliente pagó = 0;
-- ganancia = 0;
-- respaldo promocional propio;
-- capacidad IA congelada independiente;
-- operational_reserve = 0.
-No se modifica su política de deudas del MegaZIP 2.
+Cada movimiento soporta importe, categoría, beneficiario, concepto, método,
+comprobante/notas y fecha.
 
-SIMULADOR
-Queda preparado para separar la reserva operativa del redondeo y de la
-ganancia. Con operación=0 el resultado actual es idéntico.
+No permite gastar más de lo que la Caja Operativa tiene liberado. La operación
+se serializa con bloqueo de fila para evitar doble gasto simultáneo.
 
-NO MODIFICA
-- FIFO de consumo;
-- generación runtime;
-- generation_module_billing_service;
-- Stripe;
-- Modal;
-- RunPod;
-- Beam;
-- Caja verde;
-- Caja IA/fondeos;
-- pérdidas pendientes/auto-desbloqueo;
-- vencimientos;
-- migraciones de base de datos.
+NO SE MEZCLA CON
+- Caja verde / utilidad;
+- retiros de utilidad;
+- Caja IA;
+- fondeos Modal/RunPod/Beam;
+- créditos promocionales;
+- pérdidas pendientes.
 
-MIGRACIÓN
-NO hay migración Alembic en MegaZIP 3.
+PRECIOS Y DESCUENTOS
+pricing_service.price_for_tokens() usa:
+    commercial_sale_value = token_value_usd + operational_reserve
+
+financial_protection_service continúa descontando exclusivamente:
+    safe_profit_per_token * discount_percent
+
+Así cupones, paquetes y planes nunca descuentan IA ni operación.
+
+IMPORTANTE AL CAMBIAR EL RECARGO
+Después de guardar el nuevo fondo operativo por token en BackOffice, usar
+"Recalcular catálogo" para actualizar paquetes y planes locales.
+Los planes recurrentes que ya están sincronizados con Stripe conservan la
+política existente del proyecto: deben sincronizarse con Stripe para que el
+nuevo precio aplique al siguiente periodo, sin tocar el periodo ya pagado.
+
+MIGRACIÓN OBLIGATORIA
+alembic upgrade head
+
+Head esperado:
+05c_operational_cashbox (head)
 
 VALIDACIÓN REALIZADA
 - python -m compileall: OK
-- 68 contratos directamente relacionados: PASSED
-- Suite amplia ejecutable en este entorno:
-    123 PASSED
-    5 FAILED
-  Los mismos 5 fallos existen en el ZIP BASE sin MegaZIP 3:
-  * test_financial_limiting_rule_contract.py
-  * test_finance_bag_historical_compatibility_contract.py (su segundo contrato)
-  * test_financial_protection_engine_contract.py
-  * test_financial_limiting_rule_all_active_contract.py
-  * test_generation_finance_contract.py
-- 5 pruebas Runtime Builder adicionales no pudieron coleccionarse en este
-  entorno por falta de psycopg2; no fueron modificadas por este MegaZIP.
+- alembic heads: 05c_operational_cashbox (head)
+- 75 contratos acumulados directamente relacionados: PASSED
+- batería financiera amplia: 90 PASSED / 5 FAILED
+- los mismos 5 fallos históricos ya existían antes de MegaZIP 4 y no fueron
+  modificados artificialmente.
 
 PRUEBA RECOMENDADA
 python -m pytest -q `
-  tests/test_token_financial_snapshot_v3_values.py `
+  tests/test_operational_cashbox_contract.py `
+  tests/test_operational_snapshot_discount_contract.py `
   tests/test_financial_components_v3_contract.py `
+  tests/test_token_financial_snapshot_v3_values.py `
   tests/test_fifo_token_bag_pricing_v2_contract.py `
   tests/test_token_lot_infrastructure_protection_contract.py `
   tests/test_promotional_credit_cashbox_contract.py `
@@ -111,4 +122,4 @@ python -m pytest -q `
   tests/test_execution_billing_policy_contract.py `
   tests/test_commercial_snapshots_and_finance_contract.py
 
-Resultado validado para ese conjunto: 68 passed.
+Resultado esperado para ese conjunto: 75 passed.

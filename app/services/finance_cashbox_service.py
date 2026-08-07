@@ -31,6 +31,7 @@ from app.services.infrastructure_cashbox_accounting import (
 )
 from app.services.pending_recovery_service import pending_recovery_service
 from app.services.promotional_credit_service import promotional_credit_service
+from app.services.operational_cashbox_service import operational_cashbox_service
 
 D=Decimal
 class FinanceCashboxService:
@@ -265,6 +266,13 @@ class FinanceCashboxService:
                     description=f'{removed} token(s) expired from token bag #{lot.id}.',
                 ))
 
+        # A never-used commercial bag becomes non-refundable at expiration.
+        # Release only its frozen operating component; historical bags with a
+        # zero component remain untouched. Promotional credits contribute zero.
+        operational_cashbox_service.release_on_expiration(
+            lot, expired_tokens=expired_tokens
+        )
+
         lot.remaining_tokens=0
         lot.status='expired'
         lot.expired_at=expired_at
@@ -474,7 +482,7 @@ class FinanceCashboxService:
         discount=D(str(m.get('profit_discount_percent') or 0))
         benefit_source=m.get('benefit_source') or ('coupon' if m.get('coupon_code') else ('plan' if m.get('plan_name') else ('package' if package_name else None)))
         benefit_label=m.get('benefit_label') or m.get('coupon_code') or m.get('plan_name') or package_name
-        return {'id':lot.id,'user_id':lot.user_id,'user_email':user_email,'source':lot.source,'source_label':m.get('source_label') or m.get('plan_name') or package_name or lot.source,'reference_id':lot.reference_id,'status':lot.status,'original_tokens':lot.original_tokens,'remaining_tokens':lot.remaining_tokens,'consumed_tokens':consumed,'amount_paid_usd':float(lot.amount_paid_usd or 0),'effective_token_value_usd':float(snap['paid_value_per_token']),'normal_profit_per_token_usd':float(snap['normal_profit_per_token']),'effective_profit_per_token_usd':float(snap['effective_profit_per_token']),'infrastructure_capacity_per_token_usd':float(snap['infrastructure_capacity_per_token']),'commercial_profit_total_usd':float(total_profit),'commercial_profit_released_usd':float(released),'realized_extra_profit_usd':float(realized_extra),'total_available_from_bag_usd':float(total_available),'protected_infrastructure_remaining_usd':float(protected),'infrastructure_used_usd':float(infra_used),'infrastructure_funded_usd':float(funding_state['funded_usd']),'infrastructure_unfunded_usd':float(funding_state['unfunded_usd']),'provider_credit_released_usd':float(funding_state['provider_credit_released_usd']),'rounding_surplus_usd':float(cash_rounding),'rounding_surplus_total_usd':float(max(rounding,D('0'))),'provider_rounding_credit_usd':float(provider_rounding_credit),'expiration_release_usd':float(lot.released_expiration_usd or 0),'coupon_code':m.get('coupon_code'),'plan_name':m.get('plan_name'),'package_name':package_name,'benefit_source':benefit_source,'benefit_label':benefit_label,'profit_discount_percent':float(discount),'snapshot_version':int(m.get('financial_snapshot_version')) if str(m.get('financial_snapshot_version') or '').isdigit() else None,'snapshot_source':snap.get('snapshot_source'),'payment_status':str(pstatus) if pstatus else None,'refundable':refundable,'refund_reason':reason,'activated_at':lot.activated_at,'expires_at':lot.expires_at,'expired_at':lot.expired_at,'created_at':lot.created_at}
+        return {'id':lot.id,'user_id':lot.user_id,'user_email':user_email,'source':lot.source,'source_label':m.get('source_label') or m.get('plan_name') or package_name or lot.source,'reference_id':lot.reference_id,'status':lot.status,'original_tokens':lot.original_tokens,'remaining_tokens':lot.remaining_tokens,'consumed_tokens':consumed,'amount_paid_usd':float(lot.amount_paid_usd or 0),'effective_token_value_usd':float(snap['paid_value_per_token']),'normal_profit_per_token_usd':float(snap['normal_profit_per_token']),'effective_profit_per_token_usd':float(snap['effective_profit_per_token']),'infrastructure_capacity_per_token_usd':float(snap['infrastructure_capacity_per_token']),'operational_reserve_per_token_usd':float(snap.get('operational_reserve_per_token') or 0),'operational_reserve_total_usd':float(D(str(snap.get('operational_reserve_per_token') or 0))*max(int(lot.original_tokens or 0),0)),'operational_reserve_released_usd':float(getattr(lot,'released_operational_reserve_usd',0) or 0),'commercial_profit_total_usd':float(total_profit),'commercial_profit_released_usd':float(released),'realized_extra_profit_usd':float(realized_extra),'total_available_from_bag_usd':float(total_available),'protected_infrastructure_remaining_usd':float(protected),'infrastructure_used_usd':float(infra_used),'infrastructure_funded_usd':float(funding_state['funded_usd']),'infrastructure_unfunded_usd':float(funding_state['unfunded_usd']),'provider_credit_released_usd':float(funding_state['provider_credit_released_usd']),'rounding_surplus_usd':float(cash_rounding),'rounding_surplus_total_usd':float(max(rounding,D('0'))),'provider_rounding_credit_usd':float(provider_rounding_credit),'expiration_release_usd':float(lot.released_expiration_usd or 0),'coupon_code':m.get('coupon_code'),'plan_name':m.get('plan_name'),'package_name':package_name,'benefit_source':benefit_source,'benefit_label':benefit_label,'profit_discount_percent':float(discount),'snapshot_version':int(m.get('financial_snapshot_version')) if str(m.get('financial_snapshot_version') or '').isdigit() else None,'snapshot_source':snap.get('snapshot_source'),'payment_status':str(pstatus) if pstatus else None,'refundable':refundable,'refund_reason':reason,'activated_at':lot.activated_at,'expires_at':lot.expires_at,'expired_at':lot.expired_at,'created_at':lot.created_at}
     def list_bags(self,db,*,status=None,user_id=None,skip=0,limit=100):
         self.ensure_expirations(db); q=select(TokenValueLot,User.email).join(User,User.id==TokenValueLot.user_id)
         if status:q=q.where(TokenValueLot.status==status)
