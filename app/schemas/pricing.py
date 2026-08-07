@@ -19,7 +19,7 @@ class CommercialSettingsResponse(BaseModel):
 class CommercialSettingsUpdate(BaseModel):
     token_value_usd: float = Field(gt=0, le=1000)
     operational_reserve_per_token_usd: float | None = Field(default=None, ge=0, le=1000)
-    currency: str = Field(min_length=3, max_length=3)
+    currency: str | None = Field(default="USD", min_length=3, max_length=3)
 
 
 

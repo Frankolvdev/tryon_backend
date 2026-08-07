@@ -57,7 +57,7 @@ def test_simulator_subtracts_operational_reserve_before_rounding_and_keeps_it_ou
     assert "operational_total = tokens *" in simulator
     assert "customer_value - infra - operational_total - profit_after" in simulator
     assert "company_total_usd=round(profit_after + rounding" in simulator
-    assert "token_value_usd=round(tv, 6)" in simulator
+    assert "token_value_usd=round(candidate_token_value, 6)" in simulator
 
 
 def test_backoffice_catalog_preview_uses_sale_value_not_generation_base_when_available():

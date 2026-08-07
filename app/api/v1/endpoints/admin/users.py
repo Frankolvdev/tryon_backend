@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.orm import Session
+from uuid import UUID
 
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
@@ -11,12 +12,15 @@ from app.schemas.admin_user import (
     AdminUserPasswordReset,
     AdminUserTokenAdjustment,
     AdminUserUpdate,
+    AdminUserGenerationDeleteResponse,
+    AdminUserStorageListResponse,
 )
 from app.schemas.session import SessionResponse
 from app.schemas.user import UserResponse
 from app.services.audit_service import audit_service
 from app.services.auth_service import auth_service
 from app.services.user_service import user_service
+from app.services.admin_user_storage_service import admin_user_storage_service
 
 router = APIRouter()
 
@@ -284,6 +288,53 @@ def adjust_user_tokens(
     )
 
     return user
+
+
+@router.get("/users/{user_id}/storage-files", response_model=AdminUserStorageListResponse)
+def list_user_storage_files(
+    user_id: int,
+    asset_kind: str | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=200),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    if user_service.get_user_by_id(db, user_id) is None:
+        from app.common.exceptions import NotFoundException
+        raise NotFoundException("User not found.")
+    return admin_user_storage_service.list_files(
+        db, user_id=user_id, asset_kind=asset_kind, search=search, skip=skip, limit=limit
+    )
+
+
+@router.delete(
+    "/users/{user_id}/generations/{execution_id}/storage",
+    response_model=AdminUserGenerationDeleteResponse,
+)
+def delete_user_generation_storage(
+    user_id: int,
+    execution_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = admin_user_storage_service.delete_generation(
+        db, user_id=user_id, execution_id=execution_id
+    )
+    write_admin_audit(
+        db,
+        request,
+        current_admin,
+        action="admin_user_generation_storage_deleted",
+        entity_type="generation_module_execution",
+        entity_id=str(execution_id),
+        description=(
+            f"Admin removed generation {execution_id} from user {user_id} storage; "
+            f"{result['deleted_result_files']} result file(s) removed. Financial history preserved."
+        ),
+    )
+    return result
 
 
 @router.get("/users/{user_id}/sessions", response_model=list[SessionResponse])

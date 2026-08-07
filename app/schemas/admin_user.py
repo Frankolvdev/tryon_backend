@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field
 
 from app.common.enums import UserRole, UserStatus
+from app.schemas.storage_file import StorageFileResponse
 
 
 class AdminUserCreate(BaseModel):
@@ -31,3 +32,17 @@ class AdminUserPasswordReset(BaseModel):
 class AdminUserTokenAdjustment(BaseModel):
     amount: int
     reason: str | None = None
+
+class AdminUserGenerationDeleteResponse(BaseModel):
+    execution_id: str
+    deleted_result_files: int
+    deleted_gallery_items: int
+    financial_history_preserved: bool = True
+
+
+class AdminUserStorageListResponse(BaseModel):
+    items: list[StorageFileResponse]
+    total: int
+    total_size_bytes: int
+    skip: int
+    limit: int

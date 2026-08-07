@@ -38,18 +38,6 @@ class DefaultSettingsService:
             ),
             SystemSettingCreate(
                 category=SettingCategory.GENERAL,
-                key="app_environment",
-                label="Application Environment",
-                description="Current environment name.",
-                value_type=SettingValueType.STRING,
-                value="development",
-                default_value="development",
-                is_public=False,
-                is_editable=False,
-                sort_order=20,
-            ),
-            SystemSettingCreate(
-                category=SettingCategory.GENERAL,
                 key="support_email",
                 label="Support Email",
                 description="Main support contact email.",
@@ -121,30 +109,6 @@ class DefaultSettingsService:
                 sort_order=20,
             ),
 
-            # SECURITY
-            SystemSettingCreate(
-                category=SettingCategory.SECURITY,
-                key="max_login_attempts",
-                label="Max Login Attempts",
-                description="Maximum login attempts before future anti-abuse lockout.",
-                value_type=SettingValueType.INTEGER,
-                value=5,
-                default_value=5,
-                is_public=False,
-                sort_order=10,
-            ),
-            SystemSettingCreate(
-                category=SettingCategory.SECURITY,
-                key="password_min_length",
-                label="Password Minimum Length",
-                description="Minimum password length.",
-                value_type=SettingValueType.INTEGER,
-                value=8,
-                default_value=8,
-                is_public=False,
-                sort_order=20,
-            ),
-
             # STORAGE
             SystemSettingCreate(
                 category=SettingCategory.STORAGE,
@@ -206,17 +170,6 @@ class DefaultSettingsService:
                 sort_order=15,
             ),
 
-            SystemSettingCreate(
-                category=SettingCategory.PRICING,
-                key="commercial_currency",
-                label="Commercial Currency",
-                description="ISO 4217 currency used by the commercial module.",
-                value_type=SettingValueType.STRING,
-                value="USD",
-                default_value="USD",
-                is_public=True,
-                sort_order=20,
-            ),
 
             SystemSettingCreate(
                 category=SettingCategory.PRICING,
@@ -410,17 +363,6 @@ class DefaultSettingsService:
                 is_public=True,
                 sort_order=10,
             ),
-            SystemSettingCreate(
-                category=SettingCategory.BILLING,
-                key="active_payment_provider",
-                label="Active Payment Provider",
-                description="Current active payment provider.",
-                value_type=SettingValueType.STRING,
-                value="stripe",
-                default_value="stripe",
-                is_public=False,
-                sort_order=20,
-            ),
 
             # SUBSCRIPTIONS
             SystemSettingCreate(
@@ -434,41 +376,8 @@ class DefaultSettingsService:
                 is_public=True,
                 sort_order=10,
             ),
-            SystemSettingCreate(
-                category=SettingCategory.SUBSCRIPTIONS,
-                key="monthly_tokens_reset_enabled",
-                label="Monthly Tokens Reset Enabled",
-                description="Enable monthly token grants for subscriptions.",
-                value_type=SettingValueType.BOOLEAN,
-                value=True,
-                default_value=True,
-                is_public=False,
-                sort_order=20,
-            ),
 
             # PRICING
-            SystemSettingCreate(
-                category=SettingCategory.PRICING,
-                key="dynamic_pricing_enabled",
-                label="Dynamic Pricing Enabled",
-                description="Use database pricing rules instead of fixed env values.",
-                value_type=SettingValueType.BOOLEAN,
-                value=True,
-                default_value=True,
-                is_public=False,
-                sort_order=10,
-            ),
-            SystemSettingCreate(
-                category=SettingCategory.PRICING,
-                key="default_margin_percent",
-                label="Default Margin Percent",
-                description="Default margin target for pricing calculations.",
-                value_type=SettingValueType.INTEGER,
-                value=70,
-                default_value=70,
-                is_public=False,
-                sort_order=20,
-            ),
 
             # SCHEDULER
             SystemSettingCreate(
@@ -482,17 +391,6 @@ class DefaultSettingsService:
                 is_public=False,
                 sort_order=10,
             ),
-            SystemSettingCreate(
-                category=SettingCategory.SCHEDULER,
-                key="scheduler_timezone",
-                label="Scheduler Timezone",
-                description="Default scheduler timezone.",
-                value_type=SettingValueType.STRING,
-                value="America/Mexico_City",
-                default_value="America/Mexico_City",
-                is_public=False,
-                sort_order=20,
-            ),
 
             # MAINTENANCE
             SystemSettingCreate(
@@ -504,32 +402,6 @@ class DefaultSettingsService:
                 value=False,
                 default_value=False,
                 is_public=True,
-                sort_order=10,
-            ),
-
-            # ANALYTICS
-            SystemSettingCreate(
-                category=SettingCategory.ANALYTICS,
-                key="analytics_enabled",
-                label="Analytics Enabled",
-                description="Enable analytics collection and dashboards.",
-                value_type=SettingValueType.BOOLEAN,
-                value=True,
-                default_value=True,
-                is_public=False,
-                sort_order=10,
-            ),
-
-            # LOGGING
-            SystemSettingCreate(
-                category=SettingCategory.LOGGING,
-                key="log_retention_days",
-                label="Log Retention Days",
-                description="How many days logs should be retained.",
-                value_type=SettingValueType.INTEGER,
-                value=90,
-                default_value=90,
-                is_public=False,
                 sort_order=10,
             ),
 

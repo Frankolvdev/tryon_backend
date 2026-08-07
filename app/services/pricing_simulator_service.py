@@ -100,10 +100,10 @@ class PricingSimulatorService:
                     if not (min_tokens <= scenario.tokens <= max_tokens):
                         continue
                     distance = abs(scenario.company_total_usd - data.target_profit_usd)
-                    candidates.append((distance, abs(tv-base), scenario, pp))
-            for distance, _token_distance, scenario, pp in sorted(candidates, key=lambda x: (x[0], x[1], x[2].tokens))[:8]:
+                    candidates.append((distance, abs(tv-base), scenario, tv, pp))
+            for distance, _token_distance, scenario, candidate_token_value, pp in sorted(candidates, key=lambda x: (x[0], x[1], x[2].tokens))[:8]:
                 recommendations.append(PricingSimulatorRecommendation(
-                    token_value_usd=round(tv, 6),
+                    token_value_usd=round(candidate_token_value, 6),
                     desired_profit_per_token_usd=round(pp, 6), tokens=scenario.tokens,
                     worst_discount_percent=round(data.worst_discount_percent, 4),
                     estimated_company_profit_usd=scenario.company_total_usd,

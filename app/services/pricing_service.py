@@ -33,7 +33,6 @@ from app.services.token_financial_snapshot_service import token_financial_snapsh
 
 TOKEN_VALUE_KEY = "commercial_token_value_usd"
 OPERATIONAL_RESERVE_KEY = "commercial_operational_reserve_per_token_usd"
-CURRENCY_KEY = "commercial_currency"
 DEFAULT_TOKEN_VALUE_USD = 0.10
 DEFAULT_CURRENCY = "USD"
 BILLING_POLICY_KEY = "commercial_execution_billing_policy"
@@ -72,8 +71,9 @@ class PricingService:
         return self._token_value(db) + self._operational_reserve(db)
 
     def _currency(self, db: Session) -> str:
-        setting = system_setting_repository.get_by_key(db, CURRENCY_KEY)
-        return str(setting.value_string if setting else DEFAULT_CURRENCY).upper()
+        # The product is USD-only. Keep the response field for API compatibility
+        # without exposing a fake configurable currency setting.
+        return DEFAULT_CURRENCY
 
     def _billing_policy_setting(self, db: Session) -> SystemSetting:
         setting = system_setting_repository.get_by_key(db, BILLING_POLICY_KEY)
@@ -165,9 +165,8 @@ class PricingService:
 
     def update_commercial_settings(self, db: Session, data: CommercialSettingsUpdate) -> CommercialSettingsResponse:
         token_setting = system_setting_repository.get_by_key(db, TOKEN_VALUE_KEY)
-        currency_setting = system_setting_repository.get_by_key(db, CURRENCY_KEY)
         operational_setting = system_setting_repository.get_by_key(db, OPERATIONAL_RESERVE_KEY)
-        if not token_setting or not currency_setting:
+        if not token_setting:
             raise NotFoundException("Commercial settings are missing. Seed default system settings first.")
         if operational_setting is None:
             operational_setting = SystemSetting(
@@ -183,7 +182,6 @@ class PricingService:
         system_setting_repository.update(db, db_obj=token_setting, data={"value_float": float(data.token_value_usd)})
         if data.operational_reserve_per_token_usd is not None:
             system_setting_repository.update(db, db_obj=operational_setting, data={"value_float": float(data.operational_reserve_per_token_usd)})
-        system_setting_repository.update(db, db_obj=currency_setting, data={"value_string": data.currency.upper()})
         return self.get_commercial_settings(db)
 
     def preview(
