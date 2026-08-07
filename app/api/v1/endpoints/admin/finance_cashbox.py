@@ -7,10 +7,16 @@ from app.common.exceptions import ConflictException
 from app.schemas.finance_cashbox import *
 from app.services.audit_service import audit_service
 from app.services.finance_cashbox_service import finance_cashbox_service
+from app.services.pending_recovery_service import pending_recovery_service
 router=APIRouter(prefix='/finances')
 @router.get('/cashbox',response_model=CashboxSummaryResponse)
 def cashbox(db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
  result=finance_cashbox_service.summary(db); db.commit(); return result
+
+@router.get('/pending-recoveries',response_model=PendingRecoveryListResponse)
+def pending_recoveries(db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+ return pending_recovery_service.list_pending(db)
+
 @router.get('/token-bags',response_model=TokenBagListResponse)
 def bags(status:str|None=Query(None),user_id:int|None=Query(None),skip:int=0,limit:int=Query(100,le=200),db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
  result=finance_cashbox_service.list_bags(db,status=status,user_id=user_id,skip=skip,limit=limit); db.commit(); return result

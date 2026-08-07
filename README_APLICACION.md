@@ -1,41 +1,41 @@
-# MegaZIP Backend — Caja de infraestructura FIFO por bolsa
+# MegaZIP 1A — Backend — Pérdidas pendientes + auto-desbloqueo
 
-## Alcance
-- Mantiene intacta la caja verde y sus retiros de utilidad.
-- Crea movimientos de fondeo de infraestructura separados.
-- Cada fondeo se asigna mediante FIFO a bolsas concretas.
-- Un movimiento puede abarcar varias bolsas.
-- Respeta la reserva congelada, descuentos, cupones, planes y snapshots de cada bolsa.
-- Al vencer una bolsa, solo el efectivo todavía no transferido pasa a utilidad.
-- La parte ya fondeada permanece como crédito libre en el proveedor.
-- Registra movimientos, asignaciones por bolsa y liberaciones de crédito por proveedor.
-- Bloquea reembolsos automáticos de bolsas cuya reserva ya fue fondeada.
-- Usa bloqueos de fila para impedir dobles movimientos simultáneos.
-- Incluye las tablas nuevas en el reinicio completo de datos de prueba.
+BASE:
+tryon_backend-main - 2026-08-07T114606.749.zip
 
-## No modifica
-- Fórmulas de precios o ganancias.
-- FIFO de consumo de tokens.
-- Snapshots históricos.
-- Stripe, Modal, RunPod o Beam.
-- Generaciones, bloqueo/desbloqueo o facturación normal.
+OBJETIVO:
+Agregar la vista financiera de cobros/pérdidas pendientes y el auto-desbloqueo
+posterior a créditos comerciales pagados, sin crear otra fórmula de facturación.
 
-## Aplicación
-Extraer directamente sobre la raíz del backend.
+GARANTÍAS DE DISEÑO:
+- No modifica pricing_service ni la fórmula de tokens.
+- No modifica FIFO de tokens ni snapshots.
+- No modifica token_value_ledger_service.
+- No modifica generation_module_billing_service.
+- No modifica Modal, RunPod, Beam, Stripe checkout ni proveedores.
+- No modifica el botón manual de desbloqueo.
+- No requiere migración de base de datos.
+- La compra se acredita y COMMITTEA antes del auto-desbloqueo.
+- Un fallo del auto-desbloqueo no revierte la compra.
+- Las deudas se intentan de la más antigua a la más reciente.
+- Cada generación se paga completa o no se toca.
+- El auto-desbloqueo reutiliza exactamente settle_pending_billing().
+- Solo compra Stripe acreditada y renovación pagada disparan el auto-desbloqueo.
+  Signup, admin grants y futuros créditos promocionales NO lo disparan.
 
-## Migración obligatoria
-alembic upgrade head
+PÉRDIDAS PENDIENTES:
+- Infraestructura pendiente: costo real ya incurrido y todavía no respaldado/cobrado.
+- Ganancia pendiente: estimación potencial; puede cambiar según las bolsas/descuentos
+  que finalmente paguen el ajuste.
+- No altera la caja verde ni ninguna cuenta existente.
 
-## Validación
+VALIDACIÓN:
 python -m compileall -q app tests alembic/versions
 
-pytest -q `
-  tests/test_infrastructure_cashbox_fifo_contract.py `
-  tests/test_token_bag_expiration_accounting_contract.py `
-  tests/test_finance_cashbox_contract.py `
-  tests/test_fifo_token_bag_pricing_v2_contract.py `
-  tests/test_execution_billing_policy_contract.py `
-  tests/test_commercial_snapshots_and_finance_contract.py
+Contratos relevantes ejecutados:
+57 passed
+1 contrato histórico preexistente falló también en el ZIP base:
+tests/test_finance_bag_historical_compatibility_contract.py
+No fue modificado ni maquillado por este MegaZIP.
 
-Validación realizada: 31 passed.
-Alembic: 05a_infra_cashbox (head).
+No hay migración Alembic en este MegaZIP.

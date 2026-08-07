@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 from typing import Any
 
@@ -26,6 +27,7 @@ from app.services.billing_payment_method_service import (
 )
 from app.services.subscription_service import subscription_service
 from app.services.token_purchase_service import token_purchase_service
+from app.services.pending_generation_settlement_service import pending_generation_settlement_service
 
 
 class BillingService:
@@ -124,6 +126,16 @@ class BillingService:
                 db,
                 checkout_session=event_object,
             )
+            auto_settlement = (
+                pending_generation_settlement_service.settle_after_paid_credit(
+                    db,
+                    user_id=purchase.user_id,
+                    trigger_source="stripe_token_purchase",
+                    trigger_reference=str(purchase.id),
+                )
+                if purchase.status == TokenPurchaseStatus.CREDITED.value
+                else None
+            )
             return StripeWebhookResult(
                 received=True,
                 event_type=event_type,
@@ -132,6 +144,10 @@ class BillingService:
                     "stripe_event_id": event_id,
                     "token_purchase_id": purchase.id,
                     "purchase_status": purchase.status,
+                    "pending_generations_unlocked": auto_settlement.unlocked if auto_settlement else 0,
+                    "pending_tokens_debited": auto_settlement.tokens_debited if auto_settlement else 0,
+                    "pending_settlement_stopped_for_balance": auto_settlement.stopped_for_insufficient_balance if auto_settlement else False,
+                    "pending_settlement_error": auto_settlement.errors[0] if auto_settlement and auto_settlement.errors else None,
                 },
             )
 
@@ -256,6 +272,7 @@ class BillingService:
                 "an internal subscription."
             )
 
+        auto_settlement = None
         if invoice.user_subscription_id:
             subscription = (
                 subscription_service.grant_period_tokens_if_needed(
@@ -264,6 +281,21 @@ class BillingService:
                     reference_id=invoice.provider_invoice_id,
                 )
             )
+            try:
+                subscription_metadata = json.loads(subscription.metadata_json or "{}")
+            except (TypeError, ValueError):
+                subscription_metadata = {}
+            if (
+                str(subscription_metadata.get("last_token_grant_reference") or "")
+                == str(invoice.provider_invoice_id)
+                and int(subscription_metadata.get("last_token_grant_amount") or 0) > 0
+            ):
+                auto_settlement = pending_generation_settlement_service.settle_after_paid_credit(
+                    db,
+                    user_id=subscription.user_id,
+                    trigger_source="subscription_period_grant",
+                    trigger_reference=invoice.provider_invoice_id,
+                )
 
         return StripeWebhookResult(
             received=True,
@@ -277,6 +309,20 @@ class BillingService:
                 "billing_invoice_id": invoice.id,
                 "user_subscription_id": (
                     subscription.id if subscription else None
+                ),
+                "pending_generations_unlocked": (
+                    auto_settlement.unlocked if auto_settlement else 0
+                ),
+                "pending_tokens_debited": (
+                    auto_settlement.tokens_debited if auto_settlement else 0
+                ),
+                "pending_settlement_stopped_for_balance": (
+                    auto_settlement.stopped_for_insufficient_balance if auto_settlement else False
+                ),
+                "pending_settlement_error": (
+                    auto_settlement.errors[0]
+                    if auto_settlement and auto_settlement.errors
+                    else None
                 ),
             },
         )

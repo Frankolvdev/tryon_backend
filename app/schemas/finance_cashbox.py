@@ -27,6 +27,11 @@ class CashboxSummaryResponse(BaseModel):
     provider_cost_unfunded_usd: float = 0.0
     provider_credit_released_usd: float = 0.0
     provider_balances: list[InfrastructureProviderBalanceResponse] = Field(default_factory=list)
+    pending_recovery_generations: int = 0
+    pending_recovery_tokens: int = 0
+    pending_recovery_infrastructure_usd: float = 0.0
+    pending_recovery_profit_estimated_usd: float = 0.0
+    pending_recovery_economic_estimated_usd: float = 0.0
     active_bags: int
     new_bags: int
     expired_bags: int
@@ -187,3 +192,35 @@ class InfrastructureFundingResponse(BaseModel):
     funded_at: datetime
     created_at: datetime
     allocations: list[InfrastructureFundingAllocationResponse] = Field(default_factory=list)
+
+class PendingRecoveryItemResponse(BaseModel):
+    execution_id: str
+    module_key: str
+    user_id: int | None = None
+    user_email: str | None = None
+    provider: str | None = None
+    status: str
+    billing_access_status: str
+    tokens_charged: int
+    pending_tokens: int
+    estimated_final_tokens: int
+    infrastructure_cost_usd: float
+    infrastructure_covered_usd: float
+    infrastructure_pending_usd: float
+    profit_realized_usd: float
+    profit_pending_estimated_usd: float
+    economic_pending_estimated_usd: float
+    created_at: datetime
+
+
+class PendingRecoverySummaryResponse(BaseModel):
+    pending_generations: int
+    pending_tokens: int
+    infrastructure_pending_usd: float
+    profit_pending_estimated_usd: float
+    economic_pending_estimated_usd: float
+
+
+class PendingRecoveryListResponse(BaseModel):
+    items: list[PendingRecoveryItemResponse] = Field(default_factory=list)
+    summary: PendingRecoverySummaryResponse

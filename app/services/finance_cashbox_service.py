@@ -27,6 +27,7 @@ from app.services.infrastructure_cashbox_accounting import (
     calculate_infrastructure_funding_state,
     calculate_expiration_infrastructure_split,
 )
+from app.services.pending_recovery_service import pending_recovery_service
 
 D=Decimal
 class FinanceCashboxService:
@@ -659,6 +660,8 @@ class FinanceCashboxService:
             | set(costs_by_provider)
             | set(released_credit_by_provider)
         )
+        pending_recovery = pending_recovery_service.list_pending(db)['summary']
+
         provider_balances=[]
         for provider in providers:
             funded=funded_by_provider.get(provider,D('0'))
@@ -693,6 +696,11 @@ class FinanceCashboxService:
             ) for provider in providers)),
             'provider_credit_released_usd':float(sum(released_credit_by_provider.values())),
             'provider_balances':provider_balances,
+            'pending_recovery_generations':int(pending_recovery['pending_generations']),
+            'pending_recovery_tokens':int(pending_recovery['pending_tokens']),
+            'pending_recovery_infrastructure_usd':float(pending_recovery['infrastructure_pending_usd']),
+            'pending_recovery_profit_estimated_usd':float(pending_recovery['profit_pending_estimated_usd']),
+            'pending_recovery_economic_estimated_usd':float(pending_recovery['economic_pending_estimated_usd']),
             'active_bags':sum(x['status']=='active' for x in values),
             'new_bags':sum(x['status']=='new' for x in values),
             'expired_bags':sum(x['status']=='expired' for x in values),
