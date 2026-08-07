@@ -5,6 +5,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.common.exceptions import ConflictException, ForbiddenException, NotFoundException
+from app.common.enums import TokenTransactionType
 from app.common.time import utc_now
 from app.core.config import settings
 from app.models.finance_withdrawal import FinanceWithdrawal
@@ -19,6 +20,7 @@ from app.models.token_consumption_allocation import TokenConsumptionAllocation
 from app.models.token_purchase import TokenPurchase
 from app.models.token_package import TokenPackage
 from app.models.token_value_lot import TokenValueLot
+from app.models.token_transaction import TokenTransaction
 from app.models.user import User
 from app.schemas.finance_cashbox import WithdrawalCreate, InfrastructureFundingCreate
 from app.services.token_value_ledger_service import token_value_ledger_service
@@ -28,6 +30,7 @@ from app.services.infrastructure_cashbox_accounting import (
     calculate_expiration_infrastructure_split,
 )
 from app.services.pending_recovery_service import pending_recovery_service
+from app.services.promotional_credit_service import promotional_credit_service
 
 D=Decimal
 class FinanceCashboxService:
@@ -215,15 +218,53 @@ class FinanceCashboxService:
         # when a never-used bag expires.
         lot.released_commercial_profit_usd=amounts.commercial_profit_released_usd
         lot.commercial_profit_released=True
-        expiration_split=self._split_expiration_infrastructure(
-            db,
-            lot,
-            protected_reserve=amounts.infrastructure_reserve_released_usd,
-        )
-        # Only cash that remains outside providers can become withdrawable profit.
-        # Already-funded money remains provider credit and is never counted in Caja verde.
-        lot.released_expiration_usd=expiration_split["cash_release_usd"]
+        if lot.source == "promotional_credit":
+            promotional_return = promotional_credit_service.return_for_expired_lot(
+                db, lot=lot, remaining_tokens=expired_tokens,
+            )
+            # Provider-sponsored credits are never company revenue. Expiration
+            # restores their unused reserve to the promotional pool instead of
+            # moving a cent to Caja verde or the commercial IA cashbox.
+            lot.released_commercial_profit_usd=D("0")
+            lot.commercial_profit_released=True
+            lot.released_expiration_usd=D("0")
+            expiration_split={
+                "cash_release_usd":D("0"),
+                "provider_credit_release_usd":D("0"),
+                "provider_credit_by_provider":{},
+            }
+        else:
+            promotional_return=D("0")
+            expiration_split=self._split_expiration_infrastructure(
+                db,
+                lot,
+                protected_reserve=amounts.infrastructure_reserve_released_usd,
+            )
+            # Only cash that remains outside providers can become withdrawable profit.
+            # Already-funded money remains provider credit and is never counted in Caja verde.
+            lot.released_expiration_usd=expiration_split["cash_release_usd"]
         infrastructure_release=amounts.infrastructure_reserve_released_usd
+
+        # Expiration must remove the same tokens from the user's wallet. Older
+        # code zeroed only the lot, which could leave spendable balance behind
+        # and later recreate it as legacy/untraced tokens. Keep wallet and bag
+        # ledger atomic under the same database transaction.
+        user=db.execute(
+            select(User).where(User.id==lot.user_id).with_for_update()
+        ).scalar_one_or_none()
+        if user is not None:
+            before=max(int(user.token_balance or 0),0)
+            removed=min(before,expired_tokens)
+            user.token_balance=before-removed
+            db.add(user)
+            if removed>0:
+                db.add(TokenTransaction(
+                    user_id=user.id,transaction_type=TokenTransactionType.DEBIT.value,
+                    amount=-removed,balance_after=user.token_balance,
+                    source='token_bag_expiration',reference_id=str(lot.id),
+                    description=f'{removed} token(s) expired from token bag #{lot.id}.',
+                ))
+
         lot.remaining_tokens=0
         lot.status='expired'
         lot.expired_at=expired_at
@@ -235,6 +276,7 @@ class FinanceCashboxService:
             'infrastructure_cash_released_usd': expiration_split["cash_release_usd"],
             'provider_credit_released_usd': expiration_split["provider_credit_release_usd"],
             'provider_credit_released_by_provider': expiration_split["provider_credit_by_provider"],
+            'promotional_credit_returned_usd': promotional_return,
         }
 
     def ensure_expirations(self,db):
@@ -288,6 +330,7 @@ class FinanceCashboxService:
                 provider: float(amount)
                 for provider, amount in result['provider_credit_released_by_provider'].items()
             },
+            'promotional_credit_returned_usd': float(result.get('promotional_credit_returned_usd') or 0),
             'total_available_from_bag_usd': float(bag['total_available_from_bag_usd']),
             'expires_at': lot.expires_at,
             'expired_at': lot.expired_at,
@@ -565,6 +608,8 @@ class FinanceCashboxService:
         candidates: list[tuple[TokenValueLot, D]] = []
         available = D("0")
         for lot in lots:
+            if lot.source == "promotional_credit":
+                continue
             snap = token_value_ledger_service._snapshot_for_lot(lot)
             protected = (
                 snap["infrastructure_capacity_per_token"]
@@ -640,7 +685,8 @@ class FinanceCashboxService:
     def summary(self,db):
         self.ensure_expirations(db)
         lots=db.execute(select(TokenValueLot)).scalars().all()
-        values=[self._bag_values(db,l) for l in lots]
+        commercial_lots=[lot for lot in lots if lot.source != "promotional_credit"]
+        values=[self._bag_values(db,l) for l in commercial_lots]
         released=sum(D(str(x['commercial_profit_released_usd'])) for x in values)
         protected=sum(D(str(x['protected_infrastructure_remaining_usd'])) for x in values)
         blocked=sum(D(str(x['commercial_profit_total_usd'])) for x in values if x['status']=='new')
@@ -653,7 +699,7 @@ class FinanceCashboxService:
             D(str(x['infrastructure_unfunded_usd'])) for x in values
         )
         funded_by_provider=self._provider_funding_totals(db)
-        costs_by_provider=self._provider_costs(db,lots)
+        costs_by_provider=self._provider_costs(db,commercial_lots)
         released_credit_by_provider=self._provider_credit_release_totals(db)
         providers=sorted(
             set(funded_by_provider)

@@ -18,7 +18,9 @@ def test_auto_settlement_reuses_manual_settlement_engine_and_does_not_reprice():
 def test_auto_settlement_is_fifo_and_all_or_nothing_per_generation():
     source = read("app/services/pending_generation_settlement_service.py")
     assert "GenerationModuleExecution.created_at.asc()" in source
-    assert "if int(user.token_balance or 0) < pending_tokens" in source
+    assert "eligible_token_balance" in source
+    assert "if eligible_balance < pending_tokens" in source
+    assert "allow_pending_settlement" in source
     assert "stopped_for_insufficient_balance" in source
     assert "break" in source
 

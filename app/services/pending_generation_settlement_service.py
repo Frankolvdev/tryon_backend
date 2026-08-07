@@ -10,6 +10,8 @@ from app.models.generation_module_execution import GenerationModuleExecution
 from app.models.user import User
 from app.schemas.generation_module_runtime import GenerationModuleExecutionResponse
 from app.services.generation_module_runtime_service import generation_module_runtime_service
+from app.services.token_value_ledger_service import token_value_ledger_service
+from app.services.promotional_credit_service import promotional_credit_service
 
 
 @dataclass
@@ -125,7 +127,13 @@ class PendingGenerationSettlementService:
             # debt cannot be paid completely, do not consume a partial amount
             # and do not skip ahead to newer debts.
             db.refresh(user)
-            if int(user.token_balance or 0) < pending_tokens:
+            billing = execution.billing_breakdown or {}
+            provider = str(billing.get("provider") or "") or None
+            allow_promotional = promotional_credit_service.allow_pending_settlement(db)
+            eligible_balance = token_value_ledger_service.eligible_token_balance(
+                db, user_id=user_id, provider=provider, allow_promotional=allow_promotional,
+            )
+            if eligible_balance < pending_tokens:
                 report.stopped_for_insufficient_balance = True
                 break
 

@@ -55,6 +55,7 @@ from app.services.stripe_client_service import (
 from app.services.token_service import (
     token_service,
 )
+from app.services.promotional_credit_service import promotional_credit_service
 
 
 logger = logging.getLogger(
@@ -69,23 +70,15 @@ class UserService:
         *,
         user: User,
     ) -> None:
-        free_tokens = (
-            runtime_settings_service
-            .free_signup_tokens(db)
-        )
-
-        if free_tokens <= 0:
-            return
-
-        token_service.credit_tokens(
-            db=db,
-            user_id=user.id,
-            amount=free_tokens,
-            source="signup_bonus",
-            description="Free signup tokens.",
-        )
-
-        db.refresh(user)
+        # Signup gifts are now financially backed by the promotional-credit
+        # cashbox. If the pool cannot cover the configured amount, the service
+        # grants only the remaining funded tokens; it never creates unbacked AI
+        # obligations and it never touches company profit.
+        result = promotional_credit_service.grant_signup(db, user_id=user.id)
+        # Persist lazily-created promotional settings even when the pool is empty.
+        db.commit()
+        if int(result.get("granted_tokens") or 0) > 0:
+            db.refresh(user)
 
     def create_user(
         self,

@@ -151,6 +151,7 @@ class TokenBagExpirationSimulationResponse(BaseModel):
     infrastructure_cash_released_usd: float = 0.0
     provider_credit_released_usd: float = 0.0
     provider_credit_released_by_provider: dict[str, float] = Field(default_factory=dict)
+    promotional_credit_returned_usd: float = 0.0
     total_available_from_bag_usd: float
     expires_at: datetime | None
     expired_at: datetime

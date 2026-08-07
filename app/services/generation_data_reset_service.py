@@ -181,6 +181,9 @@ class GenerationDataResetService:
             delete_all("infrastructure_provider_credit_releases")
             delete_all("infrastructure_funding_allocations")
             delete_all("infrastructure_funding_movements")
+            delete_all("promotional_credit_returns")
+            delete_all("promotional_token_grants")
+            delete_all("promotional_credit_funds")
 
             # Financial and token ledger dependencies.
             delete_all("token_consumption_allocations")

@@ -11,7 +11,7 @@ class GenerationModuleBillingService:
     debit_source = "generation_module"
     refund_source = "generation_module_refund"
 
-    def charge(self, db: Session, *, user_id: int, execution_id: str, module_key: str, tokens: int) -> None:
+    def charge(self, db: Session, *, user_id: int, execution_id: str, module_key: str, tokens: int, provider: str | None = None) -> None:
         if tokens <= 0:
             return
         existing = token_transaction_repository.get_by_source_reference(
@@ -26,7 +26,8 @@ class GenerationModuleBillingService:
             source=self.debit_source,
             reference_id=execution_id,
             description=f"Generation module '{module_key}' execution",
-            allocation_reference=execution_id,
+            allocation_reference=execution_id, allocation_provider=provider,
+            allow_promotional=True, strict_allocation_eligibility=True,
         )
 
     def refund(self, db: Session, *, user_id: int, execution_id: str, module_key: str, tokens: int, reason: str) -> bool:
@@ -52,6 +53,7 @@ class GenerationModuleBillingService:
     def reconcile(
         self, db: Session, *, user_id: int, execution_id: str, module_key: str,
         previously_charged: int, final_tokens: int, reason: str,
+        provider: str | None = None, allow_promotional: bool = True,
     ) -> tuple[int, int]:
         """Synchronously reconcile the upfront estimate before the result is exposed.
 
@@ -71,7 +73,8 @@ class GenerationModuleBillingService:
                     db, user_id=user_id, amount=extra, source=source,
                     reference_id=execution_id,
                     description=f"Final generation cost adjustment for '{module_key}': {reason}",
-                    allocation_reference=execution_id,
+                    allocation_reference=execution_id, allocation_provider=provider,
+                    allow_promotional=allow_promotional, strict_allocation_eligibility=True,
                 )
                 return extra, 0
         elif final < previous:

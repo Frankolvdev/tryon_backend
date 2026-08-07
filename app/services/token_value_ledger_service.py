@@ -62,8 +62,8 @@ class TokenValueLedgerService:
             "metadata": metadata,
         }
 
-    def create_lot(self, db: Session, *, user_id:int, tokens:int, source:str, reference_id:str|None, amount_paid_usd:float=0.0, metadata:dict|None=None) -> None:
-        if tokens <= 0: return
+    def create_lot(self, db: Session, *, user_id:int, tokens:int, source:str, reference_id:str|None, amount_paid_usd:float=0.0, metadata:dict|None=None) -> TokenValueLot | None:
+        if tokens <= 0: return None
         amount=max(float(amount_paid_usd or 0),0.0)
         paid_per_token=Decimal(str(amount/tokens if tokens else 0))
         snapshot=dict(metadata or {})
@@ -73,6 +73,35 @@ class TokenValueLedgerService:
             snapshot.get("effective_profit_per_token_usd"),
             normal_profit*(Decimal("1")-discount/Decimal("100")),
         )
+
+        # Promotional token lots are externally funded. The customer paid value
+        # and company profit are zero, while the frozen AI reserve comes from the
+        # promotional provider-credit pool. This branch intentionally bypasses
+        # commercial paid-price validation without changing commercial lots.
+        if bool(snapshot.get("promotional_credit_funded")):
+            infrastructure_capacity=max(
+                self._decimal(snapshot.get("infrastructure_capacity_per_token_usd")),
+                Decimal("0"),
+            )
+            if infrastructure_capacity <= 0:
+                raise ConflictException("Promotional tokens require a positive frozen infrastructure reserve.")
+            effective_profit=Decimal("0")
+            snapshot.update({
+                "financial_snapshot_version": 2,
+                "effective_paid_token_value_usd": "0",
+                "requested_effective_profit_per_token_usd": "0",
+                "effective_profit_per_token_usd": "0",
+                "infrastructure_capacity_per_token_usd": str(infrastructure_capacity),
+                "infrastructure_reserve_source": "promotional_credit_pool",
+                "profit_adjusted_to_protect_infrastructure": False,
+            })
+            lot=TokenValueLot(
+                user_id=user_id,source=source,reference_id=reference_id,
+                original_tokens=tokens,remaining_tokens=tokens,amount_paid_usd=Decimal("0"),
+                effective_token_value_usd=Decimal("0"),
+                metadata_json=json.dumps(snapshot,ensure_ascii=False,default=str),
+            )
+            db.add(lot); db.flush(); return lot
 
         # Commercial discounts may consume profit, never infrastructure.
         # New commercial snapshots include the undiscounted token value and the
@@ -110,8 +139,10 @@ class TokenValueLedgerService:
             "infrastructure_reserve_source": "pricing_rule_fixed" if has_protected_terms else "legacy_paid_minus_profit",
             "profit_adjusted_to_protect_infrastructure": bool(has_protected_terms and effective_profit<max(requested_effective_profit,Decimal("0"))),
         })
-        db.add(TokenValueLot(user_id=user_id,source=source,reference_id=reference_id,original_tokens=tokens,remaining_tokens=tokens,amount_paid_usd=Decimal(str(amount)),effective_token_value_usd=paid_per_token,metadata_json=json.dumps(snapshot,ensure_ascii=False,default=str)))
+        lot=TokenValueLot(user_id=user_id,source=source,reference_id=reference_id,original_tokens=tokens,remaining_tokens=tokens,amount_paid_usd=Decimal(str(amount)),effective_token_value_usd=paid_per_token,metadata_json=json.dumps(snapshot,ensure_ascii=False,default=str))
+        db.add(lot)
         db.flush()
+        return lot
 
     def quote_fifo_infrastructure_charge(
         self, db: Session, *, user_id: int, execution_id: str | None,
@@ -198,12 +229,100 @@ class TokenValueLedgerService:
             "traceability_status":"partial" if partial_trace else "exact",
         }
 
-    def allocate(self, db:Session, *, user_id:int, execution_id:str, tokens:int, token_transaction_id:int|None) -> None:
+    @staticmethod
+    def _normalized_provider(value: str | None) -> str:
+        raw=str(value or "").strip().lower().replace("-","_")
+        return {"runpod_serverless":"runpod","runpod":"runpod","modal":"modal","beam":"beam","general":"general","any":"general"}.get(raw,raw)
+
+    def _lot_is_promotional(self, lot: TokenValueLot) -> bool:
+        if lot.source == "promotional_credit":
+            return True
+        return bool(self._parse_metadata(lot).get("promotional_credit_funded"))
+
+    def _lot_is_eligible(
+        self,
+        lot: TokenValueLot,
+        *,
+        provider: str | None,
+        allow_promotional: bool,
+    ) -> bool:
+        if not self._lot_is_promotional(lot):
+            return True
+        if not allow_promotional:
+            return False
+        metadata=self._parse_metadata(lot)
+        scope=self._normalized_provider(metadata.get("promotional_provider") or "general")
+        target=self._normalized_provider(provider)
+        return scope == "general" or not target or scope == target
+
+    def ensure_legacy_balance_lot(self, db: Session, *, user_id: int, wallet_balance: int) -> None:
+        """Materialize only the genuinely untraced portion of an old wallet.
+
+        This keeps pre-ledger users compatible while allowing provider-scoped
+        promotional lots to be excluded safely. It never changes token balance.
+        """
+        traced=db.execute(
+            select(TokenValueLot).where(TokenValueLot.user_id==user_id,TokenValueLot.remaining_tokens>0)
+        ).scalars().all()
+        traced_total=sum(int(lot.remaining_tokens or 0) for lot in traced)
+        missing=max(int(wallet_balance or 0)-traced_total,0)
+        if missing<=0:return
+        lot=TokenValueLot(
+            user_id=user_id,source="legacy_untraced_balance",reference_id=None,
+            original_tokens=missing,remaining_tokens=missing,amount_paid_usd=0,
+            effective_token_value_usd=0,metadata_json='{"traceability":"legacy"}',
+        )
+        db.add(lot); db.flush()
+
+    def eligible_token_balance(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        provider: str | None = None,
+        allow_promotional: bool = True,
+    ) -> int:
+        lots=db.execute(
+            select(TokenValueLot)
+            .where(TokenValueLot.user_id==user_id,TokenValueLot.remaining_tokens>0)
+            .order_by(TokenValueLot.created_at,TokenValueLot.id)
+        ).scalars().all()
+        traced_total=sum(int(lot.remaining_tokens or 0) for lot in lots)
+        eligible=sum(
+            int(lot.remaining_tokens or 0)
+            for lot in lots
+            if self._lot_is_eligible(lot,provider=provider,allow_promotional=allow_promotional)
+        )
+        # Preserve genuinely old balances that predate token-bag traceability.
+        from app.models.user import User
+        user=db.get(User,user_id)
+        legacy_untraced=max(int(getattr(user,"token_balance",0) or 0)-traced_total,0) if user else 0
+        return eligible+legacy_untraced
+
+    def allocate(
+        self,
+        db:Session,
+        *,
+        user_id:int,
+        execution_id:str,
+        tokens:int,
+        token_transaction_id:int|None,
+        provider:str|None=None,
+        allow_promotional:bool=True,
+        strict_eligibility:bool=False,
+    ) -> None:
         remaining=max(int(tokens),0)
         if remaining<=0:return
-        lots=db.execute(select(TokenValueLot).where(TokenValueLot.user_id==user_id,TokenValueLot.remaining_tokens>0).order_by(TokenValueLot.created_at,TokenValueLot.id).with_for_update()).scalars().all()
+        lots=db.execute(
+            select(TokenValueLot)
+            .where(TokenValueLot.user_id==user_id,TokenValueLot.remaining_tokens>0)
+            .order_by(TokenValueLot.created_at,TokenValueLot.id)
+            .with_for_update()
+        ).scalars().all()
         for lot in lots:
             if remaining<=0:break
+            if not self._lot_is_eligible(lot,provider=provider,allow_promotional=allow_promotional):
+                continue
             take=min(remaining,lot.remaining_tokens)
             lot.remaining_tokens-=take
             if take > 0 and lot.status == "new":
@@ -211,16 +330,38 @@ class TokenValueLedgerService:
                 lot.status="active"
                 lot.activated_at=utc_now()
                 lot.commercial_profit_released=True
+                # Promotional credits carry no company profit. Their provider-funded
+                # reserve remains outside Caja verde for the entire lifecycle.
                 lot.released_commercial_profit_usd=(snapshot["effective_profit_per_token"]*lot.original_tokens).quantize(Decimal("0.000001"))
             if lot.remaining_tokens <= 0 and lot.status not in {"expired","refunded"}:
                 lot.status="exhausted"
             db.add(TokenConsumptionAllocation(execution_id=execution_id,user_id=user_id,lot_id=lot.id,token_transaction_id=token_transaction_id,tokens_allocated=take,tokens_reversed=0,effective_token_value_usd=lot.effective_token_value_usd))
             db.add(lot); remaining-=take
         if remaining>0:
-            # Legacy balance without lot provenance: preserve operation but mark zero-value allocation.
-            legacy=TokenValueLot(user_id=user_id,source='legacy_untraced_balance',reference_id=None,original_tokens=remaining,remaining_tokens=0,amount_paid_usd=0,effective_token_value_usd=0,metadata_json='{"traceability":"legacy"}')
-            db.add(legacy); db.flush()
-            db.add(TokenConsumptionAllocation(execution_id=execution_id,user_id=user_id,lot_id=legacy.id,token_transaction_id=token_transaction_id,tokens_allocated=remaining,tokens_reversed=0,effective_token_value_usd=0))
+            # After the wallet debit, any positive difference between the wallet and
+            # all traced lots is a genuine historical untraced balance. It remains
+            # eligible exactly as before promotional provider scoping existed.
+            from app.models.user import User
+            user=db.get(User,user_id)
+            traced_after=sum(
+                int(x.remaining_tokens or 0)
+                for x in db.execute(
+                    select(TokenValueLot).where(TokenValueLot.user_id==user_id)
+                ).scalars().all()
+            )
+            legacy_available=max(int(getattr(user,"token_balance",0) or 0)-traced_after,0) if user else 0
+            legacy_take=min(remaining,legacy_available)
+            if legacy_take>0:
+                legacy=TokenValueLot(user_id=user_id,source='legacy_untraced_balance',reference_id=None,original_tokens=legacy_take,remaining_tokens=0,amount_paid_usd=0,effective_token_value_usd=0,metadata_json='{"traceability":"legacy"}')
+                db.add(legacy); db.flush()
+                db.add(TokenConsumptionAllocation(execution_id=execution_id,user_id=user_id,lot_id=legacy.id,token_transaction_id=token_transaction_id,tokens_allocated=legacy_take,tokens_reversed=0,effective_token_value_usd=0))
+                remaining-=legacy_take
+            if remaining>0 and strict_eligibility:
+                raise ConflictException("Insufficient eligible token balance for the selected generation provider.")
+            if remaining>0:
+                legacy=TokenValueLot(user_id=user_id,source='legacy_untraced_balance',reference_id=None,original_tokens=remaining,remaining_tokens=0,amount_paid_usd=0,effective_token_value_usd=0,metadata_json='{"traceability":"legacy"}')
+                db.add(legacy); db.flush()
+                db.add(TokenConsumptionAllocation(execution_id=execution_id,user_id=user_id,lot_id=legacy.id,token_transaction_id=token_transaction_id,tokens_allocated=remaining,tokens_reversed=0,effective_token_value_usd=0))
         db.flush()
 
     def restore(self, db:Session, *, execution_id:str, tokens:int) -> None:

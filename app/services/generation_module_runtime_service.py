@@ -40,6 +40,7 @@ from app.services.ai_engine_settings_service import ai_engine_settings_service
 from app.services.provider_pricing_service import provider_pricing_service
 from app.repositories.pricing_rule_repository import pricing_rule_repository
 from app.services.pricing_service import pricing_service
+from app.services.promotional_credit_service import promotional_credit_service
 from app.services.generation_module_result_service import generation_module_result_service
 from app.services.storage_service import storage_service
 from app.services.runpod_serverless_adapter_service import runpod_serverless_adapter_service
@@ -140,7 +141,8 @@ class GenerationModuleRuntimeService:
         }
         if user_id is not None and tokens > 0:
             generation_module_billing_service.charge(
-                db, user_id=user_id, execution_id=str(execution_id), module_key=module.key, tokens=tokens
+                db, user_id=user_id, execution_id=str(execution_id), module_key=module.key, tokens=tokens,
+                provider=(pricing.provider if pricing else None),
             )
         execution = GenerationModuleExecutionResponse(
             id=execution_id, module_id=module.id, module_key=module.key, user_id=user_id, engine=engine,
@@ -583,7 +585,7 @@ class GenerationModuleRuntimeService:
             generation_module_execution_store_service.save(final_snapshot)
 
 
-    def _finalize_dynamic_billing(self, db: Session, item: GenerationModuleExecutionResponse) -> None:
+    def _finalize_dynamic_billing(self, db: Session, item: GenerationModuleExecutionResponse, *, pending_settlement: bool = False) -> None:
         """Create an immutable per-execution billing snapshot.
 
         This runs synchronously before the final execution snapshot is exposed,
@@ -718,6 +720,11 @@ class GenerationModuleRuntimeService:
                     previously_charged=item.tokens_charged,
                     final_tokens=final_tokens,
                     reason=f"{item.status} after {actual_seconds:.3f}s provider time",
+                    provider=provider,
+                    allow_promotional=(
+                        promotional_credit_service.allow_pending_settlement(db)
+                        if pending_settlement else True
+                    ),
                 )
             except ConflictException:
                 if item.status != "completed":
@@ -814,9 +821,28 @@ class GenerationModuleRuntimeService:
             if item.user_id is not None
             else {}
         )
-        normal_profit_from_bags = float(ledger_summary.get("profit_without_benefits_usd") or applied_profit_usd or 0)
-        applied_profit_from_bags = float(ledger_summary.get("company_profit_usd") or applied_profit_usd or 0)
+        has_ledger_allocations = bool(ledger_summary.get("allocations"))
+        normal_profit_from_bags = float(
+            ledger_summary.get("profit_without_benefits_usd", 0)
+            if has_ledger_allocations else (applied_profit_usd or 0)
+        )
+        applied_profit_from_bags = float(
+            ledger_summary.get("company_profit_usd", 0)
+            if has_ledger_allocations else (applied_profit_usd or 0)
+        )
         estimated_snapshot = dict(item.billing_breakdown or {})
+        promotional_settlement = promotional_credit_service.settle_execution_surplus(
+            db,
+            execution_id=str(item.id),
+            infrastructure_cost_usd=float(infrastructure_cost or 0),
+            pricing_rounding_surplus_usd=float(profit_rounding_surplus_usd or 0),
+        )
+        company_rounding_surplus_usd = float(
+            promotional_settlement.get("company_rounding_surplus_usd") or 0
+        )
+        promotional_credit_returned_usd = float(
+            promotional_settlement.get("promotional_credit_returned_usd") or 0
+        )
         initial_estimated_tokens = int(
             estimated_snapshot.get("estimated_tokens_before_execution")
             or item.estimated_tokens_before_execution
@@ -842,7 +868,8 @@ class GenerationModuleRuntimeService:
             "desired_profit_per_token_usd": profit_per_token_usd,
             "desired_profit_usd": round(normal_profit_from_bags, 9),
             "applied_profit_usd": round(applied_profit_from_bags, 9),
-            "profit_rounding_surplus_usd": round(profit_rounding_surplus_usd, 9),
+            "profit_rounding_surplus_usd": round(company_rounding_surplus_usd, 9),
+            "promotional_credit_returned_usd": round(promotional_credit_returned_usd, 9),
             "profit_applied": bool(policy.apply_profit),
             "infrastructure_charge_applied": bool(policy.charge_infrastructure),
             "billing_policy_key": policy_key,
@@ -887,7 +914,7 @@ class GenerationModuleRuntimeService:
             item = self.get_for_user(execution_id, user_id=user_id)
             if not bool(item.result_locked or (item.billing_breakdown or {}).get("settlement_pending")):
                 return item
-            self._finalize_dynamic_billing(db, item)
+            self._finalize_dynamic_billing(db, item, pending_settlement=True)
             self._items[item.id] = item.model_copy(deep=True)
             self._owners[item.id] = item.user_id
             generation_module_execution_store_service.save(item)

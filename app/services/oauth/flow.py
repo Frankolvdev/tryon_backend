@@ -24,6 +24,7 @@ from app.services.auth_service import auth_service
 from app.services.oauth.factory import build_oauth_provider_registry
 from app.services.runtime_settings_service import runtime_settings_service
 from app.services.token_service import token_service
+from app.services.promotional_credit_service import promotional_credit_service
 
 
 class OAuthFlowService:
@@ -185,15 +186,9 @@ class OAuthFlowService:
             security.age_confirmed_at = utc_now() if security.age_confirmed else None
             db.add(security)
             db.commit()
-            free_tokens = runtime_settings_service.free_signup_tokens(db)
-            if free_tokens > 0:
-                token_service.credit_tokens(
-                    db=db,
-                    user_id=user.id,
-                    amount=free_tokens,
-                    source="signup_bonus",
-                    description="Free signup tokens.",
-                )
+            promo_result = promotional_credit_service.grant_signup(db, user_id=user.id)
+            if int(promo_result.get("granted_tokens") or 0) > 0:
+                db.commit()
                 db.refresh(user)
 
         existing_for_user = oauth_account_repository.get_by_user_provider(

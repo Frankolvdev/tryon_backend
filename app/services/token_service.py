@@ -203,6 +203,9 @@ class TokenService:
         description: str | None = None,
         commit: bool = True,
         allocation_reference: str | None = None,
+        allocation_provider: str | None = None,
+        allow_promotional: bool = True,
+        strict_allocation_eligibility: bool = False,
     ) -> User:
         if amount <= 0:
             raise ConflictException("Debit amount must be greater than zero.")
@@ -218,6 +221,19 @@ class TokenService:
 
         if user.token_balance < amount:
             raise ConflictException("Insufficient token balance.")
+
+        if allocation_reference:
+            token_value_ledger_service.ensure_legacy_balance_lot(
+                db, user_id=user_id, wallet_balance=int(user.token_balance or 0),
+            )
+
+        if allocation_reference and strict_allocation_eligibility:
+            eligible = token_value_ledger_service.eligible_token_balance(
+                db, user_id=user_id, provider=allocation_provider,
+                allow_promotional=allow_promotional,
+            )
+            if eligible < amount:
+                raise ConflictException("Insufficient eligible token balance for this generation.")
 
         user.token_balance -= amount
 
@@ -237,7 +253,9 @@ class TokenService:
         if allocation_reference:
             token_value_ledger_service.allocate(
                 db, user_id=user.id, execution_id=allocation_reference, tokens=amount,
-                token_transaction_id=transaction.id,
+                token_transaction_id=transaction.id, provider=allocation_provider,
+                allow_promotional=allow_promotional,
+                strict_eligibility=strict_allocation_eligibility,
             )
         if commit:
             db.commit()

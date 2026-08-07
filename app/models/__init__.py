@@ -144,6 +144,7 @@ from app.models.workflow_definition import (
 )
 
 
+from app.models.promotional_credit import PromotionalCreditFund, PromotionalTokenGrant, PromotionalCreditReturn
 __all__ = [
     "AbuseEvent",
     "AccountSecuritySetting",
@@ -222,6 +223,9 @@ __all__ = [
     "WebhookEndpoint",
     "WebhookEvent",
     "WorkflowDefinition",
+    "PromotionalCreditFund",
+    "PromotionalTokenGrant",
+    "PromotionalCreditReturn",
 ]
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 

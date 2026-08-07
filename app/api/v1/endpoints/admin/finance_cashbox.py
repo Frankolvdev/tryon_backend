@@ -3,11 +3,14 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.models.user import User
+from app.repositories.user_repository import user_repository
 from app.common.exceptions import ConflictException
 from app.schemas.finance_cashbox import *
+from app.schemas.promotional_credit import *
 from app.services.audit_service import audit_service
 from app.services.finance_cashbox_service import finance_cashbox_service
 from app.services.pending_recovery_service import pending_recovery_service
+from app.services.promotional_credit_service import promotional_credit_service
 router=APIRouter(prefix='/finances')
 @router.get('/cashbox',response_model=CashboxSummaryResponse)
 def cashbox(db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
@@ -47,5 +50,34 @@ def update_expiry(data:ExpirationSettingsUpdate,db:Session=Depends(get_db),curre
 def simulate_expiration(bag_id:int,data:TokenBagExpirationSimulationRequest,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
  if not data.confirm: raise ConflictException('Explicit confirmation is required to simulate expiration.')
  result=finance_cashbox_service.simulate_expiration(db,bag_id)
- audit_service.create_log(db,actor_user_id=current_admin.id,action='token_bag_expiration_simulated',entity_type='token_value_lot',entity_id=str(bag_id),description=f"Expiration simulated for token bag #{bag_id}: USD {result['infrastructure_cash_released_usd']} moved to withdrawable cash and USD {result['provider_credit_released_usd']} remained as provider credit.",ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
+ audit_service.create_log(db,actor_user_id=current_admin.id,action='token_bag_expiration_simulated',entity_type='token_value_lot',entity_id=str(bag_id),description=(f"Expiration simulated for token bag #{bag_id}: USD {result.get('promotional_credit_returned_usd',0)} returned to promotional credit, USD {result['infrastructure_cash_released_usd']} moved to withdrawable cash and USD {result['provider_credit_released_usd']} remained as provider credit."),ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
+ db.commit(); return result
+
+
+@router.get('/promotional-credits',response_model=PromotionalCreditSummary)
+def promotional_credits(db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+ result=promotional_credit_service.summary(db); db.commit(); return result
+
+@router.post('/promotional-credits/funds',response_model=PromotionalFundResponse)
+def create_promotional_fund(data:PromotionalFundCreate,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+ row=promotional_credit_service.add_fund(db,amount_usd=data.amount_usd,provider=data.provider,reference=data.reference,description=data.description,created_by_user_id=current_admin.id)
+ audit_service.create_log(db,actor_user_id=current_admin.id,action='promotional_credit_fund_added',entity_type='promotional_credit_fund',entity_id=str(row.id),description=f'Promotional provider credit of USD {row.original_usd} added for {row.provider}.',ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
+ db.commit(); db.refresh(row); return row
+
+@router.put('/promotional-credits/settings',response_model=PromotionalCreditSettings)
+def update_promotional_settings(data:PromotionalCreditSettings,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+ result=promotional_credit_service.update_settings(db,signup_enabled=data.signup_enabled,signup_tokens=data.signup_tokens,signup_provider=data.signup_provider,allow_pending_settlement=data.allow_pending_settlement)
+ audit_service.create_log(db,actor_user_id=current_admin.id,action='promotional_credit_settings_updated',entity_type='system_setting',entity_id='promotional_credits',description='Promotional credit settings updated.',ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
+ db.commit(); return result
+
+@router.post('/promotional-credits/grants',response_model=PromotionalGrantResult)
+def create_promotional_grant(data:PromotionalGrantCreate,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+ user=None
+ if data.user_id is not None:
+  user=user_repository.get_by_id(db,data.user_id)
+ elif data.user_email:
+  user=user_repository.get_by_email(db,str(data.user_email).strip().lower())
+ if not user: raise ConflictException('User not found.')
+ result=promotional_credit_service.grant(db,user_id=user.id,tokens=data.tokens,provider=data.provider,grant_type='manual_admin',created_by_user_id=current_admin.id,allow_partial=False)
+ audit_service.create_log(db,actor_user_id=current_admin.id,action='promotional_tokens_granted',entity_type='user',entity_id=str(user.id),description=f"{result['granted_tokens']} promotional token(s) granted from {result['provider']} credit.",ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
  db.commit(); return result
