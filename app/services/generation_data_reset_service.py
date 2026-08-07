@@ -42,18 +42,34 @@ class GenerationDataResetService:
             for item in value:
                 GenerationDataResetService._collect_file_ids(item, found)
 
-    def _file_ids(self, db: Session) -> set[int]:
-        """Return every stored file that belongs to test/user activity.
+    def _preserved_account_file_ids(self, db: Session) -> set[int]:
+        """Files that belong to a surviving account rather than test activity."""
+        if not self._table_exists(db, "users"):
+            return set()
+        return {
+            int(value)
+            for value in db.execute(
+                text("SELECT avatar_file_id FROM users WHERE avatar_file_id IS NOT NULL")
+            ).scalars().all()
+            if value is not None
+        }
 
-        The previous implementation only inspected execution snapshots and legacy TryOn
-        rows. Gallery references and orphaned uploads therefore remained visible in the
-        storage administrator after a reset. A full commercial reset intentionally leaves
-        the user accounts but clears their uploaded/generated files, so every storage row
-        is included.
+    def _file_ids(self, db: Session) -> set[int]:
+        """Return stored files that belong to resettable test/user activity.
+
+        The reset intentionally clears uploads, generated results, gallery files and
+        orphaned test files, but it keeps user accounts. Account-owned files such as
+        avatars must therefore survive as well.
         """
         if not self._table_exists(db, "storage_files"):
             return set()
-        return {int(value) for value in db.execute(text("SELECT id FROM storage_files")).scalars().all()}
+
+        preserved_file_ids = self._preserved_account_file_ids(db)
+        return {
+            int(value)
+            for value in db.execute(text("SELECT id FROM storage_files")).scalars().all()
+            if int(value) not in preserved_file_ids
+        }
 
     def preview(self, db: Session) -> dict[str, Any]:
         active_execution_ids: list[str] = []
@@ -63,6 +79,7 @@ class GenerationDataResetService:
         if self._table_exists(db, "tryon_jobs"):
             active_tryon_job_ids = [r.id for r in db.query(TryOnJob).all() if str(r.status).lower() in ACTIVE_STATUSES]
         file_ids = self._file_ids(db)
+        preserved_account_file_ids = self._preserved_account_file_ids(db)
         token_balance = int(db.execute(text("SELECT COALESCE(SUM(token_balance), 0) FROM users")).scalar() or 0)
         counts = {
             "generation_module_executions": self._count(db, "generation_module_executions"),
@@ -84,9 +101,15 @@ class GenerationDataResetService:
             "infrastructure_funding_movements": self._count(db, "infrastructure_funding_movements"),
             "infrastructure_funding_allocations": self._count(db, "infrastructure_funding_allocations"),
             "infrastructure_provider_credit_releases": self._count(db, "infrastructure_provider_credit_releases"),
+            "promotional_credit_returns": self._count(db, "promotional_credit_returns"),
+            "promotional_token_grants": self._count(db, "promotional_token_grants"),
+            "promotional_credit_funds": self._count(db, "promotional_credit_funds"),
+            "operational_expenses": self._count(db, "operational_expenses"),
             "legal_acceptances": self._count(db, "legal_acceptances"),
             "storage_files": len(file_ids),
+            "account_files_preserved": len(preserved_account_file_ids),
             "tokens_to_zero": token_balance,
+            "users_preserved": self._count(db, "users"),
         }
         return {
             "confirmation_text": CONFIRMATION_TEXT,
