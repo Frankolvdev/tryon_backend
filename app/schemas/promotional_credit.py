@@ -56,6 +56,20 @@ class PromotionalGrantResult(BaseModel):
     grant_ids: list[int] = Field(default_factory=list)
 
 
+class PromotionalRevokeCreate(BaseModel):
+    user_id: int
+    tokens: int = Field(gt=0, le=1000000)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class PromotionalRevokeResult(BaseModel):
+    requested_tokens: int
+    revoked_tokens: int
+    amount_returned_usd: float
+    user_balance: int
+    affected_lot_ids: list[int] = Field(default_factory=list)
+
+
 class PromotionalGrantHistory(BaseModel):
     id: int
     fund_id: int

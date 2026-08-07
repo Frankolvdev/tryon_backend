@@ -14,8 +14,10 @@ from app.models.promotional_credit import (
 )
 from app.models.system_setting import SystemSetting
 from app.models.token_consumption_allocation import TokenConsumptionAllocation
+from app.models.token_transaction import TokenTransaction
 from app.models.token_value_lot import TokenValueLot
 from app.models.user import User
+from app.common.enums import TokenTransactionType
 from app.repositories.system_setting_repository import system_setting_repository
 from app.services.financial_protection_service import financial_protection_service
 from app.services.pricing_service import pricing_service
@@ -231,6 +233,91 @@ class PromotionalCreditService:
             "requested_tokens": requested, "granted_tokens": grant_tokens,
             "provider": provider, "amount_reserved_usd": float(total_reserved),
             "user_balance": int(user.token_balance), "grant_ids": [x.id for x in grant_rows],
+        }
+
+    def revoke_unused(self, db: Session, *, user_id: int, tokens: int, reason: str | None = None) -> dict:
+        """Remove only unused promotional tokens and restore their backing funds.
+
+        This deliberately cannot touch commercial/paid lots. Promotional lots
+        are consumed oldest-first so the wallet and token ledger remain aligned.
+        Every restored amount returns to the exact PromotionalCreditFund that
+        originally financed the grant.
+        """
+        requested = max(int(tokens), 0)
+        if requested <= 0:
+            raise ConflictException("Promotional tokens to remove must be greater than zero.")
+
+        user = db.execute(select(User).where(User.id == user_id).with_for_update()).scalar_one_or_none()
+        if not user:
+            raise NotFoundException("User not found.")
+
+        lots = list(db.execute(
+            select(TokenValueLot).where(
+                TokenValueLot.user_id == user_id,
+                TokenValueLot.source == PROMO_SOURCE,
+                TokenValueLot.remaining_tokens > 0,
+            ).order_by(TokenValueLot.created_at, TokenValueLot.id).with_for_update()
+        ).scalars().all())
+        available = sum(max(int(lot.remaining_tokens or 0), 0) for lot in lots)
+        if available < requested:
+            raise ConflictException(f"The user has only {available} unused promotional token(s) available to remove.")
+        if int(user.token_balance or 0) < requested:
+            raise ConflictException("The user wallet does not contain enough tokens for this promotional removal.")
+
+        remaining = requested
+        returned = D("0")
+        affected: list[int] = []
+        for lot in lots:
+            if remaining <= 0:
+                break
+            take = min(remaining, max(int(lot.remaining_tokens or 0), 0))
+            if take <= 0:
+                continue
+            grant = db.execute(
+                select(PromotionalTokenGrant)
+                .where(PromotionalTokenGrant.lot_id == lot.id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            if not grant:
+                raise ConflictException(f"Promotional bag #{lot.id} has no funding grant and cannot be removed safely.")
+            fund = db.execute(
+                select(PromotionalCreditFund)
+                .where(PromotionalCreditFund.id == grant.fund_id)
+                .with_for_update()
+            ).scalar_one()
+            amount = (D(str(grant.reserve_per_token_usd)) * take).quantize(D("0.000001"))
+            capacity = max(D(str(fund.original_usd)) - D(str(fund.remaining_usd or 0)), D("0"))
+            if amount <= 0 or capacity < amount:
+                raise ConflictException(f"Promotional fund #{fund.id} cannot receive the full backing for bag #{lot.id} safely.")
+
+            lot.remaining_tokens = int(lot.remaining_tokens) - take
+            if lot.remaining_tokens == 0 and lot.status not in {"expired", "refunded"}:
+                lot.status = "exhausted"
+            fund.remaining_usd = (D(str(fund.remaining_usd or 0)) + amount).quantize(D("0.000001"))
+            db.add(lot); db.add(fund)
+            db.add(PromotionalCreditReturn(
+                fund_id=fund.id, grant_id=grant.id, amount_usd=amount,
+                reason="admin_revoke", reference_id=f"lot:{lot.id}:before:{int(lot.remaining_tokens)+take}:take:{take}",
+            ))
+            returned += amount
+            remaining -= take
+            affected.append(lot.id)
+
+        if remaining != 0:
+            raise ConflictException("Promotional removal could not be completed atomically.")
+
+        user.token_balance = int(user.token_balance or 0) - requested
+        db.add(user)
+        db.add(TokenTransaction(
+            user_id=user.id, transaction_type=TokenTransactionType.DEBIT.value, amount=-requested,
+            balance_after=user.token_balance, source="promotional_credit_admin_revoke",
+            description=(str(reason).strip() or "Promotional tokens removed by administrator."),
+        ))
+        db.flush()
+        return {
+            "requested_tokens": requested, "revoked_tokens": requested,
+            "amount_returned_usd": float(returned), "user_balance": int(user.token_balance),
+            "affected_lot_ids": affected,
         }
 
     def grant_signup(self, db: Session, *, user_id: int) -> dict:

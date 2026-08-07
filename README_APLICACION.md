@@ -1,92 +1,43 @@
-# MegaZIP — Backend — Simulador + Administración de usuarios + limpieza de Configuración
+# FIX Backend — Retiro de tokens gratis + políticas legales V1.2
 
-BASE EXACTA
-tryon_backend-main - 2026-08-07T163457.497.zip
+BASE
+tryon_backend-main - 2026-08-07T170316.291.zip
 
-ALCANCE
+CAMBIO FUNCIONAL
+- Nuevo endpoint POST /api/admin/finances/promotional-credits/revoke.
+- Solo puede retirar tokens de bolsas promotional_credit que todavía estén sin gastar.
+- Nunca toca compras, planes, cupones ni saldo comercial.
+- Si el retiro cruza varias bolsas promocionales, se procesa FIFO.
+- Cada token retirado devuelve su respaldo al PromotionalCreditFund exacto que lo financió.
+- Si no puede devolverse el respaldo completo, toda la operación falla.
+- Se descuenta el wallet del usuario y se registra TokenTransaction de débito.
+- Se registra PromotionalCreditReturn reason=admin_revoke.
+- Se genera AuditLog administrativo.
 
-1. SIMULADOR DE GANANCIAS
-- Se conserva la fórmula y comportamiento existente.
-- Ya contemplaba correctamente el componente operativo; se blinda mediante contratos.
-- Los tokens promocionales NO se mezclan con el simulador comercial:
-  cliente paga 0, ganancia 0 y operación 0.
-- Se corrige un bug preexistente en recomendaciones: una recomendación podía
-  devolver el token_value de la última iteración evaluada en vez del
-  token_value de la recomendación seleccionada.
-- No cambia el cálculo de tokens, descuentos, FIFO ni infraestructura.
+POLÍTICAS LEGALES
+- Defaults profesionales pasan de 1.1 a 1.2.
+- Se explican tokens/créditos promocionales, valor monetario cero, retiro administrativo de no usados, vencimiento y retorno interno al fondo.
+- Privacidad contempla registro de asignaciones/retiros promocionales.
+- Reembolsos aclara que créditos gratuitos no originan reembolso monetario.
+- Caducidad aclara el retorno del respaldo promocional.
+- Solo se actualizan automáticamente defaults exactos 1.1/legacy.
+- Políticas redactadas manualmente por el administrador NO se sobrescriben.
 
-2. ADMINISTRACIÓN DE USUARIO / ALMACENAMIENTO
-- Nuevo listado admin de almacenamiento por usuario:
-  GET /api/admin/users/{user_id}/storage-files
-- Filtra inputs, results, library u otros.
-- Conserva el proveedor original de cada StorageFile.
-- Nueva eliminación segura de una generación:
-  DELETE /api/admin/users/{user_id}/generations/{execution_id}/storage
-- Elimina resultados físicos y gallery rows de esa generación.
-- NO elimina inputs automáticamente.
-- NO elimina GenerationFinancialRecord ni TokenConsumptionAllocation.
-  El historial financiero permanece auditable.
-- Solo permite eliminar generaciones en estado terminal:
-  completed / failed / cancelled.
-- Genera AuditLog administrativo.
+IMPORTANTE
+Los textos son una base administrativa preventiva, no sustituyen revisión jurídica profesional según países de lanzamiento.
 
-3. CONFIGURACIÓN
-Se elimina del seed y, mediante migración, de system_settings únicamente
-configuración sin consumidor real en el código actual:
-- app_environment
-- max_login_attempts
-- password_min_length
-- active_payment_provider
-- monthly_tokens_reset_enabled
-- dynamic_pricing_enabled
-- default_margin_percent
-- scheduler_timezone
-- analytics_enabled
-- log_retention_days
-- commercial_currency
+BLINDAJE
+- Sin migración Alembic.
+- No se modifica cálculo de tokens.
+- No se modifica FIFO de generaciones.
+- No se modifica Caja comercial, utilidad, operación, vencimientos, Stripe ni proveedores.
+- El endpoint genérico antiguo se conserva internamente para no romper contratos existentes, pero deja de estar expuesto por este control del BackOffice.
 
-USD queda fijo como moneda comercial del producto. La API conserva el campo
-currency por compatibilidad, pero el backend no necesita una setting para ello.
-
-SE CONSERVAN, ENTRE OTRAS
-- precios/token y gasto operativo
-- execution billing policy
-- storage
-- registro/login
-- JWT
-- billing/subscriptions
-- maintenance
-- scheduler_enabled
-- módulos IA
-- RunPod/provider settings
-- créditos promocionales/free signup
-- frontend URL
-- minimum token purchase (se conserva por compatibilidad pública)
-
-MIGRACIÓN OBLIGATORIA
-alembic upgrade head
-
-HEAD ESPERADO
-05d_unused_settings (head)
-
-VALIDACIÓN REALIZADA
-- python -m compileall: OK
-- alembic heads: 05d_unused_settings (head)
-- 94 contratos acumulados relacionados: PASSED
-
-NO MODIFICA
-- AppWeb
-- Stripe
-- Modal / RunPod / Beam
-- generación runtime
-- FIFO
-- snapshots históricos
-- cajas financieras
-- auto-desbloqueo
-- vencimientos
-- fórmulas de precio base
+VALIDACIÓN
+19 pruebas relacionadas: PASSED
+python -m compileall: OK
 
 GIT
 git add .
-git commit -m "feat: upgrade simulator user admin and active settings"
+git commit -m "fix: safely revoke promotional tokens and update legal defaults"
 git push

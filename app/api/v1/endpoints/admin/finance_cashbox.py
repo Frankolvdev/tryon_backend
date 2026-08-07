@@ -81,6 +81,13 @@ def create_promotional_grant(data:PromotionalGrantCreate,request:Request,db:Sess
  result=promotional_credit_service.grant(db,user_id=user.id,tokens=data.tokens,provider=data.provider,grant_type='manual_admin',created_by_user_id=current_admin.id,allow_partial=False)
  audit_service.create_log(db,actor_user_id=current_admin.id,action='promotional_tokens_granted',entity_type='user',entity_id=str(user.id),description=f"{result['granted_tokens']} promotional token(s) granted from {result['provider']} credit.",ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
  db.commit(); return result
+
+@router.post('/promotional-credits/revoke',response_model=PromotionalRevokeResult)
+def revoke_promotional_tokens(data:PromotionalRevokeCreate,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+ result=promotional_credit_service.revoke_unused(db,user_id=data.user_id,tokens=data.tokens,reason=data.reason)
+ audit_service.create_log(db,actor_user_id=current_admin.id,action='promotional_tokens_revoked',entity_type='user',entity_id=str(data.user_id),description=f"{result['revoked_tokens']} unused promotional token(s) removed; USD {result['amount_returned_usd']} returned to their original promotional fund(s).",ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
+ db.commit(); return result
+
 from app.schemas.finance_cashbox import (
     OperationalCashboxSummaryResponse, OperationalExpenseCreate, OperationalExpenseResponse,
 )
