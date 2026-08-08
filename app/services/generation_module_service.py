@@ -1,6 +1,7 @@
 import json
 from typing import Any
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import ConflictException, NotFoundException
@@ -10,6 +11,7 @@ from app.models.generation_module import (
     GenerationModuleOutput,
     GenerationModuleStep,
 )
+from app.models.generation_module_execution import GenerationModuleExecution
 from app.repositories.generation_module_repository import generation_module_repository
 from app.repositories.pricing_rule_repository import pricing_rule_repository
 from app.services.pricing_service import pricing_service
@@ -259,9 +261,17 @@ class GenerationModuleService:
             version=data.version,
             category=data.category,
             endpoint=(data.endpoint.strip() if data.endpoint else None),
-            default_execution_engine=data.default_execution_engine.value,
+            default_execution_engine=(
+                data.default_execution_engine.value
+                if data.default_execution_engine is not None
+                else None
+            ),
             metadata_json=self._serialize(data.metadata),
-            is_active=(data.is_active and data.pricing_rule_id is not None),
+            is_active=(
+                data.is_active
+                and data.pricing_rule_id is not None
+                and data.default_execution_engine is not None
+            ),
             created_by_user_id=created_by_user_id,
         )
         db.add(module)
@@ -291,11 +301,16 @@ class GenerationModuleService:
         for field in ("name", "description", "category", "endpoint", "is_active"):
             if field in payload:
                 setattr(module, field, payload[field])
-        if (
-            "default_execution_engine" in payload
-            and data.default_execution_engine is not None
-        ):
-            module.default_execution_engine = data.default_execution_engine.value
+        if "default_execution_engine" in payload:
+            module.default_execution_engine = (
+                data.default_execution_engine.value
+                if data.default_execution_engine is not None
+                else None
+            )
+            # A module without an execution engine is a draft. Keep it safely
+            # inactive until the administrator completes its configuration.
+            if data.default_execution_engine is None:
+                module.is_active = False
         if "metadata" in payload:
             module.metadata_json = self._serialize(data.metadata)
         if data.inputs is not None:
@@ -324,6 +339,25 @@ class GenerationModuleService:
 
     def delete(self, db: Session, *, module_id: int) -> None:
         module = self.get(db, module_id=module_id)
+
+        # generation_module_executions uses ON DELETE CASCADE. A hard delete of
+        # a module with history would therefore erase operational evidence and
+        # can indirectly damage financial/audit traceability. Only pristine,
+        # never-executed modules may be physically removed.
+        execution_count = int(
+            db.scalar(
+                select(func.count(GenerationModuleExecution.id)).where(
+                    GenerationModuleExecution.generation_module_id == module_id
+                )
+            )
+            or 0
+        )
+        if execution_count:
+            raise ConflictException(
+                "This module already has execution history and cannot be deleted. "
+                "Deactivate it instead to preserve generation and financial history."
+            )
+
         db.delete(module)
         db.commit()
 

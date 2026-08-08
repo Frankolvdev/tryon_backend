@@ -74,7 +74,7 @@ class GenerationModuleOperationsService:
             "description": module.description,
             "version": module.version,
             "category": module.category,
-            "default_execution_engine": module.default_execution_engine.value,
+            "default_execution_engine": (module.default_execution_engine.value if module.default_execution_engine is not None else None),
             "metadata": module.metadata,
             "is_active": module.is_active,
             "inputs": [item.model_dump(mode="json", exclude={"id", "created_at", "updated_at"}) for item in module.inputs],

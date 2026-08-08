@@ -20,10 +20,10 @@ class GenerationModule(Base):
         String(100), default="tryon", nullable=False, index=True
     )
     endpoint: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
-    default_execution_engine: Mapped[str] = mapped_column(
+    default_execution_engine: Mapped[str | None] = mapped_column(
         String(50),
-        default=GenerationExecutionEngine.SIMULATED.value,
-        nullable=False,
+        default=None,
+        nullable=True,
         index=True,
     )
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -1,4 +1,5 @@
 from typing import Any
+import mimetypes
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -124,7 +125,22 @@ def read_storage_file_content(
 
     content = storage_service.read_bytes(db, storage_file=storage_file)
     headers = {"Content-Disposition": f'{disposition}; filename="{filename}"'}
-    return Response(content=content, media_type=storage_file.content_type or "application/octet-stream", headers=headers)
+
+    # Some provider/runtime results arrive with a generic MIME type even when
+    # the object name clearly identifies an image. Preserve the stored metadata
+    # but serve a browser-friendly MIME type when it can be inferred safely.
+    stored_content_type = (storage_file.content_type or "").strip().lower()
+    inferred_content_type = (
+        mimetypes.guess_type(filename)[0]
+        or mimetypes.guess_type(storage_file.object_key)[0]
+    )
+    media_type = (
+        inferred_content_type
+        if stored_content_type in {"", "application/octet-stream", "binary/octet-stream"}
+        and inferred_content_type
+        else (storage_file.content_type or inferred_content_type or "application/octet-stream")
+    )
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 @router.get("/storage/providers")

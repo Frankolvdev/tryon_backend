@@ -1,109 +1,82 @@
-# FIX Backend — Excedente promocional cuando una generación usa la misma bolsa más de una vez
+# FIX Backend — Módulos borrador + eliminación segura + previews de almacenamiento
 
-BASE EXACTA
-tryon_backend-main - 2026-08-07T185640.579.zip
+BASE
+tryon_backend-main - 2026-08-07T195856.127.zip
 
-CAUSA REAL DEL ERROR
-Una generación puede crear más de una TokenConsumptionAllocation contra la MISMA
-bolsa promocional. Esto es válido y ocurre, por ejemplo, cuando:
-1. se cobran los tokens estimados al iniciar;
-2. al finalizar el costo real requiere tokens adicionales;
-3. esos tokens adicionales todavía salen de la misma bolsa/promotional grant.
+MÓDULOS DE GENERACIÓN
 
-El settlement promocional anterior recorría cada allocation por separado.
-Por eso intentaba crear dos PromotionalCreditReturn con:
-- mismo grant_id
-- reason = execution_surplus
-- mismo execution_id
+1. Crear módulo como borrador
+- Endpoint ya era nullable en Backend y se conserva así.
+- El motor ahora también puede ser NULL.
+- Un módulo nuevo puede crearse solo con su ficha básica.
+- Si no tiene motor, queda INACTIVO obligatoriamente.
+- El motor y endpoint se configuran después desde Editar.
+- La ejecución falla cerrada si por cualquier vía se intenta ejecutar un módulo sin motor.
+- No se utiliza "simulated" como motor ficticio para representar "todavía no elegido".
 
-La base de datos bloqueó correctamente el segundo INSERT mediante:
-uq_promo_return_idempotency.
+2. Eliminar módulo
+El endpoint DELETE ya existía. Se blinda su comportamiento:
+- Si el módulo NUNCA tuvo ejecuciones: puede borrarse físicamente.
+- Si tiene al menos una ejecución: NO se elimina.
+  Debe dejarse inactivo para conservar historial.
 
-NO SE QUITA NI SE RELAJA ESA RESTRICCIÓN UNIQUE.
+Esto es necesario porque generation_module_executions tiene FK ON DELETE CASCADE;
+permitir el hard-delete destruiría historial operativo y podría comprometer
+trazabilidad financiera.
 
-CORRECCIÓN
-settle_execution_surplus() ahora:
-1. conserva las allocations tal como existen;
-2. calcula net allocations como antes;
-3. agrupa únicamente las allocations promocionales por lot/grant;
-4. suma sus tokens netos;
-5. calcula el mismo sponsored value y actual provider share sobre el total agregado;
-6. crea UNA sola devolución monetaria por grant + ejecución;
-7. mantiene FOR UPDATE y consulta de idempotencia;
-8. hace flush del registro idempotente antes de pasar al siguiente grant.
+3. Export/clone
+Se adapta únicamente para tolerar módulos borrador con engine=NULL.
+No cambia el formato ni las operaciones existentes de módulos configurados.
 
-Matemáticamente no cambia el importe:
-sum(reserve*n_i - infra*n_i/total)
-=
-reserve*sum(n_i) - infra*sum(n_i)/total
+ALMACENAMIENTO
 
-Por tanto no cambia:
-- cantidad de tokens;
-- FIFO;
-- allocations;
-- costo real;
-- reserve_per_token;
-- descuentos;
-- ganancia;
-- gastos operativos;
-- bolsas;
-- proveedor;
-- ciclos recurrentes.
+Al servir un StorageFile:
+- se conserva content_type guardado si es específico;
+- si viene vacío/application/octet-stream/binary/octet-stream, el backend
+  intenta inferir el MIME por original_filename/object_key;
+- no se modifica el archivo ni el registro guardado;
+- esto permite mostrar correctamente resultados .png/.jpg/.webp/etc que
+  proveedores/runtimes registraron con MIME genérico.
 
-RESET DE DATOS DE PRUEBA — AUDITADO
-NO fue la causa del error.
+NO MODIFICA
+- bytes almacenados
+- proveedor original del archivo
+- S3/R2/local routing
+- generación runtime configurada
+- fórmulas financieras
+- pricing
+- FIFO
+- snapshots
+- tokens/promociones
+- Caja
+- Stripe
+- Modal/RunPod/Beam
 
-El reset actual YA elimina, en orden correcto:
-1. promotional_credit_returns
-2. promotional_token_grants
-3. promotional_funding_cycles
-4. promotional_funding_sources
-5. promotional_credit_funds
+MIGRACIÓN OBLIGATORIA
+alembic upgrade head
 
-También:
-- elimina token_consumption_allocations;
-- elimina token_value_lots;
-- pone user.token_balance en 0;
-- conserva users;
-- conserva avatar_file_id.
-
-No se modificó production code del reset porque ya estaba correcto.
-El nuevo contrato de regresión verifica ese orden y esas protecciones.
-
-POR QUÉ EL LOG PRUEBA QUE ERA LA MISMA FINALIZACIÓN
-El SQL fallido contenía DOS filas pendientes en el mismo INSERT:
-- grant_id=1, reason=execution_surplus, misma execution_id, amount=0.725466
-- grant_id=1, reason=execution_surplus, misma execution_id, amount=0.310914
-
-Ambas cantidades equivalen al mismo surplus por token:
-0.725466 / 7 = 0.103638
-0.310914 / 3 = 0.103638
-
-Eso encaja con 7 tokens de un cobro y 3 tokens de un ajuste, ambos pertenecientes
-al mismo grant promocional.
+HEAD ESPERADO
+05g_module_draft_engine (head)
 
 VALIDACIÓN
 - python -m compileall: OK
-- 47 pruebas de promociones/ciclos/reset: PASSED
-- batería financiera amplia del FIX: 77 PASSED / 5 FAILED
-- exactamente los mismos 5 fallos aparecen en el ZIP BASE sin este FIX;
-  por tanto no son regresiones introducidas por esta corrección.
+- alembic heads: 05g_module_draft_engine (head)
+- 22 contratos módulos/readiness/storage: PASSED
+- 105 contratos acumulados financieros/promocionales/storage/módulos: PASSED
 
-SIN MIGRACIÓN
-No ejecutar alembic por este FIX.
+COMANDOS
+alembic upgrade head
+alembic heads
+python -m compileall -q app tests alembic/versions
 
-PRUEBA RECOMENDADA
 python -m pytest -q `
-  tests/test_promotional_execution_surplus_idempotency_contract.py `
-  tests/test_promotional_credit_cashbox_contract.py `
-  tests/test_promotional_recurring_funding_cycle_contract.py `
-  tests/test_promotional_cycle_webhook_periodicity_contract.py `
-  tests/test_promotional_admin_revoke_contract.py `
-  tests/test_promotional_credit_no_regression_contract.py `
-  tests/test_generation_data_reset_financial_v4_contract.py `
-  tests/test_generation_data_reset_promotional_cycles_contract.py
+  tests/test_generation_module_draft_storage_contract.py `
+  tests/test_generation_configuration_readiness_contract.py `
+  tests/test_generation_configuration_readiness_relation_contract.py `
+  tests/test_storage_provider_admin_contract.py `
+  tests/test_multi_provider_storage_contract.py
 
 GIT
 git add .
-git commit -m "fix: aggregate promotional execution surplus by grant"
+git commit -m "fix: support safe module drafts deletes and storage image previews"
 git push

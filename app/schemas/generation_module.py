@@ -86,9 +86,7 @@ class GenerationModuleCreate(BaseModel):
     version: int = Field(default=1, ge=1)
     category: str = Field(default="tryon", min_length=2, max_length=100)
     endpoint: str | None = Field(default=None, max_length=500)
-    default_execution_engine: GenerationExecutionEngine = (
-        GenerationExecutionEngine.SIMULATED
-    )
+    default_execution_engine: GenerationExecutionEngine | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     is_active: bool = True
     pricing_rule_id: int | None = Field(default=None, ge=1)
@@ -181,7 +179,7 @@ class GenerationModuleResponse(BaseModel):
     version: int
     category: str
     endpoint: str | None
-    default_execution_engine: GenerationExecutionEngine
+    default_execution_engine: GenerationExecutionEngine | None
     metadata: dict[str, Any]
     is_active: bool
     created_by_user_id: int | None
