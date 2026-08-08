@@ -145,6 +145,7 @@ from app.models.workflow_definition import (
 
 
 from app.models.promotional_credit import PromotionalCreditFund, PromotionalTokenGrant, PromotionalCreditReturn
+from app.models.promotional_funding_cycle import PromotionalFundingSource, PromotionalFundingCycle
 __all__ = [
     "AbuseEvent",
     "AccountSecuritySetting",
@@ -226,6 +227,8 @@ __all__ = [
     "PromotionalCreditFund",
     "PromotionalTokenGrant",
     "PromotionalCreditReturn",
+    "PromotionalFundingSource",
+    "PromotionalFundingCycle",
 ]
 from app.models.runtime_builder_config import RuntimeBuilderConfig
 

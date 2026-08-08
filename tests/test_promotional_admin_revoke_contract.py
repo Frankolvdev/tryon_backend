@@ -10,10 +10,10 @@ def test_admin_revoke_is_promotional_only_and_returns_original_backing():
     assert 'TokenValueLot.source == PROMO_SOURCE' in service
     assert 'TokenValueLot.remaining_tokens > 0' in service
     assert 'PromotionalCreditFund.id == grant.fund_id' in service
-    assert 'fund.remaining_usd = ' in service
+    assert 'promotional_funding_cycle_service.restore_amount' in service
     assert 'reason="admin_revoke"' in service
     assert 'source="promotional_credit_admin_revoke"' in service
-    assert 'capacity < amount' in service
+    assert 'amount <= 0' in service
 
 def test_admin_endpoint_exposes_only_positive_promotional_removal():
     schema=text('app/schemas/promotional_credit.py')
@@ -25,7 +25,7 @@ def test_admin_endpoint_exposes_only_positive_promotional_removal():
 
 def test_legal_defaults_cover_promotional_credits_without_overwriting_custom_docs():
     legal=text('app/services/legal_document_service.py')
-    assert 'PROFESSIONAL_DEFAULT_VERSION="1.2"' in legal
+    assert 'PROFESSIONAL_DEFAULT_VERSION="1.3"' in legal
     assert 'créditos promocionales o gratuitos' in legal.lower()
     assert 'no tienen valor en efectivo' in legal.lower()
     assert 'PREVIOUS_PROFESSIONAL_DEFAULTS' in legal

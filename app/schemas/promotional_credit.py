@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -31,7 +31,56 @@ class PromotionalProviderBalance(BaseModel):
     provider: str
     funded_usd: float
     available_usd: float
+    own_available_usd: float = 0.0
+    recurring_available_usd: float = 0.0
     available_tokens: int
+
+
+class PromotionalRecurringSourceCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    provider: str = Field(min_length=2, max_length=50)
+    recurring_amount_usd: float = Field(gt=0)
+    current_available_usd: float = Field(ge=0)
+    cycle_start: date
+    cycle_end: date
+
+    @model_validator(mode="after")
+    def validate_cycle(self):
+        if self.cycle_end <= self.cycle_start:
+            raise ValueError("cycle_end must be after cycle_start")
+        return self
+
+
+class PromotionalRecurringSourceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    recurring_amount_usd: float | None = Field(default=None, gt=0)
+    active: bool | None = None
+
+
+class PromotionalFundingCycleResponse(BaseModel):
+    id: int
+    cycle_start: date
+    cycle_end: date
+    configured_amount_usd: float
+    opening_available_usd: float
+    current_available_usd: float
+    expired_unused_usd: float
+    returned_after_close_usd: float
+    status: str
+
+
+class PromotionalRecurringSourceResponse(BaseModel):
+    id: int
+    name: str
+    provider: str
+    source_type: str
+    recurrence: str
+    recurring_amount_usd: float
+    current_cycle_start: date
+    current_cycle_end: date
+    current_available_usd: float
+    active: bool
+    cycles: list[PromotionalFundingCycleResponse] = Field(default_factory=list)
 
 
 class PromotionalGrantCreate(BaseModel):
@@ -88,7 +137,10 @@ class PromotionalCreditSummary(BaseModel):
     generation_infrastructure_reserve_per_token_usd: float
     total_funded_usd: float
     total_available_usd: float
+    total_own_available_usd: float = 0.0
+    total_recurring_available_usd: float = 0.0
     provider_balances: list[PromotionalProviderBalance] = Field(default_factory=list)
     settings: PromotionalCreditSettings
     funds: list[PromotionalFundResponse] = Field(default_factory=list)
     grants: list[PromotionalGrantHistory] = Field(default_factory=list)
+    recurring_sources: list[PromotionalRecurringSourceResponse] = Field(default_factory=list)

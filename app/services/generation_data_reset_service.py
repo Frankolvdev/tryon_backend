@@ -103,6 +103,8 @@ class GenerationDataResetService:
             "infrastructure_provider_credit_releases": self._count(db, "infrastructure_provider_credit_releases"),
             "promotional_credit_returns": self._count(db, "promotional_credit_returns"),
             "promotional_token_grants": self._count(db, "promotional_token_grants"),
+            "promotional_funding_cycles": self._count(db, "promotional_funding_cycles"),
+            "promotional_funding_sources": self._count(db, "promotional_funding_sources"),
             "promotional_credit_funds": self._count(db, "promotional_credit_funds"),
             "operational_expenses": self._count(db, "operational_expenses"),
             "legal_acceptances": self._count(db, "legal_acceptances"),
@@ -206,6 +208,11 @@ class GenerationDataResetService:
             delete_all("infrastructure_funding_movements")
             delete_all("promotional_credit_returns")
             delete_all("promotional_token_grants")
+            # Recurring-cycle rows reference promotional funds, so they must be
+            # deleted before the existing fund ledger. Sources are pure test
+            # funding configuration and are intentionally reset with the funds.
+            delete_all("promotional_funding_cycles")
+            delete_all("promotional_funding_sources")
             delete_all("promotional_credit_funds")
             delete_all("operational_expenses")
 

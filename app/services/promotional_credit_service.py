@@ -12,6 +12,7 @@ from app.models.promotional_credit import (
     PromotionalCreditReturn,
     PromotionalTokenGrant,
 )
+from app.models.promotional_funding_cycle import PromotionalFundingCycle
 from app.models.system_setting import SystemSetting
 from app.models.token_consumption_allocation import TokenConsumptionAllocation
 from app.models.token_transaction import TokenTransaction
@@ -21,6 +22,7 @@ from app.common.enums import TokenTransactionType
 from app.repositories.system_setting_repository import system_setting_repository
 from app.services.financial_protection_service import financial_protection_service
 from app.services.pricing_service import pricing_service
+from app.services.promotional_funding_cycle_service import promotional_funding_cycle_service
 from app.services.token_financial_snapshot_service import token_financial_snapshot_service
 from app.services.token_service import token_service
 from app.services.token_value_ledger_service import token_value_ledger_service
@@ -129,6 +131,7 @@ class PromotionalCreditService:
         return bool(self.settings(db)["allow_pending_settlement"])
 
     def add_fund(self, db: Session, *, amount_usd: float, provider: str, reference: str | None, description: str | None, created_by_user_id: int | None) -> PromotionalCreditFund:
+        promotional_funding_cycle_service.ensure_current_cycles(db)
         amount = D(str(amount_usd)).quantize(D("0.000001"))
         if amount <= 0:
             raise ConflictException("Promotional credit amount must be greater than zero.")
@@ -141,13 +144,12 @@ class PromotionalCreditService:
         db.add(row); db.flush(); return row
 
     def _funds(self, db: Session, provider: str, *, lock: bool = False) -> list[PromotionalCreditFund]:
-        normalized = self.normalize_provider(provider)
-        query = select(PromotionalCreditFund).where(
-            PromotionalCreditFund.provider == normalized,
-            PromotionalCreditFund.remaining_usd > 0,
-        ).order_by(PromotionalCreditFund.created_at, PromotionalCreditFund.id)
-        if lock: query = query.with_for_update()
-        return list(db.execute(query).scalars().all())
+        # Recurring provider credits are an additive policy layer over the
+        # original fund ledger. Current-cycle provider credit is consumed first;
+        # existing/manual company-funded rows remain the fallback and never reset.
+        return promotional_funding_cycle_service.ordered_eligible_funds(
+            db, provider=self.normalize_provider(provider), lock=lock
+        )
 
     def available_tokens(self, db: Session, provider: str) -> int:
         reserve = self.infrastructure_reserve_per_token(db)
@@ -243,6 +245,7 @@ class PromotionalCreditService:
         Every restored amount returns to the exact PromotionalCreditFund that
         originally financed the grant.
         """
+        promotional_funding_cycle_service.ensure_current_cycles(db)
         requested = max(int(tokens), 0)
         if requested <= 0:
             raise ConflictException("Promotional tokens to remove must be greater than zero.")
@@ -286,15 +289,16 @@ class PromotionalCreditService:
                 .with_for_update()
             ).scalar_one()
             amount = (D(str(grant.reserve_per_token_usd)) * take).quantize(D("0.000001"))
-            capacity = max(D(str(fund.original_usd)) - D(str(fund.remaining_usd or 0)), D("0"))
-            if amount <= 0 or capacity < amount:
-                raise ConflictException(f"Promotional fund #{fund.id} cannot receive the full backing for bag #{lot.id} safely.")
+            if amount <= 0:
+                raise ConflictException(f"Promotional fund #{fund.id} cannot receive the backing for bag #{lot.id} safely.")
 
             lot.remaining_tokens = int(lot.remaining_tokens) - take
             if lot.remaining_tokens == 0 and lot.status not in {"expired", "refunded"}:
                 lot.status = "exhausted"
-            fund.remaining_usd = (D(str(fund.remaining_usd or 0)) + amount).quantize(D("0.000001"))
-            db.add(lot); db.add(fund)
+            # If the original provider cycle has already closed, the backing is
+            # recorded as a late return but is NOT resurrected as usable credit.
+            promotional_funding_cycle_service.restore_amount(db, fund=fund, amount=amount)
+            db.add(lot)
             db.add(PromotionalCreditReturn(
                 fund_id=fund.id, grant_id=grant.id, amount_usd=amount,
                 reason="admin_revoke", reference_id=f"lot:{lot.id}:before:{int(lot.remaining_tokens)+take}:take:{take}",
@@ -330,6 +334,7 @@ class PromotionalCreditService:
         )
 
     def return_for_expired_lot(self, db: Session, *, lot: TokenValueLot, remaining_tokens: int) -> D:
+        promotional_funding_cycle_service.ensure_current_cycles(db)
         if lot.source != PROMO_SOURCE or remaining_tokens <= 0:
             return D("0")
         grant = db.execute(select(PromotionalTokenGrant).where(PromotionalTokenGrant.lot_id == lot.id).with_for_update()).scalar_one_or_none()
@@ -344,8 +349,7 @@ class PromotionalCreditService:
         amount = (D(str(grant.reserve_per_token_usd)) * int(remaining_tokens)).quantize(D("0.000001"))
         if amount <= 0: return D("0")
         fund = db.execute(select(PromotionalCreditFund).where(PromotionalCreditFund.id == grant.fund_id).with_for_update()).scalar_one()
-        fund.remaining_usd = min(D(str(fund.original_usd)), D(str(fund.remaining_usd or 0)) + amount)
-        db.add(fund)
+        promotional_funding_cycle_service.restore_amount(db, fund=fund, amount=amount)
         db.add(PromotionalCreditReturn(fund_id=fund.id, grant_id=grant.id, amount_usd=amount, reason="expiration", reference_id=reference))
         db.flush(); return amount
 
@@ -366,6 +370,7 @@ class PromotionalCreditService:
         returns to the same promotional fund. Commercial rounding remains company
         money and is never mixed into the promotional pool.
         """
+        promotional_funding_cycle_service.ensure_current_cycles(db)
         rows = db.execute(
             select(TokenConsumptionAllocation, TokenValueLot)
             .join(TokenValueLot, TokenValueLot.id == TokenConsumptionAllocation.lot_id)
@@ -413,8 +418,7 @@ class PromotionalCreditService:
                 .where(PromotionalCreditFund.id==grant.fund_id)
                 .with_for_update()
             ).scalar_one()
-            fund.remaining_usd=min(D(str(fund.original_usd)),D(str(fund.remaining_usd or 0))+amount)
-            db.add(fund)
+            promotional_funding_cycle_service.restore_amount(db, fund=fund, amount=amount)
             db.add(PromotionalCreditReturn(
                 fund_id=fund.id,grant_id=grant.id,amount_usd=amount,
                 reason="execution_surplus",reference_id=reference,
@@ -432,29 +436,51 @@ class PromotionalCreditService:
         }
 
     def summary(self, db: Session) -> dict:
+        promotional_funding_cycle_service.ensure_current_cycles(db)
         reserve = self.infrastructure_reserve_per_token(db)
         generation_reserve = self.generation_infrastructure_reserve_per_token(db)
         funds = list(db.execute(select(PromotionalCreditFund).order_by(PromotionalCreditFund.created_at.desc(), PromotionalCreditFund.id.desc())).scalars().all())
         grants = list(db.execute(select(PromotionalTokenGrant).order_by(PromotionalTokenGrant.created_at.desc(), PromotionalTokenGrant.id.desc()).limit(100)).scalars().all())
+
+        recurring_sources = promotional_funding_cycle_service.summary(db)
+        cycle_rows = list(db.execute(select(PromotionalFundingCycle)).scalars().all())
+        cycle_fund_ids = {int(c.fund_id) for c in cycle_rows if c.fund_id is not None}
+
         by_provider: dict[str, dict] = {}
-        for fund in funds:
-            row = by_provider.setdefault(fund.provider, {"provider": fund.provider, "funded_usd": 0.0, "available_usd": 0.0, "available_tokens": 0})
-            row["funded_usd"] += float(fund.original_usd or 0); row["available_usd"] += float(fund.remaining_usd or 0)
-        for row in by_provider.values():
-            row["available_tokens"] = self.available_tokens(db, row["provider"])
+        provider_names = {x.provider for x in funds} | {str(x["provider"]) for x in recurring_sources}
+        for provider in provider_names:
+            eligible = self._funds(db, provider)
+            own_available = sum(float(f.remaining_usd or 0) for f in eligible if f.id not in cycle_fund_ids)
+            recurring_available = sum(float(f.remaining_usd or 0) for f in eligible if f.id in cycle_fund_ids)
+            lifetime_funded = sum(float(f.original_usd or 0) for f in funds if f.provider == provider)
+            by_provider[provider] = {
+                "provider": provider,
+                "funded_usd": lifetime_funded,
+                "available_usd": own_available + recurring_available,
+                "own_available_usd": own_available,
+                "recurring_available_usd": recurring_available,
+                "available_tokens": self.available_tokens(db, provider),
+            }
+
         total_funded = sum(float(x.original_usd or 0) for x in funds)
-        total_available = sum(float(x.remaining_usd or 0) for x in funds)
+        total_available = sum(float(x["available_usd"]) for x in by_provider.values())
+        total_own_available = sum(float(x["own_available_usd"]) for x in by_provider.values())
+        total_recurring_available = sum(float(x["recurring_available_usd"]) for x in by_provider.values())
         users_by_id = {u.id: u.email for u in db.execute(select(User).where(User.id.in_({g.user_id for g in grants}))).scalars().all()} if grants else {}
         return {
             "reserve_per_token_usd": float(reserve),
             "generation_infrastructure_reserve_per_token_usd": float(generation_reserve),
             "total_funded_usd": total_funded,
             "total_available_usd": total_available,
+            "total_own_available_usd": total_own_available,
+            "total_recurring_available_usd": total_recurring_available,
             "provider_balances": sorted(by_provider.values(), key=lambda x: x["provider"]),
             "settings": self.settings(db),
             "funds": [{"id":x.id,"provider":x.provider,"original_usd":float(x.original_usd),"remaining_usd":float(x.remaining_usd),"reference":x.reference,"description":x.description,"created_at":x.created_at} for x in funds[:100]],
             "grants": [{"id":g.id,"fund_id":g.fund_id,"lot_id":g.lot_id,"user_id":g.user_id,"user_email":users_by_id.get(g.user_id),"tokens_granted":g.tokens_granted,"reserve_per_token_usd":float(g.reserve_per_token_usd),"amount_reserved_usd":float(g.amount_reserved_usd),"grant_type":g.grant_type,"created_at":g.created_at} for g in grants],
+            "recurring_sources": recurring_sources,
         }
+
 
 
 promotional_credit_service = PromotionalCreditService()
