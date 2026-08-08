@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import io
@@ -174,6 +175,17 @@ class GenerationModuleRuntimeService:
 
     def attach_persisted(self, execution: GenerationModuleExecutionResponse) -> None:
         with self._lock:
+            existing = self._items.get(execution.id)
+            if existing is not None:
+                # Never let a stale queue read resurrect a cancellation/terminal
+                # state that was already accepted by another request thread.
+                if (
+                    existing.status in {"completed", "failed", "cancelled"}
+                    and execution.status in {"queued", "running"}
+                ):
+                    return
+                if existing.cancel_requested and not execution.cancel_requested:
+                    return
             self._items[execution.id] = execution.model_copy(deep=True)
             self._owners[execution.id] = execution.user_id
 
@@ -953,6 +965,469 @@ class GenerationModuleRuntimeService:
             ))
             snapshot = item.model_copy(deep=True)
         generation_module_execution_store_service.save(snapshot)
+
+    def dispatch_modal_supervised(self, execution_id: UUID, module: dict[str, Any]) -> str:
+        """Submit one Modal execution and return immediately after persisting call_id.
+
+        This is the scalable control-plane path. Billing, outputs, cancellation and
+        final execution states are finalized later by ``finalize_modal_supervised``
+        using the exact same provider payload contract as the legacy blocking path.
+        """
+        resumed_at = utc_now()
+        with self._lock:
+            item = self._items[execution_id]
+            if item.status != "queued":
+                if item.status == "running" and item.provider_job_id:
+                    return str(item.provider_job_id)
+                raise AppException(
+                    f"Modal dispatch requires a queued execution, got {item.status}."
+                )
+            started = item.started_at or resumed_at
+            transition_execution(item, "running")
+            item.started_at = started
+            item.queue_position = None
+            item.provider_status = "dispatching_to_modal"
+            item.heartbeat_at = started
+            item.logs.append(
+                GenerationModuleExecutionLog(
+                    timestamp=resumed_at,
+                    message="Execution started by the unified provider worker.",
+                )
+            )
+            running_snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(running_snapshot)
+
+        db = SessionLocal()
+        try:
+            config = infrastructure_provider_service.get_modal(db)
+            if not config.enabled:
+                raise AppException(
+                    "Modal is selected for this module, but the Modal provider is disabled."
+                )
+            if not config.app_name or not config.token_id or not config.token_secret:
+                raise AppException(
+                    "Modal is selected for this module, but its App name or credentials are not configured."
+                )
+
+            with self._lock:
+                current = self._items[execution_id].model_copy(deep=True)
+                if current.cancel_requested:
+                    raise InterruptedError("Modal execution cancelled before dispatch.")
+
+            timeout = max(
+                int(config.timeout_seconds or 900),
+                sum(
+                    int((step.get("configuration") or {}).get("timeout_seconds") or 300)
+                    for step in module.get("steps", [])
+                    if step.get("is_enabled")
+                ),
+            )
+            provider = RuntimeProviderRegistry.get(GenerationExecutionEngine.MODAL)
+            payload = {
+                "runtime_contract": "tryon.generation-runtime/v1",
+                "provider": {"key": provider.key, "remote": provider.remote},
+                "execution_id": str(execution_id),
+                "module": copy.deepcopy(module),
+                "context": self._serialize_remote_value(db, current.context),
+            }
+
+            with self._lock:
+                item = self._items[execution_id]
+                item.provider_status = "DISPATCHING"
+                item.dispatch_attempts += 1
+                item.provider_metrics["supervision_timeout_seconds"] = timeout
+                item.provider_metrics["supervision_mode"] = "modal_async_function_call"
+                item.logs.append(
+                    GenerationModuleExecutionLog(
+                        timestamp=utc_now(),
+                        message="Dispatching the complete generation pipeline to Modal.",
+                    )
+                )
+                dispatch_snapshot = item.model_copy(deep=True)
+            generation_module_execution_store_service.save(dispatch_snapshot)
+
+            # Check again immediately before spawn to preserve the existing race-safe
+            # queued cancellation behavior.
+            if self.get(execution_id).cancel_requested:
+                raise InterruptedError("Modal execution cancelled before dispatch.")
+
+            call_id = modal_pipeline_adapter_service.submit_pipeline(
+                config,
+                payload=payload,
+            )
+            self._modal_submitted(execution_id, call_id)
+
+            # If cancellation raced with spawn(), cancel the durable provider call
+            # rather than leaving an orphaned GPU execution.
+            if self.get(execution_id).cancel_requested:
+                cancellation = modal_pipeline_adapter_service.cancel_call(
+                    config,
+                    call_id=call_id,
+                )
+                raise InterruptedError(
+                    f"Modal execution cancellation handled immediately after dispatch: {cancellation}"
+                )
+
+            self._remote_module_progress(
+                execution_id,
+                5.0,
+                "Modal FunctionCall accepted.",
+                {
+                    "provider_status": "IN_QUEUE",
+                    "provider_job_id": call_id,
+                },
+            )
+            return call_id
+        finally:
+            db.close()
+
+    def _modal_supervision_heartbeat(self, execution_id: UUID) -> None:
+        """Update live BackOffice/AppWeb state without polling Modal or writing SQL."""
+        with self._lock:
+            item = self._items.get(execution_id)
+            if item is None or item.status != "running":
+                return
+            item.heartbeat_at = utc_now()
+            if str(item.provider_status or "").upper() in {
+                "IN_QUEUE",
+                "DISPATCHING",
+                "DISPATCHING_TO_MODAL",
+            }:
+                item.provider_status = "RUNNING"
+                item.logs.append(
+                    GenerationModuleExecutionLog(
+                        timestamp=item.heartbeat_at,
+                        message="Modal FunctionCall is running.",
+                    )
+                )
+            # Preserve the established non-terminal progress convention. This is
+            # presentation-only; billing never derives time/cost from this value.
+            if item.progress < 90:
+                item.progress = min(90, max(5, item.progress) + 1)
+
+    async def await_modal_result_async(self, execution_id: UUID) -> dict[str, Any]:
+        """Await a persisted Modal FunctionCall with immediate async completion.
+
+        ``call.get.aio`` does the remote wait. The local timed wait below exists only
+        to refresh UI heartbeat/progress; it never polls the provider and therefore
+        adds no fixed completion latency.
+        """
+        with self._lock:
+            item = self._items.get(execution_id)
+            if item is None:
+                persisted = generation_module_execution_store_service.get(execution_id)
+                if persisted is None:
+                    raise NotFoundException("Generation module execution not found.")
+                self.attach_persisted(persisted)
+                item = self._items[execution_id]
+            call_id = str(item.provider_job_id or "").strip()
+            configured_timeout = int(
+                item.provider_metrics.get("supervision_timeout_seconds") or 0
+            )
+
+        if not call_id:
+            raise AppException(
+                "Modal supervision could not start because provider_job_id is missing."
+            )
+
+        db = SessionLocal()
+        try:
+            config = infrastructure_provider_service.get_modal(db)
+            if configured_timeout <= 0:
+                configured_timeout = max(
+                    1,
+                    int(config.timeout_seconds or 900),
+                )
+        finally:
+            db.close()
+
+        # Preserve the existing recovery contract: after a backend restart the
+        # restored FunctionCall receives the configured supervision timeout again,
+        # exactly as the legacy execute_pipeline(existing_call_id=...) path did.
+        remaining_timeout = configured_timeout
+
+        wait_task = asyncio.create_task(
+            modal_pipeline_adapter_service.await_result_async(
+                config,
+                call_id=call_id,
+                timeout_seconds=remaining_timeout,
+            )
+        )
+        heartbeat_interval = max(
+            1.0,
+            min(5.0, float(getattr(settings, "GENERATION_HEARTBEAT_SECONDS", 10))),
+        )
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    {wait_task},
+                    timeout=heartbeat_interval,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if wait_task in done:
+                    result = await wait_task
+                    self._remote_module_progress(
+                        execution_id,
+                        98.0,
+                        "Modal FunctionCall completed.",
+                        {
+                            "provider_status": "FINALIZING",
+                            "provider_job_id": call_id,
+                        },
+                    )
+                    return result
+                self._modal_supervision_heartbeat(execution_id)
+        except asyncio.CancelledError:
+            # Backend shutdown only. Do not call FunctionCall.cancel(); recovery
+            # resumes the same call_id when the process returns.
+            wait_task.cancel()
+            raise
+
+    def finalize_modal_supervised(
+        self,
+        execution_id: UUID,
+        *,
+        result: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Finalize an async-supervised Modal call using existing execution semantics."""
+        db = SessionLocal()
+        try:
+            with self._lock:
+                item = self._items.get(execution_id)
+            if item is None:
+                persisted = generation_module_execution_store_service.get(execution_id)
+                if persisted is None:
+                    return
+                self.attach_persisted(persisted)
+
+            with self._lock:
+                item = self._items[execution_id]
+                # Cancellation endpoint and an async result can race. Terminal state
+                # always wins; never resurrect or rebill a closed execution.
+                if item.status in {"completed", "failed", "cancelled"}:
+                    return
+                started = item.started_at or item.provider_submitted_at or utc_now()
+
+            try:
+                if error is not None:
+                    raise error
+                if not isinstance(result, dict):
+                    raise RuntimeError("Modal supervisor returned no result payload.")
+
+                output = result.get("output")
+                if not isinstance(output, dict):
+                    raise RuntimeError(
+                        "Modal Generation Runtime returned an invalid output payload."
+                    )
+                if output.get("runtime_contract") != "tryon.generation-runtime/v1":
+                    raise RuntimeError(
+                        "Modal worker does not support the required Generation Runtime contract."
+                    )
+
+                runtime_metrics = copy.deepcopy(output.get("metrics") or {})
+                runtime_duration_ms = int(
+                    runtime_metrics.get("execution_time_ms")
+                    or runtime_metrics.get("pipeline_duration_ms")
+                    or runtime_metrics.get("total_duration_ms")
+                    or 0
+                )
+                with self._lock:
+                    metric_item = self._items[execution_id]
+                    metric_item.runtime_metrics = runtime_metrics
+                    metric_item.provider_metrics.update({
+                        "provider": "modal",
+                        "execution_time_ms": runtime_duration_ms or result.get("execution_time_ms"),
+                        "pipeline_duration_ms": runtime_metrics.get("pipeline_duration_ms"),
+                        "duration_source": (
+                            "runtime_exact" if runtime_duration_ms > 0 else "provider_observed"
+                        ),
+                        "runtime_url": result.get("runtime_url"),
+                        "provider_job_id": result.get("provider_job_id") or metric_item.provider_job_id,
+                        "resumed_after_backend_restart": bool(
+                            metric_item.recovery_count > 0 or result.get("resumed")
+                        ),
+                        "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
+                    })
+                    metric_snapshot = metric_item.model_copy(deep=True)
+                # Preserve the existing contract: exact runtime metrics are durable
+                # before a controlled provider failure is raised.
+                generation_module_execution_store_service.save(metric_snapshot)
+
+                if output.get("status") != "completed":
+                    raise RuntimeError(
+                        str(output.get("error") or "Modal Generation Runtime failed.")
+                    )
+
+                remote_steps = output.get("steps") or []
+                with self._lock:
+                    item = self._items[execution_id]
+                    if item.cancel_requested or item.status == "cancelled":
+                        raise InterruptedError(
+                            "Provider execution stopped after cancellation request."
+                        )
+                    states_by_key = {
+                        str(state.step_key): state
+                        for state in item.steps
+                        if getattr(state, "step_key", None) is not None
+                    }
+                    for index, remote_step in enumerate(remote_steps):
+                        if not isinstance(remote_step, dict):
+                            continue
+                        state = states_by_key.get(
+                            str(remote_step.get("step_key") or "")
+                        )
+                        if state is None:
+                            if index >= len(item.steps):
+                                continue
+                            state = item.steps[index]
+                        state.status = str(remote_step.get("status") or state.status)
+                        state.duration_ms = int(remote_step.get("duration_ms") or 0)
+                        state.outputs = self._materialize_modal_files(
+                            remote_step.get("outputs") or {},
+                            execution_id,
+                        )
+                        state.error = remote_step.get("error")
+
+                    normalized_outputs = self._materialize_modal_files(
+                        output.get("outputs") or {},
+                        execution_id,
+                    )
+                    item.outputs = self._persist_final_outputs(
+                        db,
+                        execution_id=execution_id,
+                        user_id=item.user_id,
+                        outputs=normalized_outputs,
+                    )
+                    remote_context = output.get("context")
+                    if isinstance(remote_context, dict):
+                        item.context = self._materialize_modal_files(
+                            remote_context,
+                            execution_id,
+                        )
+                    item.runtime_metrics = runtime_metrics
+                    item.provider_metrics.update({
+                        "provider": "modal",
+                        "execution_time_ms": runtime_duration_ms or result.get("execution_time_ms"),
+                        "pipeline_duration_ms": runtime_metrics.get("pipeline_duration_ms"),
+                        "duration_source": (
+                            "runtime_exact" if runtime_duration_ms > 0 else "provider_observed"
+                        ),
+                        "runtime_url": result.get("runtime_url"),
+                        "provider_job_id": result.get("provider_job_id") or item.provider_job_id,
+                        "resumed_after_backend_restart": bool(
+                            item.recovery_count > 0 or result.get("resumed")
+                        ),
+                        "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
+                    })
+                    item.status = "completed"
+                    item.progress = 100
+                    item.provider_status = "COMPLETED"
+                    item.logs.append(
+                        GenerationModuleExecutionLog(
+                            timestamp=utc_now(),
+                            message="Modal completed the entire generation pipeline in one GPU container.",
+                        )
+                    )
+            except InterruptedError as exc:
+                with self._lock:
+                    item = self._items[execution_id]
+                    if item.status != "cancelled":
+                        item.status = "cancelled"
+                        item.error = str(exc)
+                        running = next(
+                            (step for step in item.steps if step.status == "running"),
+                            None,
+                        )
+                        if running:
+                            running.status = "cancelled"
+                            running.error = "Execution cancelled by user."
+                            running.finished_at = utc_now()
+                        item.logs.append(
+                            GenerationModuleExecutionLog(
+                                timestamp=utc_now(),
+                                level="warning",
+                                step_key=running.step_key if running else None,
+                                message=str(exc),
+                            )
+                        )
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                with self._lock:
+                    item = self._items[execution_id]
+                    running = next(
+                        (step for step in item.steps if step.status == "running"),
+                        None,
+                    )
+                    if item.cancel_requested or item.status == "cancelled":
+                        item.status = "cancelled"
+                        item.error = None
+                        if running:
+                            running.status = "cancelled"
+                            running.error = "Execution cancelled by user."
+                            running.finished_at = utc_now()
+                        item.logs.append(
+                            GenerationModuleExecutionLog(
+                                timestamp=utc_now(),
+                                level="warning",
+                                step_key=running.step_key if running else None,
+                                message="Provider execution stopped after cancellation request.",
+                            )
+                        )
+                    else:
+                        item.status = "failed"
+                        item.error = str(exc)
+                        if running:
+                            running.status = "failed"
+                            running.error = str(exc)
+                            running.finished_at = utc_now()
+                        item.logs.append(
+                            GenerationModuleExecutionLog(
+                                timestamp=utc_now(),
+                                level="error",
+                                step_key=running.step_key if running else None,
+                                message=str(exc),
+                            )
+                        )
+            finally:
+                finished = utc_now()
+                with self._lock:
+                    item = self._items[execution_id]
+                    item.finished_at = finished
+                    item.duration_ms = int(
+                        (finished - started).total_seconds() * 1000
+                    )
+                    item.heartbeat_at = finished
+                    item.provider_status = (
+                        "COMPLETED"
+                        if item.status == "completed"
+                        else item.status.upper()
+                    )
+                    self._provider_refs.pop(execution_id, None)
+                try:
+                    with self._lock:
+                        billing_item = self._items[execution_id]
+                    self._finalize_dynamic_billing(db, billing_item)
+                except Exception as billing_error:
+                    db.rollback()
+                    with self._lock:
+                        item = self._items[execution_id]
+                        item.logs.append(
+                            GenerationModuleExecutionLog(
+                                timestamp=utc_now(),
+                                level="error",
+                                message=(
+                                    "Dynamic billing finalization failed without changing "
+                                    f"the execution result: {billing_error}"
+                                ),
+                            )
+                        )
+                with self._lock:
+                    final_snapshot = self._items[execution_id].model_copy(deep=True)
+                generation_module_execution_store_service.save(final_snapshot)
+        finally:
+            db.close()
 
     def _run_modal_module(self, db: Session, execution_id: UUID, module: dict[str, Any]) -> None:
         """Dispatch the entire module to one Modal GPU container.

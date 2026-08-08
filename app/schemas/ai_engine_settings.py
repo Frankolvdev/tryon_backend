@@ -15,8 +15,8 @@ class AiEngineSettingsUpdate(BaseModel):
     runpod_dispatch_workers: int = Field(ge=1, le=128)
     runpod_max_in_flight: int = Field(ge=1, le=512)
     modal_gpu: ModalGpu = "L40S"
-    modal_min_containers: int = Field(default=0, ge=0, le=100)
-    modal_max_containers: int = Field(default=3, ge=1, le=100)
+    modal_min_containers: int = Field(default=0, ge=0, le=100000)
+    modal_max_containers: int = Field(default=3, ge=1, le=100000)
     modal_concurrency: int = Field(default=1, ge=1, le=16)
     modal_input_concurrency: int = Field(default=1000, ge=1, le=1000)
     modal_scaledown_window_seconds: int = Field(default=300, ge=1, le=3600)

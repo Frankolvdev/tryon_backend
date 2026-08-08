@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from redis import Redis
+from redis.connection import BlockingConnectionPool
 from redis.exceptions import RedisError
 
 from app.core.config import settings
@@ -57,13 +58,16 @@ class RedisClient:
 
     def get_client(self) -> Redis:
         if self._client is None:
-            self._client = Redis.from_url(
+            pool = BlockingConnectionPool.from_url(
                 self._redis_url(),
                 decode_responses=True,
                 socket_connect_timeout=3,
                 socket_timeout=3,
                 health_check_interval=30,
+                max_connections=max(32, int(getattr(settings, "REDIS_MAX_CONNECTIONS", 256))),
+                timeout=max(1, int(getattr(settings, "REDIS_POOL_WAIT_SECONDS", 5))),
             )
+            self._client = Redis(connection_pool=pool)
 
         return self._client
 

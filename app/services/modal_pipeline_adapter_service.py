@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -183,6 +184,98 @@ class ModalPipelineAdapterService:
         if not isinstance(output, dict):
             raise AppException("Modal FunctionCall returned an invalid pipeline result.")
         return True, output
+
+    async def await_result_async(
+        self,
+        config: ModalProviderConfig,
+        *,
+        call_id: str,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        """Wait for a durable Modal FunctionCall without occupying a Python thread.
+
+        Normal completion is event-driven through Modal's async ``get.aio``. There
+        is no fixed result-poll interval, so a completed result can wake the
+        supervisor as soon as the SDK delivers it. Transport failures are retried
+        against the same FunctionCall ID and never create a second provider job.
+        """
+        modal = self._modal()
+        call_id = str(call_id or "").strip()
+        if not call_id:
+            raise AppException("Modal FunctionCall ID is missing.")
+
+        started = time.monotonic()
+        deadline = started + max(1.0, float(timeout_seconds))
+        transient_attempts = 0
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Modal FunctionCall {call_id} exceeded {timeout_seconds} seconds."
+                )
+
+            call = self._call(
+                config,
+                call_id,
+                refresh=transient_attempts > 0,
+            )
+            try:
+                output = await call.get.aio(timeout=remaining)
+            except modal.exception.OutputExpiredError as exc:
+                raise AppException(
+                    f"Modal FunctionCall {call_id} output expired."
+                ) from exc
+            except (TimeoutError, modal.exception.TimeoutError) as exc:
+                # get.aio() was given the entire remaining execution deadline, not
+                # a polling interval. A timeout here is the real execution timeout.
+                raise TimeoutError(
+                    f"Modal FunctionCall {call_id} exceeded {timeout_seconds} seconds."
+                ) from exc
+            except asyncio.CancelledError:
+                # Cancelling the local await is only used during backend shutdown.
+                # It does NOT request provider cancellation; startup recovery uses
+                # the persisted FunctionCall ID to resume supervision.
+                raise
+            except BaseException as exc:
+                if self._is_cancelled_exception(exc):
+                    raise InterruptedError(
+                        "Modal FunctionCall cancellation confirmed."
+                    ) from exc
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                name = exc.__class__.__name__.lower()
+                if any(
+                    term in name
+                    for term in (
+                        "connection",
+                        "service",
+                        "internal",
+                        "resourceexhausted",
+                        "unavailable",
+                    )
+                ):
+                    transient_attempts += 1
+                    await asyncio.sleep(min(10.0, 0.5 * transient_attempts))
+                    continue
+                raise AppException(
+                    f"Modal FunctionCall {call_id} failed: {exc}"
+                ) from exc
+
+            if not isinstance(output, dict):
+                raise AppException(
+                    "Modal FunctionCall returned an invalid pipeline result."
+                )
+
+            self._forget_call(call_id)
+            return {
+                "provider": "modal",
+                "output": output,
+                "execution_time_ms": int((time.monotonic() - started) * 1000),
+                "runtime_url": None,
+                "provider_job_id": call_id,
+                "resumed": transient_attempts > 0,
+            }
 
     def cancel_call(
         self,
