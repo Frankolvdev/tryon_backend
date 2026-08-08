@@ -31,6 +31,7 @@ class PromotionalFundingSource(Base):
     current_cycle_start: Mapped[date] = mapped_column(Date, nullable=False)
     current_cycle_end: Mapped[date] = mapped_column(Date, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    simulation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )

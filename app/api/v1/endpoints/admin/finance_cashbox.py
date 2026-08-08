@@ -70,8 +70,8 @@ def create_promotional_recurring_source(data:PromotionalRecurringSourceCreate,re
  provider=promotional_credit_service.normalize_provider(data.provider)
  source=promotional_funding_cycle_service.create_source(
   db,name=data.name,provider=provider,recurring_amount_usd=data.recurring_amount_usd,
-  current_available_usd=data.current_available_usd,cycle_start=data.cycle_start,cycle_end=data.cycle_end,
-  created_by_user_id=current_admin.id,
+  current_available_usd=data.current_available_usd,cycle_start=data.cycle_start,recurrence=data.recurrence,
+  simulation_enabled=data.simulation_enabled,created_by_user_id=current_admin.id,
  )
  audit_service.create_log(db,actor_user_id=current_admin.id,action='promotional_recurring_source_created',entity_type='promotional_funding_source',entity_id=str(source.id),description=f'Recurring promotional source {source.name} created for {provider}: current available USD {data.current_available_usd}; next full cycles USD {data.recurring_amount_usd}.',ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
  result=next(item for item in promotional_funding_cycle_service.summary(db) if item['id']==source.id)
@@ -79,10 +79,26 @@ def create_promotional_recurring_source(data:PromotionalRecurringSourceCreate,re
 
 @router.put('/promotional-credits/recurring-sources/{source_id}',response_model=PromotionalRecurringSourceResponse)
 def update_promotional_recurring_source(source_id:int,data:PromotionalRecurringSourceUpdate,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
- source=promotional_funding_cycle_service.update_source(db,source_id=source_id,name=data.name,recurring_amount_usd=data.recurring_amount_usd,active=data.active)
+ source=promotional_funding_cycle_service.update_source(db,source_id=source_id,name=data.name,recurring_amount_usd=data.recurring_amount_usd,recurrence=data.recurrence,simulation_enabled=data.simulation_enabled,active=data.active)
  audit_service.create_log(db,actor_user_id=current_admin.id,action='promotional_recurring_source_updated',entity_type='promotional_funding_source',entity_id=str(source.id),description=f'Recurring promotional source {source.name} updated. New cycles use USD {source.recurring_amount_usd}. Active={source.active}.',ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
  result=next(item for item in promotional_funding_cycle_service.summary(db) if item['id']==source.id)
  db.commit(); return result
+
+@router.post('/promotional-credits/recurring-sources/{source_id}/cycle-webhook',response_model=PromotionalCycleWebhookResult)
+def promotional_cycle_webhook(source_id:int,data:PromotionalCycleWebhookRequest,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
+ result=promotional_funding_cycle_service.trigger_webhook(db,source_id=source_id,simulation=data.simulation,simulation_date=data.simulation_date)
+ audit_service.create_log(
+  db,
+  actor_user_id=current_admin.id,
+  action='promotional_cycle_webhook_simulated' if data.simulation else 'promotional_cycle_webhook_triggered',
+  entity_type='promotional_funding_source',
+  entity_id=str(source_id),
+  description=result['message'],
+  ip_address=request.client.host if request.client else None,
+  user_agent=request.headers.get('user-agent'),
+ )
+ db.commit()
+ return result
 
 @router.put('/promotional-credits/settings',response_model=PromotionalCreditSettings)
 def update_promotional_settings(data:PromotionalCreditSettings,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):

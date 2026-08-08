@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from calendar import monthrange
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -34,6 +34,29 @@ class PromotionalFundingCycleService:
         day = min(value.day, monthrange(year, month)[1])
         return date(year, month, day)
 
+    def _next_cycle_end(self, value: date, recurrence: str) -> date:
+        """Return the next boundary from one anchor date.
+
+        `current_cycle_end` remains persisted for auditability, but admins only
+        provide a cycle start + periodicity.  No financial formula depends on
+        this helper.
+        """
+        recurrence = str(recurrence or "monthly").strip().lower()
+        if recurrence == "weekly":
+            return value + timedelta(days=7)
+        if recurrence == "quarterly":
+            result = value
+            for _ in range(3):
+                result = self._add_month(result)
+            return result
+        if recurrence == "yearly":
+            year = value.year + 1
+            day = min(value.day, monthrange(year, value.month)[1])
+            return date(year, value.month, day)
+        if recurrence == "monthly":
+            return self._add_month(value)
+        raise ConflictException("Unsupported promotional credit periodicity.")
+
     def create_source(
         self,
         db: Session,
@@ -43,8 +66,9 @@ class PromotionalFundingCycleService:
         recurring_amount_usd: float,
         current_available_usd: float,
         cycle_start: date,
-        cycle_end: date,
-        created_by_user_id: int | None,
+        recurrence: str = "monthly",
+        simulation_enabled: bool = False,
+        created_by_user_id: int | None = None,
     ) -> PromotionalFundingSource:
         recurring = self._money(recurring_amount_usd)
         opening = self._money(current_available_usd)
@@ -52,8 +76,8 @@ class PromotionalFundingCycleService:
             raise ConflictException("Recurring promotional credit must be greater than zero.")
         if opening < 0:
             raise ConflictException("Current promotional balance cannot be negative.")
-        if cycle_end <= cycle_start:
-            raise ConflictException("Promotional billing cycle end must be after its start.")
+        recurrence = str(recurrence or "monthly").strip().lower()
+        cycle_end = self._next_cycle_end(cycle_start, recurrence)
         source_name = str(name or "").strip()
         if not source_name:
             raise ConflictException("Promotional funding source name is required.")
@@ -62,11 +86,12 @@ class PromotionalFundingCycleService:
             name=source_name,
             provider=str(provider).strip().lower(),
             source_type="recurring_provider",
-            recurrence="monthly",
+            recurrence=recurrence,
             recurring_amount_usd=recurring,
             current_cycle_start=cycle_start,
             current_cycle_end=cycle_end,
             active=True,
+            simulation_enabled=bool(simulation_enabled),
             created_by_user_id=created_by_user_id,
         )
         db.add(source)
@@ -90,6 +115,8 @@ class PromotionalFundingCycleService:
         source_id: int,
         name: str | None = None,
         recurring_amount_usd: float | None = None,
+        recurrence: str | None = None,
+        simulation_enabled: bool | None = None,
         active: bool | None = None,
     ) -> PromotionalFundingSource:
         source = db.execute(
@@ -110,6 +137,14 @@ class PromotionalFundingCycleService:
                 raise ConflictException("Recurring promotional credit must be greater than zero.")
             # Deliberately applies only to the NEXT cycle. The active cycle is immutable.
             source.recurring_amount_usd = recurring
+        if recurrence is not None:
+            cleaned_recurrence = str(recurrence).strip().lower()
+            # Validate without changing the active cycle window.  A new
+            # periodicity starts at the next rollover.
+            self._next_cycle_end(source.current_cycle_end, cleaned_recurrence)
+            source.recurrence = cleaned_recurrence
+        if simulation_enabled is not None:
+            source.simulation_enabled = bool(simulation_enabled)
         if active is not None:
             source.active = bool(active)
         source.updated_at = utc_now()
@@ -170,7 +205,13 @@ class PromotionalFundingCycleService:
         db.flush()
         return cycle
 
-    def ensure_current_cycles(self, db: Session, *, today: date | None = None) -> int:
+    def ensure_current_cycles(
+        self,
+        db: Session,
+        *,
+        today: date | None = None,
+        source_id: int | None = None,
+    ) -> int:
         """Lazy/idempotent rollover. Safe to call before every promo operation.
 
         No webhook is required. The first promotional action after a cycle end
@@ -178,12 +219,15 @@ class PromotionalFundingCycleService:
         cycles as needed until the current date is covered.
         """
         today = today or utc_now().date()
-        sources = list(db.execute(
+        query = (
             select(PromotionalFundingSource)
             .where(PromotionalFundingSource.active.is_(True))
             .order_by(PromotionalFundingSource.id)
             .with_for_update()
-        ).scalars().all())
+        )
+        if source_id is not None:
+            query = query.where(PromotionalFundingSource.id == source_id)
+        sources = list(db.execute(query).scalars().all())
         changed = 0
         for source in sources:
             guard = 0
@@ -217,7 +261,7 @@ class PromotionalFundingCycleService:
                     db.add(active_cycle)
 
                 next_start = source.current_cycle_end
-                next_end = self._add_month(next_start)
+                next_end = self._next_cycle_end(next_start, source.recurrence)
                 recurring = self._money(source.recurring_amount_usd)
                 self._create_cycle(
                     db,
@@ -236,6 +280,101 @@ class PromotionalFundingCycleService:
         if changed:
             db.flush()
         return changed
+
+    def preview_rollover(
+        self,
+        db: Session,
+        *,
+        source_id: int,
+        as_of: date,
+    ) -> dict:
+        """Dry-run a future webhook date.  It NEVER mutates funds or cycles."""
+        source = db.execute(
+            select(PromotionalFundingSource).where(PromotionalFundingSource.id == source_id)
+        ).scalar_one_or_none()
+        if source is None:
+            raise NotFoundException("Promotional recurring funding source not found.")
+        if not source.simulation_enabled:
+            raise ConflictException("Cycle simulation is disabled for this promotional source.")
+
+        cursor_start = source.current_cycle_start
+        cursor_end = source.current_cycle_end
+        count = 0
+        guard = 0
+        while as_of >= cursor_end:
+            guard += 1
+            if guard > 240:
+                raise ConflictException("Promotional cycle simulation exceeded the safety limit.")
+            cursor_start = cursor_end
+            cursor_end = self._next_cycle_end(cursor_start, source.recurrence)
+            count += 1
+
+        return {
+            "source_id": source.id,
+            "source_name": source.name,
+            "simulation": True,
+            "effective_date": as_of,
+            "changed_cycles": 0,
+            "would_roll_cycles": count,
+            "current_cycle_start": source.current_cycle_start,
+            "current_cycle_end": source.current_cycle_end,
+            "projected_cycle_start": cursor_start,
+            "projected_cycle_end": cursor_end,
+            "projected_opening_usd": float(source.recurring_amount_usd) if count else None,
+            "message": (
+                f"Simulation only: {count} cycle(s) would roll. No balance or cycle was changed."
+                if count
+                else "Simulation only: the selected date is still inside the current cycle. Nothing would change."
+            ),
+        }
+
+    def trigger_webhook(
+        self,
+        db: Session,
+        *,
+        source_id: int,
+        simulation: bool = False,
+        simulation_date: date | None = None,
+    ) -> dict:
+        """Single idempotent entry point for BackOffice/manual/webhook checks.
+
+        Normal calls use the real current date and may roll a due cycle.
+        Simulation calls are dry-run only and require the per-source flag.
+        """
+        source = db.execute(
+            select(PromotionalFundingSource).where(PromotionalFundingSource.id == source_id)
+        ).scalar_one_or_none()
+        if source is None:
+            raise NotFoundException("Promotional recurring funding source not found.")
+
+        if simulation:
+            if simulation_date is None:
+                raise ConflictException("Choose a simulation date.")
+            return self.preview_rollover(db, source_id=source_id, as_of=simulation_date)
+
+        effective_date = utc_now().date()
+        changed = self.ensure_current_cycles(db, today=effective_date, source_id=source_id)
+        item = next((x for x in self.summary(db) if x["id"] == source_id), None)
+        if item is None:
+            raise NotFoundException("Promotional recurring funding source not found.")
+        return {
+            "source_id": source.id,
+            "source_name": source.name,
+            "simulation": False,
+            "effective_date": effective_date,
+            "changed_cycles": changed,
+            "would_roll_cycles": changed,
+            "current_cycle_start": item["current_cycle_start"],
+            "current_cycle_end": item["current_cycle_end"],
+            "projected_cycle_start": item["current_cycle_start"],
+            "projected_cycle_end": item["current_cycle_end"],
+            "projected_opening_usd": None,
+            "message": (
+                f"Cycle webhook applied: {changed} cycle(s) renewed."
+                if changed
+                else "Cycle webhook checked successfully. The current cycle is still active."
+            ),
+        }
 
     def _cycle_rows(self, db: Session) -> list[PromotionalFundingCycle]:
         return list(db.execute(select(PromotionalFundingCycle)).scalars().all())
@@ -351,6 +490,7 @@ class PromotionalFundingCycleService:
                 "current_cycle_end": source.current_cycle_end,
                 "current_available_usd": float(current_available),
                 "active": bool(source.active),
+                "simulation_enabled": bool(source.simulation_enabled),
                 "cycles": [{
                     "id": c.id,
                     "cycle_start": c.cycle_start,

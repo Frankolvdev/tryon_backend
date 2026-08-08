@@ -42,18 +42,15 @@ class PromotionalRecurringSourceCreate(BaseModel):
     recurring_amount_usd: float = Field(gt=0)
     current_available_usd: float = Field(ge=0)
     cycle_start: date
-    cycle_end: date
-
-    @model_validator(mode="after")
-    def validate_cycle(self):
-        if self.cycle_end <= self.cycle_start:
-            raise ValueError("cycle_end must be after cycle_start")
-        return self
+    recurrence: str = Field(default="monthly", pattern="^(weekly|monthly|quarterly|yearly)$")
+    simulation_enabled: bool = False
 
 
 class PromotionalRecurringSourceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=120)
     recurring_amount_usd: float | None = Field(default=None, gt=0)
+    recurrence: str | None = Field(default=None, pattern="^(weekly|monthly|quarterly|yearly)$")
+    simulation_enabled: bool | None = None
     active: bool | None = None
 
 
@@ -80,7 +77,34 @@ class PromotionalRecurringSourceResponse(BaseModel):
     current_cycle_end: date
     current_available_usd: float
     active: bool
+    simulation_enabled: bool = False
     cycles: list[PromotionalFundingCycleResponse] = Field(default_factory=list)
+
+
+class PromotionalCycleWebhookRequest(BaseModel):
+    simulation: bool = False
+    simulation_date: date | None = None
+
+    @model_validator(mode="after")
+    def validate_simulation(self):
+        if self.simulation and self.simulation_date is None:
+            raise ValueError("simulation_date is required when simulation=true")
+        return self
+
+
+class PromotionalCycleWebhookResult(BaseModel):
+    source_id: int
+    source_name: str
+    simulation: bool
+    effective_date: date
+    changed_cycles: int
+    would_roll_cycles: int
+    current_cycle_start: date
+    current_cycle_end: date
+    projected_cycle_start: date
+    projected_cycle_end: date
+    projected_opening_usd: float | None = None
+    message: str
 
 
 class PromotionalGrantCreate(BaseModel):
