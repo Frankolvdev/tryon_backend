@@ -393,14 +393,35 @@ class PromotionalCreditService:
 
         infra=max(D(str(infrastructure_cost_usd or 0)),D("0"))
         returned=D("0")
+
+        # One execution may legitimately debit the same token lot more than once
+        # (for example: upfront estimate + final-cost adjustment).  A promotional
+        # grant is unique per lot, while PromotionalCreditReturn is intentionally
+        # unique per (grant, reason, execution).  Aggregate every net allocation
+        # from the same lot BEFORE returning surplus so one grant produces exactly
+        # one monetary return for this execution.
+        promo_by_lot: dict[int, dict] = {}
         for _allocation,lot,net in net_rows:
-            if lot.source!=PROMO_SOURCE:continue
+            if lot.source!=PROMO_SOURCE:
+                continue
+            key=int(lot.id)
+            bucket=promo_by_lot.setdefault(key,{"lot":lot,"net":0})
+            bucket["net"]+=int(net)
+
+        for bucket in promo_by_lot.values():
+            lot=bucket["lot"]
+            net=int(bucket["net"])
+            if net<=0:
+                continue
+            # The grant lock serializes concurrent finalizers for the same promo
+            # lot.  After the lock is acquired, check the idempotency record.
             grant=db.execute(
                 select(PromotionalTokenGrant)
                 .where(PromotionalTokenGrant.lot_id==lot.id)
                 .with_for_update()
             ).scalar_one_or_none()
-            if not grant:continue
+            if not grant:
+                continue
             reference=str(execution_id)
             existing=db.execute(select(PromotionalCreditReturn).where(
                 PromotionalCreditReturn.grant_id==grant.id,
@@ -408,11 +429,14 @@ class PromotionalCreditService:
                 PromotionalCreditReturn.reference_id==reference,
             )).scalar_one_or_none()
             if existing:
-                returned+=D(str(existing.amount_usd or 0));continue
+                returned+=D(str(existing.amount_usd or 0))
+                continue
+
             sponsored=(D(str(grant.reserve_per_token_usd))*net).quantize(D("0.000001"))
             actual_share=(infra*D(net)/D(total_tokens)).quantize(D("0.000001"))
             amount=max(sponsored-actual_share,D("0")).quantize(D("0.000001"))
-            if amount<=0:continue
+            if amount<=0:
+                continue
             fund=db.execute(
                 select(PromotionalCreditFund)
                 .where(PromotionalCreditFund.id==grant.fund_id)
@@ -423,6 +447,9 @@ class PromotionalCreditService:
                 fund_id=fund.id,grant_id=grant.id,amount_usd=amount,
                 reason="execution_surplus",reference_id=reference,
             ))
+            # Establish the idempotency row before processing another grant.
+            # The UNIQUE constraint remains intact as the final database guard.
+            db.flush()
             returned+=amount
 
         commercial_share=D(total_tokens-promo_tokens)/D(total_tokens)
