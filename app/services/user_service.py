@@ -153,11 +153,13 @@ class UserService:
             != "disabled"
         )
 
+        # Keep the validated Pydantic object for legal validation. model_dump()
+        # recursively converts nested models to dicts, which breaks validate_bundle().
+        legal_bundle = user_data.legal
         user_dict = user_data.model_dump()
 
         password = user_dict.pop("password")
-
-        legal_bundle = user_dict.pop("legal", None)
+        user_dict.pop("legal", None)
         legal_documents = None
         if legal_bundle is not None:
             from app.services.legal_document_service import legal_document_service
