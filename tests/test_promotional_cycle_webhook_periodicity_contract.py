@@ -40,10 +40,12 @@ def test_simulation_is_opt_in_and_dry_run_only():
     assert "simulation_enabled" in model
     assert "simulation_enabled" in schema
     assert "Cycle simulation is disabled" in service
-    preview = service.split("def preview_rollover", 1)[1].split("def trigger_webhook", 1)[0]
+    preview = service.split("def preview_next_cycle", 1)[1].split("def trigger_webhook", 1)[0]
     assert "remaining_usd =" not in preview
     assert "db.add(" not in preview
-    assert "No balance or cycle was changed" in preview
+    assert "projected_start = source.current_cycle_end" in preview
+    assert '"would_roll_cycles": 1' in preview
+    assert "No balance or real cycle was changed" in preview
 
 
 def test_simulation_flag_has_linear_migration_after_05e():

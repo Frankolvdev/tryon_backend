@@ -1,118 +1,66 @@
-# FIX Backend — Periodicidad + webhook manual + simulación segura
+# FIX Backend — Botón webhook visible + Simular +1 ciclo + blindaje reset
 
-BASE EXACTA
-tryon_backend-main - 2026-08-07T180609.177.zip
-(con la capa recurrente 05e ya aplicada en el código recibido)
+BASE
+tryon_backend-main - 2026-08-07T182328.531.zip
 
-ALCANCE
-Este FIX NO reemplaza la capa recurrente anterior. Solo la completa con:
-1. fin de ciclo calculado desde inicio + periodicidad;
-2. endpoint/webhook manual idempotente;
-3. simulación opt-in y dry-run.
+CAMBIOS
+1. Simulación simplificada:
+   - ya NO recibe fecha;
+   - siempre simula exactamente el SIGUIENTE ciclo configurado;
+   - mensual => +1 mes;
+   - semanal => +1 semana;
+   - trimestral => +1 trimestre;
+   - anual => +1 año;
+   - nunca mueve dinero, tokens, bolsas ni ciclos reales.
 
-PERIODICIDAD
-Al crear una fuente ya NO se envía cycle_end.
-Se configura:
-- cycle_start
-- recurrence: weekly / monthly / quarterly / yearly
+2. Webhook/manual:
+   POST /api/admin/finances/promotional-credits/recurring-sources/{source_id}/cycle-webhook
+   body real: {"simulation": false}
+   body simulación: {"simulation": true}
 
-Ejemplo Modal:
-cycle_start = 2026-08-01
-recurrence = monthly
-=> el backend calcula current_cycle_end = 2026-09-01
+   Ambos llaman al mismo servicio de ciclos.
+   La llamada real usa la fecha real del servidor y es idempotente.
+   La simulación requiere que simulation_enabled esté activo en esa fuente.
 
-El current_cycle_end sigue guardándose internamente para auditoría, pero el
-administrador no tiene que calcularlo ni escribirlo.
+3. Reset de datos de prueba:
+   Se auditó generation_data_reset_service.py.
+   YA incluía correctamente:
+   - promotional_funding_cycles
+   - promotional_funding_sources
+   - promotional_credit_funds
+   y los elimina en el orden correcto.
 
-MONTO DEL PRIMER CICLO VS. SIGUIENTES
-Se conserva exactamente el comportamiento anterior:
-- saldo real del ciclo actual puede ser USD 19.76;
-- recurring_amount_usd puede ser USD 30;
-- al siguiente ciclo se abre con USD 30;
-- nada está hardcodeado a 30.
-
-WEBHOOK MANUAL
-Nuevo endpoint ADMIN autenticado:
-POST /api/admin/finances/promotional-credits/recurring-sources/{source_id}/cycle-webhook
-
-Llamada normal:
-{
-  "simulation": false
-}
-
-- Usa la fecha real del servidor.
-- Invoca el MISMO ensure_current_cycles() del middleware/lazy guard.
-- Es idempotente.
-- Si el ciclo todavía está vigente, no mueve nada.
-- Si ya venció, cierra/abre los ciclos que correspondan.
-- El BackOffice usa este mismo endpoint con "Revisar ciclo ahora".
-- Puede volver a llamarse en cualquier momento con autenticación admin.
-
-SIMULACIÓN
-Cada fuente tiene:
-simulation_enabled = false por defecto
-
-Solo si el administrador activa ese flag se permite:
-{
-  "simulation": true,
-  "simulation_date": "2026-09-01"
-}
-
-La simulación:
-- calcula cuántos ciclos se renovarían;
-- muestra el período proyectado;
-- NO cambia remaining_usd;
-- NO cierra ciclos;
-- NO crea ciclos;
-- NO cambia dinero propio;
-- NO cambia bolsas ni tokens.
-
-Es deliberadamente dry-run para poder probar fechas futuras sin contaminar
-la contabilidad real.
-
-CAMBIO DE PERIODICIDAD
-Se puede cambiar la periodicidad para ciclos futuros.
-El período activo ya abierto NO se reescribe; conserva sus fechas históricas.
-La nueva periodicidad empieza a usarse en el siguiente rollover.
+   Como este FIX no crea tablas nuevas, NO se cambia el motor del reset.
+   Se agrega test de regresión para impedir que esas tablas se omitan en el futuro.
+   Usuarios y avatares continúan preservados.
 
 BLINDAJE
 NO modifica:
-- fórmula de tokens;
-- infraestructura/token;
-- ganancias;
-- descuentos;
-- gastos operativos;
-- FIFO comercial;
+- fórmulas financieras;
+- token pricing;
+- FIFO;
 - snapshots;
-- bolsas promocionales;
-- prioridad recurrente -> dinero propio;
-- vencimiento de créditos no acumulables;
-- devoluciones tardías;
+- bolsas comerciales/promocionales;
 - Caja verde;
 - Caja IA;
+- gastos operativos;
 - Stripe;
-- Modal / RunPod / Beam runtime;
+- Modal/RunPod/Beam runtime;
+- vencimientos;
 - auto-desbloqueo.
 
-MIGRACIÓN OBLIGATORIA
-alembic upgrade head
-
-HEAD ESPERADO
-05f_promo_cycle_hook (head)
+MIGRACIÓN
+NO hay nueva migración Alembic en este FIX.
+La base debe seguir teniendo aplicada la migración 05f del ZIP anterior.
 
 VALIDACIÓN REALIZADA
 - python -m compileall: OK
-- alembic heads: 05f_promo_cycle_hook (head)
-- 83 contratos acumulados relevantes: PASSED
-- 35 contratos del núcleo promocional/webhook: PASSED
+- 38 pruebas promocionales/ciclos/reset: PASSED
 
-COMANDOS
-alembic upgrade head
-alembic heads
-python -m compileall -q app tests alembic/versions
-
+PRUEBA RECOMENDADA
 python -m pytest -q `
   tests/test_promotional_cycle_webhook_periodicity_contract.py `
+  tests/test_generation_data_reset_promotional_cycles_contract.py `
   tests/test_promotional_recurring_funding_cycle_contract.py `
   tests/test_promotional_credit_cashbox_contract.py `
   tests/test_promotional_admin_revoke_contract.py `
@@ -120,5 +68,5 @@ python -m pytest -q `
 
 GIT
 git add .
-git commit -m "feat: add promotional cycle periodicity webhook and safe simulation"
+git commit -m "fix: expose promotional cycle webhook and simplify simulation"
 git push

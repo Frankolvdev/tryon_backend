@@ -281,14 +281,13 @@ class PromotionalFundingCycleService:
             db.flush()
         return changed
 
-    def preview_rollover(
+    def preview_next_cycle(
         self,
         db: Session,
         *,
         source_id: int,
-        as_of: date,
     ) -> dict:
-        """Dry-run a future webhook date.  It NEVER mutates funds or cycles."""
+        """Dry-run exactly ONE next configured cycle. It never mutates money."""
         source = db.execute(
             select(PromotionalFundingSource).where(PromotionalFundingSource.id == source_id)
         ).scalar_one_or_none()
@@ -297,34 +296,25 @@ class PromotionalFundingCycleService:
         if not source.simulation_enabled:
             raise ConflictException("Cycle simulation is disabled for this promotional source.")
 
-        cursor_start = source.current_cycle_start
-        cursor_end = source.current_cycle_end
-        count = 0
-        guard = 0
-        while as_of >= cursor_end:
-            guard += 1
-            if guard > 240:
-                raise ConflictException("Promotional cycle simulation exceeded the safety limit.")
-            cursor_start = cursor_end
-            cursor_end = self._next_cycle_end(cursor_start, source.recurrence)
-            count += 1
-
+        projected_start = source.current_cycle_end
+        projected_end = self._next_cycle_end(projected_start, source.recurrence)
         return {
             "source_id": source.id,
             "source_name": source.name,
             "simulation": True,
-            "effective_date": as_of,
+            "effective_date": projected_start,
             "changed_cycles": 0,
-            "would_roll_cycles": count,
+            "would_roll_cycles": 1,
             "current_cycle_start": source.current_cycle_start,
             "current_cycle_end": source.current_cycle_end,
-            "projected_cycle_start": cursor_start,
-            "projected_cycle_end": cursor_end,
-            "projected_opening_usd": float(source.recurring_amount_usd) if count else None,
+            "projected_cycle_start": projected_start,
+            "projected_cycle_end": projected_end,
+            "projected_opening_usd": float(source.recurring_amount_usd),
             "message": (
-                f"Simulation only: {count} cycle(s) would roll. No balance or cycle was changed."
-                if count
-                else "Simulation only: the selected date is still inside the current cycle. Nothing would change."
+                f"Simulation only: the next cycle would be "
+                f"{projected_start.isoformat()} to {projected_end.isoformat()} "
+                f"with USD {float(source.recurring_amount_usd):.2f}. "
+                "No balance or real cycle was changed."
             ),
         }
 
@@ -334,13 +324,8 @@ class PromotionalFundingCycleService:
         *,
         source_id: int,
         simulation: bool = False,
-        simulation_date: date | None = None,
     ) -> dict:
-        """Single idempotent entry point for BackOffice/manual/webhook checks.
-
-        Normal calls use the real current date and may roll a due cycle.
-        Simulation calls are dry-run only and require the per-source flag.
-        """
+        """Manual/webhook entry point using the same idempotent rollover guard."""
         source = db.execute(
             select(PromotionalFundingSource).where(PromotionalFundingSource.id == source_id)
         ).scalar_one_or_none()
@@ -348,9 +333,7 @@ class PromotionalFundingCycleService:
             raise NotFoundException("Promotional recurring funding source not found.")
 
         if simulation:
-            if simulation_date is None:
-                raise ConflictException("Choose a simulation date.")
-            return self.preview_rollover(db, source_id=source_id, as_of=simulation_date)
+            return self.preview_next_cycle(db, source_id=source_id)
 
         effective_date = utc_now().date()
         changed = self.ensure_current_cycles(db, today=effective_date, source_id=source_id)

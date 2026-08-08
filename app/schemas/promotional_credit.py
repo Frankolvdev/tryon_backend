@@ -83,13 +83,6 @@ class PromotionalRecurringSourceResponse(BaseModel):
 
 class PromotionalCycleWebhookRequest(BaseModel):
     simulation: bool = False
-    simulation_date: date | None = None
-
-    @model_validator(mode="after")
-    def validate_simulation(self):
-        if self.simulation and self.simulation_date is None:
-            raise ValueError("simulation_date is required when simulation=true")
-        return self
 
 
 class PromotionalCycleWebhookResult(BaseModel):

@@ -86,7 +86,7 @@ def update_promotional_recurring_source(source_id:int,data:PromotionalRecurringS
 
 @router.post('/promotional-credits/recurring-sources/{source_id}/cycle-webhook',response_model=PromotionalCycleWebhookResult)
 def promotional_cycle_webhook(source_id:int,data:PromotionalCycleWebhookRequest,request:Request,db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
- result=promotional_funding_cycle_service.trigger_webhook(db,source_id=source_id,simulation=data.simulation,simulation_date=data.simulation_date)
+ result=promotional_funding_cycle_service.trigger_webhook(db,source_id=source_id,simulation=data.simulation)
  audit_service.create_log(
   db,
   actor_user_id=current_admin.id,
