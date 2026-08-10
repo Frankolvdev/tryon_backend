@@ -142,6 +142,7 @@ from app.models.webhook_event import WebhookEvent
 from app.models.workflow_definition import (
     WorkflowDefinition,
 )
+from app.models.body_proportion_tool import BodyProportionWorkflowConfig, BodyProportionPreset
 
 
 from app.models.promotional_credit import PromotionalCreditFund, PromotionalTokenGrant, PromotionalCreditReturn
@@ -224,6 +225,8 @@ __all__ = [
     "WebhookEndpoint",
     "WebhookEvent",
     "WorkflowDefinition",
+    "BodyProportionWorkflowConfig",
+    "BodyProportionPreset",
     "PromotionalCreditFund",
     "PromotionalTokenGrant",
     "PromotionalCreditReturn",

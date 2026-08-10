@@ -74,6 +74,7 @@ from app.api.v1.endpoints.admin import (
     modal_file_manager,
     runpod_file_manager,
     beam_file_manager,
+    body_proportion_tools,
 )
 
 admin_router = APIRouter()
@@ -359,3 +360,5 @@ admin_router.include_router(runpod_file_manager.router, tags=["Admin - RunPod Fi
 admin_router.include_router(beam_file_manager.router, tags=["Admin - Beam File Manager"])
 
 admin_router.include_router(finances.router, tags=["admin-finances"])
+
+admin_router.include_router(body_proportion_tools.router, tags=["Admin - Tools Generation - Body Proportions"])
