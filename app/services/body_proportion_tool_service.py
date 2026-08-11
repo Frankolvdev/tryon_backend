@@ -457,18 +457,73 @@ class BodyProportionToolService:
             "mirror_removed": mirror_removed,
         }
 
+    @staticmethod
+    def _workflow_differences(before, after, path=()):
+        differences = []
+        if isinstance(before, dict) and isinstance(after, dict):
+            before_keys = set(before.keys())
+            after_keys = set(after.keys())
+            for key in sorted(before_keys | after_keys, key=str):
+                current = path + (str(key),)
+                if key not in before:
+                    differences.append((current, "added"))
+                elif key not in after:
+                    differences.append((current, "removed"))
+                else:
+                    differences.extend(BodyProportionToolService._workflow_differences(before[key], after[key], current))
+            return differences
+        if isinstance(before, list) and isinstance(after, list):
+            if before != after:
+                differences.append((path, "changed"))
+            return differences
+        if before != after:
+            differences.append((path, "changed"))
+        return differences
+
     def _patch_workflow(self, workflow: dict, mapping: dict, values: dict) -> dict:
+        if not isinstance(workflow, dict):
+            raise ValueError("Configured ComfyUI workflow must be a JSON object.")
+
+        original = deepcopy(workflow)
         result = deepcopy(workflow)
+        allowed_paths = set()
+
         for key in self.PATCH_KEYS:
             target = mapping.get(key)
-            if not target: continue
-            node_id, input_name = str(target.get("node_id", "")).strip(), str(target.get("input_name", "")).strip()
-            if not node_id or not input_name: continue
-            node = result.get(node_id)
-            if not isinstance(node, dict): raise ValueError(f"Mapped ComfyUI node {node_id} for {key} does not exist.")
-            inputs = node.setdefault("inputs", {})
-            if not isinstance(inputs, dict): raise ValueError(f"Mapped ComfyUI node {node_id} has no inputs object.")
-            inputs[input_name] = values[key]
+            if not target:
+                continue
+            node_id = str(target.get("node_id", "")).strip()
+            input_name = str(target.get("input_name", "")).strip()
+            if not node_id or not input_name:
+                continue
+            if node_id not in result:
+                raise ValueError(f"Mapped ComfyUI node {node_id} for {key} does not exist.")
+            node = result[node_id]
+            if not isinstance(node, dict):
+                raise ValueError(f"Mapped ComfyUI node {node_id} for {key} is invalid.")
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                raise ValueError(f"Mapped ComfyUI node {node_id} has no inputs object.")
+            if input_name not in inputs:
+                raise ValueError(
+                    f"Mapped input {input_name!r} does not exist on ComfyUI node {node_id} for {key}. "
+                    "The body proportion tool will not create or infer missing workflow inputs."
+                )
+            inputs[input_name] = deepcopy(values[key])
+            allowed_paths.add((node_id, "inputs", input_name))
+
+        unexpected = []
+        for diff_path, diff_kind in self._workflow_differences(original, result):
+            if diff_path not in allowed_paths:
+                unexpected.append((diff_path, diff_kind))
+
+        if unexpected:
+            preview = ", ".join(".".join(path) for path, _ in unexpected[:10])
+            raise RuntimeError(
+                "Body proportion workflow integrity check failed. "
+                "Only explicitly mapped node inputs may change. Unexpected changes: " + preview
+            )
+
         return result
 
     def _category_parts(self, preset: BodyProportionPreset) -> list[str]:
@@ -521,7 +576,11 @@ class BodyProportionToolService:
         workflow = self._patch_workflow(config["workflow"], config["input_mapping"], values)
         preset.status = "generating"; preset.last_error = None; db.add(preset); db.commit()
         try:
-            queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow, extra_data={"body_proportion_profile": preset.profile_key}, preserve_workflow_paths=True)
+            queued = comfyui_local_adapter_service.queue_prompt(
+                workflow=workflow,
+                extra_data={"body_proportion_profile": preset.profile_key},
+                preserve_workflow_paths=True,
+            )
             execution = comfyui_local_adapter_service.execute_queued_prompt(
                 prompt_id=queued["prompt_id"], client_id=queued["client_id"],
                 job_public_id=f"body-proportion-{preset.id}-{uuid4().hex[:8]}", timeout_seconds=900, download_outputs=True,

@@ -2,7 +2,6 @@ import json
 import logging
 import re
 import time
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -11,6 +10,8 @@ from uuid import uuid4
 import httpx
 
 from app.core.config import settings
+from copy import deepcopy
+
 from app.services.comfyui_prompt_preprocessor_service import (
     comfyui_prompt_preprocessor_service,
 )
@@ -133,12 +134,10 @@ class ComfyUILocalAdapterService:
         preserve_workflow_paths: bool = False,
     ) -> dict[str, Any]:
         resolved_client_id = client_id or uuid4().hex
-
-        # Backwards-compatible by default: every existing caller keeps the
-        # historical path-normalization behavior.  Isolated tools that must
-        # submit an API workflow byte-for-byte/logically unchanged (except for
-        # their explicit input patches) can opt out.
         if preserve_workflow_paths:
+            # Opt-in used by isolated tools that must submit the uploaded
+            # ComfyUI API workflow exactly as stored. Existing callers keep
+            # the historical normalization behavior by default.
             normalized_workflow = deepcopy(workflow)
         else:
             normalized_workflow = comfyui_prompt_preprocessor_service.preprocess(
@@ -147,7 +146,6 @@ class ComfyUILocalAdapterService:
             comfyui_prompt_preprocessor_service.assert_no_windows_model_paths(
                 normalized_workflow
             )
-
         body: dict[str, Any] = {
             "prompt": normalized_workflow,
             "client_id": resolved_client_id,
