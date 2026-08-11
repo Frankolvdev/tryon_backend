@@ -328,6 +328,33 @@ class BodyProportionToolService:
         db.commit()
         return {"updated": updated, "skipped_ready": skipped}
 
+    def synchronize_preset_with_rules(self, db: Session, preset_id: int) -> BodyProportionPreset:
+        """Forget this preset's saved body values and re-derive them from current global rules.
+
+        This operation is intentionally scoped to one Body Proportion base preset.
+        It preserves the existing preview/storage reference, but marks the preset as draft
+        because the stored image may no longer match the newly synchronized values.
+        """
+        row = self.get_preset(db, preset_id)
+        if not row.is_base_category or not row.fat_band or not row.ass_band or not row.breast_band:
+            raise ValueError("Only derived base body-proportion categories can be synchronized with global rules.")
+
+        config = self.get_config(db, row.sex)
+        values = self._base_values(config, row.fat_band, row.ass_band, row.breast_band)
+
+        for field, value in values.items():
+            setattr(row, field, value)
+
+        row.display_name = self._base_name(config, row.fat_band, row.ass_band, row.breast_band)
+        row.category_slug = self._slug(row.display_name)
+        row.status = "draft"
+        row.last_error = None
+
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return row
+
     def create_preset(self, db: Session, data) -> BodyProportionPreset:
         sex = self._validate_sex(data.sex)
         config = self.get_config(db, sex); fixed = config["fixed_values"]

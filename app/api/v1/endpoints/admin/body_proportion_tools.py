@@ -85,6 +85,15 @@ def create_preset(data: BodyProportionPresetCreate, db: Session = Depends(get_db
     except Exception as error: _bad_request(error)
 
 
+@router.post("/presets/{preset_id}/synchronize-rules", response_model=BodyProportionPresetResponse)
+def synchronize_preset_rules(preset_id: int, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    try:
+        row = body_proportion_tool_service.synchronize_preset_with_rules(db, preset_id)
+        return body_proportion_tool_service.response(db, row)
+    except Exception as error:
+        _bad_request(error)
+
+
 @router.post("/presets/{preset_id}/next", response_model=BodyProportionPresetResponse, status_code=status.HTTP_201_CREATED)
 def create_next(preset_id: int, data: BodyProportionNextRequest, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
     try:
