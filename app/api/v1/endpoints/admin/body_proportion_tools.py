@@ -94,6 +94,18 @@ def create_preset(data: BodyProportionPresetCreate, db: Session = Depends(get_db
     except Exception as error: _bad_request(error)
 
 
+@router.post("/presets/synchronize-all-rules")
+def synchronize_all_preset_rules(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    try:
+        rows = body_proportion_tool_service.synchronize_all_base_presets(db)
+        return {"updated": len(rows)}
+    except Exception as error:
+        _bad_request(error)
+
+
 @router.post("/presets/{preset_id}/synchronize-rules", response_model=BodyProportionPresetResponse)
 def synchronize_preset_rules(preset_id: int, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
     try:

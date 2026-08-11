@@ -10,7 +10,7 @@ DEFAULT_LIMITS = {
     "hips_min": 0.0,
     "hips_max": 9.0,
     "breasts_min": None,
-    "breasts_max": 1.8,
+    "breasts_max": 3.0,
     "fat_thin_min": -1.5,
     "fat_thin_max": 1.8,
     "skin_tone_min": -5.0,

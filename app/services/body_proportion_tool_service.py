@@ -79,9 +79,9 @@ class BodyProportionToolService:
     @staticmethod
     def _normalize_limits(limits: dict | None) -> dict:
         normalized = BodyProportionToolService._deep_merge(DEFAULT_LIMITS, limits or {})
-        # Upgrade only the legacy built-in maximum. Custom values are preserved.
-        if normalized.get("breasts_max") is not None and float(normalized["breasts_max"]) == 1.5:
-            normalized["breasts_max"] = 1.8
+        # Upgrade only legacy built-in maximums. Custom values are preserved.
+        if normalized.get("breasts_max") is not None and float(normalized["breasts_max"]) in {1.5, 1.8}:
+            normalized["breasts_max"] = 3.0
         return normalized
 
     def _validate_formula(self, formula: dict, limits: dict) -> dict:
@@ -376,6 +376,25 @@ class BodyProportionToolService:
         db.commit()
         db.refresh(row)
         return row
+
+
+    def synchronize_all_base_presets(self, db: Session) -> list[BodyProportionPreset]:
+        """Re-derive every base category from the current global rules.
+
+        Custom/intermediate presets are intentionally excluded. Each base preset
+        uses the exact same synchronization path as the existing per-card action.
+        """
+        preset_ids = db.scalars(
+            select(BodyProportionPreset.id).where(
+                BodyProportionPreset.is_base_category.is_(True)
+            )
+        ).all()
+
+        restored: list[BodyProportionPreset] = []
+        for preset_id in preset_ids:
+            restored.append(self.synchronize_preset_with_rules(db, int(preset_id)))
+        return restored
+
 
     def create_preset(self, db: Session, data) -> BodyProportionPreset:
         sex = self._validate_sex(data.sex)
