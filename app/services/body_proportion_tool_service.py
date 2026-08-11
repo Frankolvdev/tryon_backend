@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from copy import deepcopy
@@ -480,6 +481,54 @@ class BodyProportionToolService:
             differences.append((path, "changed"))
         return differences
 
+    @staticmethod
+    def _workflow_sha256(workflow: dict) -> str:
+        payload = json.dumps(
+            workflow,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _validate_original_workflow_required_inputs(workflow: dict) -> None:
+        """Validate only; never infer, create, or repair workflow connections."""
+        if not isinstance(workflow, dict):
+            raise ValueError("Configured ComfyUI workflow must be a JSON object.")
+
+        required_by_class = {
+            "KSampler": ("model", "positive", "negative", "latent_image"),
+            "VAEDecode": ("samples", "vae"),
+        }
+        missing: list[str] = []
+
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
+            class_type = str(node.get("class_type") or "")
+            required = required_by_class.get(class_type)
+            if not required:
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                inputs = {}
+            for input_name in required:
+                if input_name not in inputs:
+                    missing.append(f"{node_id}.{input_name} ({class_type})")
+
+        if missing:
+            digest = BodyProportionToolService._workflow_sha256(workflow)
+            raise ValueError(
+                "The ORIGINAL ComfyUI API workflow saved in Body Proportions is incomplete "
+                "before any mapped value is changed. Missing required inputs: "
+                + ", ".join(missing)
+                + f". Original workflow SHA256: {digest}. "
+                "The Body Proportion Tool did not remove these inputs and will not infer or repair them. "
+                "Export/load a complete ComfyUI API workflow, then save the configuration again."
+            )
+
     def _patch_workflow(self, workflow: dict, mapping: dict, values: dict) -> dict:
         if not isinstance(workflow, dict):
             raise ValueError("Configured ComfyUI workflow must be a JSON object.")
@@ -573,6 +622,9 @@ class BodyProportionToolService:
         values = {"hips_size": preset.hips_size, "fat_thin": preset.fat_thin, "breasts_size": preset.breasts_size,
                   "skin_tone": preset.skin_tone, "hair_length": preset.hair_length,
                   "category_name": preset.display_name, "sex": preset.sex == "woman"}
+        # Strict preflight on the exact workflow stored in this tool.
+        # This validation never mutates or repairs the workflow.
+        self._validate_original_workflow_required_inputs(config["workflow"])
         workflow = self._patch_workflow(config["workflow"], config["input_mapping"], values)
         preset.status = "generating"; preset.last_error = None; db.add(preset); db.commit()
         try:
