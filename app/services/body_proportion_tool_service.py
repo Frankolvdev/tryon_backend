@@ -63,12 +63,25 @@ class BodyProportionToolService:
             fat_levels["high"]["fat_thin"] = -0.5
         if float((fat_levels.get("very_high") or {}).get("fat_thin", -1.0)) == -1.4:
             fat_levels["very_high"]["fat_thin"] = -1.0
+        breast_levels = normalized.get("breast_levels") or {}
+        if float((breast_levels.get("big") or {}).get("base", 0.9)) == 1.0:
+            breast_levels["big"]["base"] = 0.9
+        if float((breast_levels.get("huge") or {}).get("base", 1.8)) == 1.5:
+            breast_levels["huge"]["base"] = 1.8
         fat_order, ass_order, breast_order = self._formula_orders(normalized)
         matrix = normalized.setdefault("ass_breast_compensation", {})
         for ass_key in ass_order:
             row = matrix.setdefault(ass_key, {})
             for breast_key in breast_order:
                 row.setdefault(breast_key, 0.0)
+        return normalized
+
+    @staticmethod
+    def _normalize_limits(limits: dict | None) -> dict:
+        normalized = BodyProportionToolService._deep_merge(DEFAULT_LIMITS, limits or {})
+        # Upgrade only the legacy built-in maximum. Custom values are preserved.
+        if normalized.get("breasts_max") is not None and float(normalized["breasts_max"]) == 1.5:
+            normalized["breasts_max"] = 1.8
         return normalized
 
     def _validate_formula(self, formula: dict, limits: dict) -> dict:
@@ -146,7 +159,7 @@ class BodyProportionToolService:
             "sex": row.sex,
             "workflow": row.workflow_json,
             "input_mapping": row.input_mapping_json or {},
-            "limits": self._deep_merge(DEFAULT_LIMITS, row.limits_json),
+            "limits": self._normalize_limits(row.limits_json),
             "formula": self._normalize_formula(row.formula_json or {}),
             "fixed_values": self._deep_merge(DEFAULT_FIXED_VALUES, row.fixed_values_json),
             "storage_mode": self._validate_storage_mode(getattr(row, "storage_mode", "auto")),
@@ -159,7 +172,7 @@ class BodyProportionToolService:
     def upsert_config(self, db: Session, sex: str, data) -> dict:
         sex = self._validate_sex(sex)
         row = db.execute(select(BodyProportionWorkflowConfig).where(BodyProportionWorkflowConfig.sex == sex)).scalar_one_or_none()
-        limits = self._deep_merge(DEFAULT_LIMITS, data.limits)
+        limits = self._normalize_limits(data.limits)
         formula = self._validate_formula(data.formula, limits)
         payload = {
             "workflow_json": data.workflow,
@@ -464,7 +477,13 @@ class BodyProportionToolService:
         row = self.get_preset(db, preset_id)
         self._delete_preset_row(db, row)
 
-    def reset_tool(self, db: Session, sex: str) -> dict:
+    def reset_tool(
+        self,
+        db: Session,
+        sex: str,
+        *,
+        delete_workflow_mappings: bool = False,
+    ) -> dict:
         sex = self._validate_sex(sex)
         rows = list(db.execute(select(BodyProportionPreset).where(
             BodyProportionPreset.sex == sex
@@ -477,9 +496,20 @@ class BodyProportionToolService:
         config_row = db.execute(select(BodyProportionWorkflowConfig).where(
             BodyProportionWorkflowConfig.sex == sex
         )).scalar_one_or_none()
-        deleted_config = bool(config_row)
+
+        deleted_config = False
         if config_row:
-            db.delete(config_row)
+            if delete_workflow_mappings:
+                db.delete(config_row)
+                deleted_config = True
+            else:
+                # Reset only this tool's generated data/rules while preserving the
+                # already configured ComfyUI workflow and explicit node mappings.
+                config_row.limits_json = deepcopy(DEFAULT_LIMITS)
+                config_row.formula_json = deepcopy(DEFAULT_FORMULA)
+                config_row.fixed_values_json = deepcopy(DEFAULT_FIXED_VALUES)
+                config_row.storage_mode = "auto"
+                config_row.notes = None
             db.commit()
 
         root = Path(str(getattr(settings, "LOCAL_STORAGE_DIR", "storage"))) / "body-proportions-library" / f"proportions_{sex}"
@@ -683,12 +713,6 @@ class BodyProportionToolService:
                   "skin_tone": preset.skin_tone, "hair_length": preset.hair_length,
                   "category_name": preset.display_name, "sex": preset.sex == "woman"}
         execution_values = dict(values)
-        if preset.breast_band in {"big", "huge"}:
-            preview_breast_boost = 0.2 if preset.breast_band == "big" else 0.5
-            execution_values["breasts_size"] = round(
-                float(preset.breasts_size) + preview_breast_boost,
-                4,
-            )
         # Strict preflight on the exact workflow stored in this tool.
         # This validation never mutates or repairs the workflow.
         self._validate_original_workflow_required_inputs(config["workflow"])

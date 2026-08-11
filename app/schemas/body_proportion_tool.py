@@ -10,7 +10,7 @@ DEFAULT_LIMITS = {
     "hips_min": 0.0,
     "hips_max": 9.0,
     "breasts_min": None,
-    "breasts_max": 1.5,
+    "breasts_max": 1.8,
     "fat_thin_min": -1.5,
     "fat_thin_max": 1.8,
     "skin_tone_min": -5.0,
@@ -87,8 +87,8 @@ DEFAULT_FORMULA: dict[str, Any] = {
     "breast_levels": {
         "small": {"label": "Small Breast", "base": 0.0, "order": 10.0, "is_core": True},
         "medium": {"label": "Medium Breast", "base": 0.5, "order": 20.0, "is_core": True},
-        "big": {"label": "Big Breast", "base": 1.0, "order": 30.0, "is_core": True},
-        "huge": {"label": "Huge Breast", "base": 1.5, "order": 40.0, "is_core": True},
+        "big": {"label": "Big Breast", "base": 0.9, "order": 30.0, "is_core": True},
+        "huge": {"label": "Huge Breast", "base": 1.8, "order": 40.0, "is_core": True},
     },
     "ass_breast_compensation": {
         "small": {"small": 0.0, "medium": 0.0, "big": 0.0, "huge": 0.0},

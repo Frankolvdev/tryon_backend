@@ -51,9 +51,18 @@ def put_config(data: BodyProportionWorkflowConfigUpsert, sex: str, db: Session =
 
 
 @router.delete("/reset/{sex}", response_model=BodyProportionResetResponse)
-def reset_tool(sex: str, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+def reset_tool(
+    sex: str,
+    delete_workflow_mappings: bool = False,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
     try:
-        return body_proportion_tool_service.reset_tool(db, sex)
+        return body_proportion_tool_service.reset_tool(
+            db,
+            sex,
+            delete_workflow_mappings=delete_workflow_mappings,
+        )
     except Exception as error:
         _bad_request(error)
 
