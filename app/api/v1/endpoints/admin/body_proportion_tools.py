@@ -10,7 +10,7 @@ from app.schemas.body_proportion_tool import (
     BodyProportionPresetCreate, BodyProportionPresetListResponse,
     BodyProportionPresetResponse, BodyProportionPresetUpdate,
     BodyProportionRecalculateRequest, BodyProportionRecalculateResponse,
-    BodyProportionSeedResponse, BodyProportionStorageOptionsResponse,
+    BodyProportionSeedResponse, BodyProportionStorageOptionsResponse, BodyProportionResetResponse,
     BodyProportionWorkflowConfigResponse, BodyProportionWorkflowConfigUpsert,
 )
 from app.services.body_proportion_tool_service import body_proportion_tool_service
@@ -48,6 +48,15 @@ def put_config(data: BodyProportionWorkflowConfigUpsert, sex: str, db: Session =
     except Exception as error: _bad_request(error)
 
 
+
+
+@router.delete("/reset/{sex}", response_model=BodyProportionResetResponse)
+def reset_tool(sex: str, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    try:
+        return body_proportion_tool_service.reset_tool(db, sex)
+    except Exception as error:
+        _bad_request(error)
+
 @router.post("/presets/seed-defaults", response_model=BodyProportionSeedResponse)
 def seed_defaults(sex: str = "woman", db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
     try: return body_proportion_tool_service.seed_defaults(db, sex)
@@ -63,7 +72,6 @@ def recalc_defaults(data: BodyProportionRecalculateRequest, sex: str = "woman", 
 @router.get("/presets", response_model=BodyProportionPresetListResponse)
 def list_presets(sex: str = "woman", db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
     try:
-        body_proportion_tool_service.ensure_defaults(db, sex)
         rows = body_proportion_tool_service.list_presets(db, sex)
         return {"items": [body_proportion_tool_service.response(db, row) for row in rows], "total": len(rows)}
     except Exception as error: _bad_request(error)

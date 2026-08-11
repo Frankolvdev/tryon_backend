@@ -21,9 +21,6 @@ class BodyProportionToolService:
     SEXES = {"woman", "man"}
     STORAGE_MODES = {"auto", "local", "amazon_s3", "cloudflare_r2"}
     PATCH_KEYS = ("hips_size", "fat_thin", "breasts_size", "skin_tone", "hair_length", "category_name", "sex")
-    FAT_ORDER = ("low", "medium", "high")
-    ASS_ORDER = ("small", "medium", "big", "huge")
-    BREAST_ORDER = ("small", "medium", "big", "huge")
 
     @staticmethod
     def _deep_merge(base: dict, override: dict | None) -> dict:
@@ -34,6 +31,71 @@ class BodyProportionToolService:
             else:
                 result[key] = deepcopy(value)
         return result
+
+    @staticmethod
+    def _ordered_levels(levels: dict, value_key: str, *, reverse: bool = False) -> list[str]:
+        return sorted(
+            levels.keys(),
+            key=lambda key: (
+                float((levels.get(key) or {}).get("order", 0.0)),
+                float((levels.get(key) or {}).get(value_key, 0.0)),
+                key,
+            ),
+            reverse=reverse,
+        )
+
+    def _formula_orders(self, formula: dict) -> tuple[list[str], list[str], list[str]]:
+        fat_order = self._ordered_levels(formula.get("fat_levels") or {}, "body_fat_percent")
+        ass_order = self._ordered_levels(formula.get("ass_levels") or {}, "hips_size")
+        breast_order = self._ordered_levels(formula.get("breast_levels") or {}, "base")
+        return fat_order, ass_order, breast_order
+
+    def _normalize_formula(self, formula: dict) -> dict:
+        normalized = self._deep_merge(DEFAULT_FORMULA, formula)
+        fat_order, ass_order, breast_order = self._formula_orders(normalized)
+        matrix = normalized.setdefault("ass_breast_compensation", {})
+        for ass_key in ass_order:
+            row = matrix.setdefault(ass_key, {})
+            for breast_key in breast_order:
+                row.setdefault(breast_key, 0.0)
+        return normalized
+
+    def _validate_formula(self, formula: dict, limits: dict) -> dict:
+        formula = self._normalize_formula(formula)
+        fat_order, ass_order, breast_order = self._formula_orders(formula)
+        if len(fat_order) < 2 or len(ass_order) < 2 or len(breast_order) < 2:
+            raise ValueError("At least two fat, glute and breast anchors are required.")
+
+        def strictly(values: list[float], increasing: bool, label: str) -> None:
+            for left, right in zip(values, values[1:]):
+                if increasing and not left < right:
+                    raise ValueError(f"{label} anchors must be strictly increasing.")
+                if not increasing and not left > right:
+                    raise ValueError(f"{label} anchors must be strictly decreasing.")
+
+        fat_percents = [float(formula["fat_levels"][key].get("body_fat_percent", 0.0)) for key in fat_order]
+        fat_values = [float(formula["fat_levels"][key]["fat_thin"]) for key in fat_order]
+        hips = [float(formula["ass_levels"][key]["hips_size"]) for key in ass_order]
+        breasts = [float(formula["breast_levels"][key]["base"]) for key in breast_order]
+
+        strictly(fat_percents, True, "Body-fat percentage")
+        strictly(fat_values, False, "fat_thin")
+        strictly(hips, True, "Glute")
+        strictly(breasts, True, "Breast")
+
+        hips_min, hips_max = limits.get("hips_min"), limits.get("hips_max")
+        breast_min, breast_max = limits.get("breasts_min"), limits.get("breasts_max")
+        fat_min, fat_max = limits.get("fat_thin_min"), limits.get("fat_thin_max")
+        for value in hips:
+            if hips_min is not None and value < float(hips_min): raise ValueError("Glute anchor is below hips_min.")
+            if hips_max is not None and value > float(hips_max): raise ValueError("Glute anchor exceeds hips_max.")
+        for value in breasts:
+            if breast_min is not None and value < float(breast_min): raise ValueError("Breast anchor is below breasts_min.")
+            if breast_max is not None and value > float(breast_max): raise ValueError("Breast anchor exceeds breasts_max.")
+        for value in fat_values:
+            if fat_min is not None and value < float(fat_min): raise ValueError("fat_thin anchor is below fat_thin_min.")
+            if fat_max is not None and value > float(fat_max): raise ValueError("fat_thin anchor exceeds fat_thin_max.")
+        return formula
 
     def _validate_sex(self, sex: str) -> str:
         normalized = str(sex).strip().lower()
@@ -74,7 +136,7 @@ class BodyProportionToolService:
             "workflow": row.workflow_json,
             "input_mapping": row.input_mapping_json or {},
             "limits": self._deep_merge(DEFAULT_LIMITS, row.limits_json),
-            "formula": self._deep_merge(DEFAULT_FORMULA, row.formula_json),
+            "formula": self._normalize_formula(row.formula_json or {}),
             "fixed_values": self._deep_merge(DEFAULT_FIXED_VALUES, row.fixed_values_json),
             "storage_mode": self._validate_storage_mode(getattr(row, "storage_mode", "auto")),
             "is_enabled": bool(row.is_enabled),
@@ -86,11 +148,13 @@ class BodyProportionToolService:
     def upsert_config(self, db: Session, sex: str, data) -> dict:
         sex = self._validate_sex(sex)
         row = db.execute(select(BodyProportionWorkflowConfig).where(BodyProportionWorkflowConfig.sex == sex)).scalar_one_or_none()
+        limits = self._deep_merge(DEFAULT_LIMITS, data.limits)
+        formula = self._validate_formula(data.formula, limits)
         payload = {
             "workflow_json": data.workflow,
             "input_mapping_json": data.input_mapping,
-            "limits_json": self._deep_merge(DEFAULT_LIMITS, data.limits),
-            "formula_json": self._deep_merge(DEFAULT_FORMULA, data.formula),
+            "limits_json": limits,
+            "formula_json": formula,
             "fixed_values_json": self._deep_merge(DEFAULT_FIXED_VALUES, data.fixed_values),
             "storage_mode": self._validate_storage_mode(data.storage_mode),
             "is_enabled": bool(data.is_enabled),
@@ -146,7 +210,7 @@ class BodyProportionToolService:
         fat = formula["fat_levels"][fat_band]
         ass = formula["ass_levels"][ass_band]
         breast = formula["breast_levels"][breast_band]
-        ass_breast = formula["ass_breast_compensation"][ass_band][breast_band]
+        ass_breast = (formula.get("ass_breast_compensation") or {}).get(ass_band, {}).get(breast_band, 0.0)
         hips = float(ass["hips_size"]) + float(fat.get("hips_compensation", 0.0))
         breasts = float(breast["base"]) + float(ass_breast) + float(fat.get("breasts_compensation", 0.0))
         values = {
@@ -170,11 +234,25 @@ class BodyProportionToolService:
     def seed_defaults(self, db: Session, sex: str) -> dict:
         sex = self._validate_sex(sex)
         config = self.get_config(db, sex)
-        created = existing = 0
+        formula = self._validate_formula(config["formula"], config["limits"])
+        fat_order, ass_order, breast_order = self._formula_orders(formula)
+        expected = {self._base_key(f, a, b) for f in fat_order for a in ass_order for b in breast_order}
+
+        created = existing = removed = 0
+        # Remove only obsolete derived BASE categories. Custom presets are never touched here.
+        obsolete = db.execute(select(BodyProportionPreset).where(
+            BodyProportionPreset.sex == sex,
+            BodyProportionPreset.is_base_category.is_(True),
+        )).scalars().all()
+        for row in obsolete:
+            if row.base_category_key and row.base_category_key not in expected:
+                self._delete_preset_row(db, row)
+                removed += 1
+
         order = 100.0
-        for fat_band in self.FAT_ORDER:
-            for ass_band in self.ASS_ORDER:
-                for breast_band in self.BREAST_ORDER:
+        for fat_band in fat_order:
+            for ass_band in ass_order:
+                for breast_band in breast_order:
                     base_key = self._base_key(fat_band, ass_band, breast_band)
                     name = self._base_name(config, fat_band, ass_band, breast_band)
                     slug = self._slug(name)
@@ -189,10 +267,17 @@ class BodyProportionToolService:
                             (BodyProportionPreset.display_name == name) | (BodyProportionPreset.category_slug == slug),
                         )).scalar_one_or_none()
                     if found:
-                        found.fat_band = fat_band; found.ass_band = ass_band; found.breast_band = breast_band
-                        found.is_base_category = True; found.base_category_key = base_key; found.sort_order = order
-                        db.add(found); db.commit()
-                        existing += 1; order += 100.0; continue
+                        found.fat_band = fat_band
+                        found.ass_band = ass_band
+                        found.breast_band = breast_band
+                        found.is_base_category = True
+                        found.base_category_key = base_key
+                        found.sort_order = order
+                        db.add(found)
+                        db.commit()
+                        existing += 1
+                        order += 100.0
+                        continue
                     values = self._base_values(config, fat_band, ass_band, breast_band)
                     key, _ = self._next_identity(db, sex)
                     row = BodyProportionPreset(
@@ -201,17 +286,23 @@ class BodyProportionToolService:
                         breast_band=breast_band, is_base_category=True, base_category_key=base_key,
                         **values,
                     )
-                    db.add(row); db.commit(); created += 1; order += 100.0
-        return {"created": created, "existing": existing, "total_base": 48}
+                    db.add(row)
+                    db.commit()
+                    created += 1
+                    order += 100.0
+        return {"created": created, "existing": existing, "removed": removed, "total_base": len(expected)}
 
     def ensure_defaults(self, db: Session, sex: str) -> None:
         sex = self._validate_sex(sex)
         if sex != "woman":
             return
+        config = self.get_config(db, sex)
+        fat_order, ass_order, breast_order = self._formula_orders(config["formula"])
+        expected_count = len(fat_order) * len(ass_order) * len(breast_order)
         count = db.execute(select(func.count()).select_from(BodyProportionPreset).where(
             BodyProportionPreset.sex == sex, BodyProportionPreset.is_base_category.is_(True)
         )).scalar_one()
-        if int(count or 0) < 48:
+        if int(count or 0) != expected_count:
             self.seed_defaults(db, sex)
 
     def recalculate_defaults(self, db: Session, sex: str, include_ready: bool = False) -> dict:
@@ -312,14 +403,59 @@ class BodyProportionToolService:
         })()
         return self.create_preset(db, created)
 
-    def delete_preset(self, db: Session, preset_id: int) -> None:
-        row = self.get_preset(db, preset_id)
+    def _delete_preset_row(self, db: Session, row: BodyProportionPreset) -> bool:
+        storage_deleted = False
         if row.image_storage_file_id:
             stored = db.get(StorageFile, row.image_storage_file_id)
             if stored:
-                try: storage_service.delete_file(db, storage_file=stored)
-                finally: db.delete(stored)
-        db.delete(row); db.commit()
+                try:
+                    storage_service.delete_file(db, storage_file=stored)
+                    storage_deleted = True
+                finally:
+                    db.delete(stored)
+        if row.local_mirror_path:
+            mirror = Path(row.local_mirror_path)
+            if mirror.exists():
+                import shutil
+                shutil.rmtree(mirror, ignore_errors=True)
+        db.delete(row)
+        db.commit()
+        return storage_deleted
+
+    def delete_preset(self, db: Session, preset_id: int) -> None:
+        row = self.get_preset(db, preset_id)
+        self._delete_preset_row(db, row)
+
+    def reset_tool(self, db: Session, sex: str) -> dict:
+        sex = self._validate_sex(sex)
+        rows = list(db.execute(select(BodyProportionPreset).where(
+            BodyProportionPreset.sex == sex
+        )).scalars().all())
+        deleted_storage = 0
+        for row in rows:
+            if self._delete_preset_row(db, row):
+                deleted_storage += 1
+
+        config_row = db.execute(select(BodyProportionWorkflowConfig).where(
+            BodyProportionWorkflowConfig.sex == sex
+        )).scalar_one_or_none()
+        deleted_config = bool(config_row)
+        if config_row:
+            db.delete(config_row)
+            db.commit()
+
+        root = Path(str(getattr(settings, "LOCAL_STORAGE_DIR", "storage"))) / "body-proportions-library" / f"proportions_{sex}"
+        mirror_removed = root.exists()
+        if mirror_removed:
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+        return {
+            "sex": sex,
+            "deleted_presets": len(rows),
+            "deleted_storage_files": deleted_storage,
+            "deleted_config": deleted_config,
+            "mirror_removed": mirror_removed,
+        }
 
     def _patch_workflow(self, workflow: dict, mapping: dict, values: dict) -> dict:
         result = deepcopy(workflow)
