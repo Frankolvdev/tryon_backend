@@ -521,7 +521,7 @@ class BodyProportionToolService:
         workflow = self._patch_workflow(config["workflow"], config["input_mapping"], values)
         preset.status = "generating"; preset.last_error = None; db.add(preset); db.commit()
         try:
-            queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow, extra_data={"body_proportion_profile": preset.profile_key})
+            queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow, extra_data={"body_proportion_profile": preset.profile_key}, preserve_workflow_paths=True)
             execution = comfyui_local_adapter_service.execute_queued_prompt(
                 prompt_id=queued["prompt_id"], client_id=queued["client_id"],
                 job_public_id=f"body-proportion-{preset.id}-{uuid4().hex[:8]}", timeout_seconds=900, download_outputs=True,
