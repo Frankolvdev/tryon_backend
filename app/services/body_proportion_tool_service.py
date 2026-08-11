@@ -682,7 +682,11 @@ class BodyProportionToolService:
                   "category_name": preset.display_name, "sex": preset.sex == "woman"}
         execution_values = dict(values)
         if preset.breast_band in {"big", "huge"}:
-            execution_values["breasts_size"] = round(float(preset.breasts_size) + 0.5, 4)
+            preview_breast_boost = 0.2 if preset.breast_band == "big" else 0.5
+            execution_values["breasts_size"] = round(
+                float(preset.breasts_size) + preview_breast_boost,
+                4,
+            )
         # Strict preflight on the exact workflow stored in this tool.
         # This validation never mutates or repairs the workflow.
         self._validate_original_workflow_required_inputs(config["workflow"])

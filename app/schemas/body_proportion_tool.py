@@ -35,7 +35,7 @@ DEFAULT_FORMULA: dict[str, Any] = {
         "low": {
             "label": "Low Fat",
             "body_fat_percent": 18.0,
-            "fat_thin": 1.0,
+            "fat_thin": 0.8,
             "hips_compensation": 0.0,
             "breasts_compensation": 0.0,
             "order": 20.0,

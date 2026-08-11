@@ -378,17 +378,11 @@ class ComfyUILocalAdapterService:
                     transient_failures += 1
                     logger.warning(
                         "Transient ComfyUI history error for prompt %s "
-                        "(%s/5): %s",
+                        "(attempt %s; retrying until configured timeout): %s",
                         prompt_id,
                         transient_failures,
                         error,
                     )
-                    if transient_failures >= 5:
-                        raise RuntimeError(
-                            "ComfyUI generated the prompt, but the backend "
-                            "could not read its history after 5 retries: "
-                            f"{error}"
-                        ) from error
                     time.sleep(min(poll_interval * transient_failures, 3.0))
                     continue
 
