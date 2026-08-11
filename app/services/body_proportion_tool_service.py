@@ -54,6 +54,13 @@ class BodyProportionToolService:
 
     def _normalize_formula(self, formula: dict) -> dict:
         normalized = self._deep_merge(DEFAULT_FORMULA, formula)
+        # Transparently upgrade only the two legacy built-in defaults. Custom values
+        # different from the old defaults are never touched.
+        fat_levels = normalized.get("fat_levels") or {}
+        if float((fat_levels.get("high") or {}).get("fat_thin", -0.5)) == -1.0:
+            fat_levels["high"]["fat_thin"] = -0.5
+        if float((fat_levels.get("very_high") or {}).get("fat_thin", -1.0)) == -1.4:
+            fat_levels["very_high"]["fat_thin"] = -1.0
         fat_order, ass_order, breast_order = self._formula_orders(normalized)
         matrix = normalized.setdefault("ass_breast_compensation", {})
         for ass_key in ass_order:
@@ -667,13 +674,19 @@ class BodyProportionToolService:
         preset = self.get_preset(db, preset_id); config = self.get_config(db, preset.sex)
         if not config["is_enabled"] or not config["workflow"]: raise ValueError(f"The {preset.sex} workflow is not configured/enabled.")
         self._assert_limits(config, {k: getattr(preset, k) for k in ("hips_size", "fat_thin", "breasts_size", "skin_tone", "hair_length")})
+        # Canonical values stay untouched in DB/storage/metadata.  The clothing-preview
+        # workflow needs an execution-only breast boost for the two largest core bands
+        # because Klein visually compresses those sizes after dressing the subject.
         values = {"hips_size": preset.hips_size, "fat_thin": preset.fat_thin, "breasts_size": preset.breasts_size,
                   "skin_tone": preset.skin_tone, "hair_length": preset.hair_length,
                   "category_name": preset.display_name, "sex": preset.sex == "woman"}
+        execution_values = dict(values)
+        if preset.breast_band in {"big", "huge"}:
+            execution_values["breasts_size"] = round(float(preset.breasts_size) + 5.0, 4)
         # Strict preflight on the exact workflow stored in this tool.
         # This validation never mutates or repairs the workflow.
         self._validate_original_workflow_required_inputs(config["workflow"])
-        workflow = self._patch_workflow(config["workflow"], config["input_mapping"], values)
+        workflow = self._patch_workflow(config["workflow"], config["input_mapping"], execution_values)
         output_node_id = self._single_save_image_node_id(workflow)
         preset.status = "generating"; preset.last_error = None; db.add(preset); db.commit()
         try:
@@ -702,7 +715,8 @@ class BodyProportionToolService:
             preset.image_storage_file_id = stored.id; preset.local_mirror_path = self._write_mirror(preset, content, content_type)
             preset.status = "ready"; preset.generated_at = utc_now(); preset.last_error = None
             preset.generation_metadata_json = {"prompt_id": queued["prompt_id"], "provider": "comfyui_local",
-                                               "storage_mode": config["storage_mode"], "storage_provider": stored.provider, "values": values}
+                                               "storage_mode": config["storage_mode"], "storage_provider": stored.provider, "values": values,
+                                               "preview_execution_values": execution_values}
             db.add(preset); db.commit(); db.refresh(preset)
             try: Path(image_output["local_path"]).unlink(missing_ok=True)
             except OSError: pass

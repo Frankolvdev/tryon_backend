@@ -62,7 +62,7 @@ DEFAULT_FORMULA: dict[str, Any] = {
         "high": {
             "label": "High Fat",
             "body_fat_percent": 36.0,
-            "fat_thin": -1.0,
+            "fat_thin": -0.5,
             "hips_compensation": 0.0,
             "breasts_compensation": 0.0,
             "order": 50.0,
@@ -71,7 +71,7 @@ DEFAULT_FORMULA: dict[str, Any] = {
         "very_high": {
             "label": "Very High Fat",
             "body_fat_percent": 42.0,
-            "fat_thin": -1.4,
+            "fat_thin": -1.0,
             "hips_compensation": 0.0,
             "breasts_compensation": 0.0,
             "order": 60.0,
