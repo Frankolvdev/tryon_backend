@@ -81,20 +81,20 @@ DEFAULT_FORMULA: dict[str, Any] = {
     "ass_levels": {
         "small": {"label": "Small Ass", "hips_size": 0.0, "order": 10.0, "is_core": True},
         "medium": {"label": "Medium Ass", "hips_size": 3.0, "order": 20.0, "is_core": True},
-        "big": {"label": "Big Ass", "hips_size": 6.0, "order": 30.0, "is_core": True},
-        "huge": {"label": "Huge Ass", "hips_size": 7.0, "order": 40.0, "is_core": True},
+        "big": {"label": "Big Ass", "hips_size": 5.0, "order": 30.0, "is_core": True},
+        "huge": {"label": "Huge Ass", "hips_size": 6.0, "order": 40.0, "is_core": True},
     },
     "breast_levels": {
         "small": {"label": "Small Breast", "base": 0.0, "order": 10.0, "is_core": True},
-        "medium": {"label": "Medium Breast", "base": 0.5, "order": 20.0, "is_core": True},
-        "big": {"label": "Big Breast", "base": 0.9, "order": 30.0, "is_core": True},
-        "huge": {"label": "Huge Breast", "base": 1.8, "order": 40.0, "is_core": True},
+        "medium": {"label": "Medium Breast", "base": 0.4, "order": 20.0, "is_core": True},
+        "big": {"label": "Big Breast", "base": 1.6, "order": 30.0, "is_core": True},
+        "huge": {"label": "Huge Breast", "base": 2.7, "order": 40.0, "is_core": True},
     },
     "ass_breast_compensation": {
         "small": {"small": 0.0, "medium": 0.0, "big": 0.0, "huge": 0.0},
-        "medium": {"small": 0.0, "medium": -0.2, "big": -0.2, "huge": -0.2},
-        "big": {"small": -0.2, "medium": -0.4, "big": -0.4, "huge": -0.4},
-        "huge": {"small": -0.2, "medium": -0.4, "big": -0.4, "huge": -0.4},
+        "medium": {"small": 0.0, "medium": 0.0, "big": 0.0, "huge": 0.0},
+        "big": {"small": 0.0, "medium": 0.0, "big": 0.0, "huge": 0.0},
+        "huge": {"small": 0.0, "medium": 0.0, "big": 0.0, "huge": 0.0},
     },
 }
 
