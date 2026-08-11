@@ -525,9 +525,12 @@ class ComfyUILocalAdapterService:
         job_public_id: str,
         download_outputs: bool = True,
         prefer_api_view: bool = False,
+        allowed_node_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
         for file_data in self._iter_output_files(history_item):
+            if allowed_node_ids is not None and str(file_data.get("node_id")) not in allowed_node_ids:
+                continue
             if download_outputs:
                 collected.append(
                     self.download_output(
@@ -550,6 +553,7 @@ class ComfyUILocalAdapterService:
         download_outputs: bool = True,
         progress_callback=None,
         prefer_api_view: bool = False,
+        allowed_node_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         history_item = self.wait_for_completion(
             prompt_id=prompt_id,
@@ -562,6 +566,7 @@ class ComfyUILocalAdapterService:
             job_public_id=job_public_id,
             download_outputs=download_outputs,
             prefer_api_view=prefer_api_view,
+            allowed_node_ids=allowed_node_ids,
         )
         return {
             "success": True,

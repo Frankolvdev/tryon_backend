@@ -615,6 +615,26 @@ class BodyProportionToolService:
     def storage_options(self, db: Session) -> dict:
         return {"active_provider": storage_service.active_provider(db), "modes": ["auto", "local", "amazon_s3", "cloudflare_r2"]}
 
+    @staticmethod
+    def _single_save_image_node_id(workflow: dict[str, Any]) -> str:
+        save_nodes = [
+            str(node_id)
+            for node_id, node in workflow.items()
+            if isinstance(node, dict) and str(node.get("class_type") or "") == "SaveImage"
+        ]
+        if not save_nodes:
+            raise ValueError(
+                "The Body Proportion workflow has no SaveImage node. "
+                "Add exactly one Save Image node for the final result."
+            )
+        if len(save_nodes) > 1:
+            raise ValueError(
+                "The Body Proportion workflow has multiple SaveImage nodes "
+                f"({', '.join(save_nodes)}). Keep exactly one final Save Image node "
+                "so the tool never guesses which image is the preset result."
+            )
+        return save_nodes[0]
+
     def generate(self, db: Session, preset_id: int) -> tuple[BodyProportionPreset, str, str, bool]:
         preset = self.get_preset(db, preset_id); config = self.get_config(db, preset.sex)
         if not config["is_enabled"] or not config["workflow"]: raise ValueError(f"The {preset.sex} workflow is not configured/enabled.")
@@ -626,6 +646,7 @@ class BodyProportionToolService:
         # This validation never mutates or repairs the workflow.
         self._validate_original_workflow_required_inputs(config["workflow"])
         workflow = self._patch_workflow(config["workflow"], config["input_mapping"], values)
+        output_node_id = self._single_save_image_node_id(workflow)
         preset.status = "generating"; preset.last_error = None; db.add(preset); db.commit()
         try:
             queued = comfyui_local_adapter_service.queue_prompt(
@@ -637,6 +658,7 @@ class BodyProportionToolService:
                 prompt_id=queued["prompt_id"], client_id=queued["client_id"],
                 job_public_id=f"body-proportion-{preset.id}-{uuid4().hex[:8]}", timeout_seconds=900, download_outputs=True,
                 prefer_api_view=True,
+                allowed_node_ids={output_node_id},
             )
             image_output = next((item for item in execution.get("outputs", []) if str(item.get("content_type") or "").startswith("image/")), None)
             if not image_output: raise RuntimeError("The ComfyUI workflow completed without an image output.")
