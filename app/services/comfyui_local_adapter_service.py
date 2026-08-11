@@ -454,6 +454,7 @@ class ComfyUILocalAdapterService:
         *,
         file_data: dict[str, Any],
         job_public_id: str,
+        prefer_api_view: bool = False,
     ) -> dict[str, Any]:
         query = urlencode(
             {
@@ -466,8 +467,21 @@ class ComfyUILocalAdapterService:
         with self._client(
             timeout=max(self._timeout_seconds(), 120)
         ) as client:
-            response = client.get(f"{self._base_url()}/view?{query}")
-            response.raise_for_status()
+            endpoints = ("/api/view", "/view") if prefer_api_view else ("/view",)
+            response = None
+            last_404 = None
+            for endpoint in endpoints:
+                candidate = client.get(f"{self._base_url()}{endpoint}?{query}")
+                if candidate.status_code == 404:
+                    last_404 = candidate
+                    continue
+                candidate.raise_for_status()
+                response = candidate
+                break
+            if response is None:
+                if last_404 is not None:
+                    last_404.raise_for_status()
+                raise RuntimeError("ComfyUI output image could not be downloaded.")
             content = response.content
             content_type = response.headers.get("content-type")
 
@@ -510,6 +524,7 @@ class ComfyUILocalAdapterService:
         history_item: dict[str, Any],
         job_public_id: str,
         download_outputs: bool = True,
+        prefer_api_view: bool = False,
     ) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
         for file_data in self._iter_output_files(history_item):
@@ -518,6 +533,7 @@ class ComfyUILocalAdapterService:
                     self.download_output(
                         file_data=file_data,
                         job_public_id=job_public_id,
+                        prefer_api_view=prefer_api_view,
                     )
                 )
             else:
@@ -533,6 +549,7 @@ class ComfyUILocalAdapterService:
         timeout_seconds: int,
         download_outputs: bool = True,
         progress_callback=None,
+        prefer_api_view: bool = False,
     ) -> dict[str, Any]:
         history_item = self.wait_for_completion(
             prompt_id=prompt_id,
@@ -544,6 +561,7 @@ class ComfyUILocalAdapterService:
             history_item=history_item,
             job_public_id=job_public_id,
             download_outputs=download_outputs,
+            prefer_api_view=prefer_api_view,
         )
         return {
             "success": True,

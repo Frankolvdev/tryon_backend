@@ -636,6 +636,7 @@ class BodyProportionToolService:
             execution = comfyui_local_adapter_service.execute_queued_prompt(
                 prompt_id=queued["prompt_id"], client_id=queued["client_id"],
                 job_public_id=f"body-proportion-{preset.id}-{uuid4().hex[:8]}", timeout_seconds=900, download_outputs=True,
+                prefer_api_view=True,
             )
             image_output = next((item for item in execution.get("outputs", []) if str(item.get("content_type") or "").startswith("image/")), None)
             if not image_output: raise RuntimeError("The ComfyUI workflow completed without an image output.")
