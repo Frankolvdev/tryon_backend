@@ -57,6 +57,8 @@ class BodyProportionToolService:
         # Transparently upgrade only the two legacy built-in defaults. Custom values
         # different from the old defaults are never touched.
         fat_levels = normalized.get("fat_levels") or {}
+        if float((fat_levels.get("low") or {}).get("fat_thin", 0.8)) == 1.0:
+            fat_levels["low"]["fat_thin"] = 0.8
         if float((fat_levels.get("high") or {}).get("fat_thin", -0.5)) == -1.0:
             fat_levels["high"]["fat_thin"] = -0.5
         if float((fat_levels.get("very_high") or {}).get("fat_thin", -1.0)) == -1.4:
