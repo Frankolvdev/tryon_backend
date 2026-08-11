@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
 from app.api.v1.endpoints import (
     account_verification,
+    ai_models,
     admin_mfa,
     auth,
     background_jobs,
@@ -133,6 +134,11 @@ api_router.include_router(
     tryon.router,
     prefix="/tryon",
     tags=["Try-On"],
+)
+api_router.include_router(
+    ai_models.router,
+    prefix="/ai-models",
+    tags=["AI Models"],
 )
 api_router.include_router(
     generation_modules.router,

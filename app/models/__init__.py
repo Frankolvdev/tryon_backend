@@ -147,6 +147,7 @@ from app.models.workflow_definition import (
 from app.models.promotional_credit import PromotionalCreditFund, PromotionalTokenGrant, PromotionalCreditReturn
 from app.models.promotional_funding_cycle import PromotionalFundingSource, PromotionalFundingCycle
 from app.models.body_proportion_tool import BodyProportionWorkflowConfig, BodyProportionPreset
+from app.models.ai_model_profile import AiModelProfile
 __all__ = [
     "BodyProportionWorkflowConfig",
     "BodyProportionPreset",
