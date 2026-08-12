@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.common.enums import StorageProvider
 from app.common.time import utc_now
 from app.core.config import settings
-from app.models.body_proportion_tool import BodyProportionPreset, BodyProportionWorkflowConfig
+from app.models.body_proportion_tool import BodyProportionPreset, BodyProportionWorkflowConfig, BubbleButtPreset
 from app.models.storage_file import StorageFile
 from app.schemas.body_proportion_tool import DEFAULT_FIXED_VALUES, DEFAULT_FORMULA, DEFAULT_LIMITS
 from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
@@ -1321,6 +1321,7 @@ class BodyProportionToolService:
 
     def _apply_configuration_manifest(self, db: Session, manifest: dict[str, Any], *, target: str) -> None:
         from app.models.body_proportion_tool import BubbleButtWorkflowConfig
+        from app.services.bubble_butt_tool_service import bubble_butt_tool_service
         sex = self._validate_sex(str(manifest.get("sex") or ""))
         body = manifest.get("body") or {}
         if body:
@@ -1352,12 +1353,14 @@ class BodyProportionToolService:
             payload = {
                 "workflow_json": bubble.get("workflow"),
                 "input_mapping_json": bubble.get("input_mapping") or {},
-                "bubble_values_json": [float(x) for x in (bubble.get("bubble_values") or [0.0,0.0,0.0])][:3],
+                "bubble_values_json": bubble_butt_tool_service._validate_values(
+                    bubble.get("bubble_values") or [0.0, 0.4, 0.8, 1.2]
+                ),
                 "is_enabled": bool(bubble.get("is_enabled", False)),
                 "notes": bubble.get("notes"),
             }
-            if len(payload["bubble_values_json"]) != 3:
-                raise ValueError("Imported Bubble Butt configuration requires exactly three values.")
+            if len(payload["bubble_values_json"]) != 4:
+                raise ValueError("Imported Bubble Butt configuration requires exactly four values.")
             if row is None:
                 row = BubbleButtWorkflowConfig(sex=sex, **payload)
                 db.add(row)
@@ -1390,6 +1393,26 @@ class BodyProportionToolService:
 
     def generate(self, db: Session, preset_id: int) -> tuple[BodyProportionPreset, str, str, bool]:
         preset = self.get_preset(db, preset_id); config = self.get_config(db, preset.sex)
+
+        # Shared single-execution guard across Body Proportions and Bubble Butt.
+        # Prevents a second local ComfyUI prompt from starting from another card,
+        # tab or direct API request while one generation is already active.
+        active_body = db.execute(
+            select(BodyProportionPreset.id).where(
+                BodyProportionPreset.sex == preset.sex,
+                BodyProportionPreset.status == "generating",
+                BodyProportionPreset.id != preset.id,
+            ).limit(1)
+        ).scalar_one_or_none()
+        active_bubble = db.execute(
+            select(BubbleButtPreset.id).where(
+                BubbleButtPreset.sex == preset.sex,
+                BubbleButtPreset.status == "generating",
+            ).limit(1)
+        ).scalar_one_or_none()
+        if preset.status == "generating" or active_body is not None or active_bubble is not None:
+            raise ValueError("No es posible ejecutar dos generaciones de Body Proportions/Bubble Butt al mismo tiempo.")
+
         if not config["is_enabled"] or not config["workflow"]: raise ValueError(f"The {preset.sex} workflow is not configured/enabled.")
         self._assert_limits(config, {k: getattr(preset, k) for k in ("hips_size", "fat_thin", "breasts_size", "skin_tone", "hair_length")})
         # Canonical values stay untouched in DB/storage/metadata.  The clothing-preview

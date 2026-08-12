@@ -72,7 +72,7 @@ class BubbleButtWorkflowConfig(Base):
     sex: Mapped[str] = mapped_column(String(16), nullable=False, unique=True, index=True)
     workflow_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     input_mapping_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    bubble_values_json: Mapped[list] = mapped_column(JSON, default=lambda: [0.0, 0.0, 0.0], nullable=False)
+    bubble_values_json: Mapped[list] = mapped_column(JSON, default=lambda: [0.0, 0.4, 0.8, 1.2], nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, nullable=False)

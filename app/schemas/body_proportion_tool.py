@@ -248,7 +248,7 @@ class BodyProportionHealthResponse(BaseModel):
 class BubbleButtWorkflowConfigUpsert(BaseModel):
     workflow: dict[str, Any] | None = None
     input_mapping: dict[str, dict[str, str]] = Field(default_factory=dict)
-    bubble_values: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
+    bubble_values: list[float] = Field(default_factory=lambda: [0.0, 0.4, 0.8, 1.2], min_length=4, max_length=4)
     is_enabled: bool = False
     notes: str | None = None
 

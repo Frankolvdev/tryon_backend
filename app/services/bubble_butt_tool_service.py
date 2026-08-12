@@ -31,16 +31,27 @@ class BubbleButtToolService:
 
     @staticmethod
     def _validate_values(values: list[float] | None) -> list[float]:
-        raw = list(values or [0.0, 0.0, 0.0])
-        if len(raw) != 3:
-            raise ValueError("Bubble Butt requires exactly three global values.")
+        default_values = [0.0, 0.4, 0.8, 1.2]
+        raw = list(values or default_values)
+
+        # Backward compatibility with the first Bubble Butt version, which had
+        # only three variants. Preserve custom legacy values by prepending the
+        # new neutral variant; upgrade untouched [0,0,0] to the new defaults.
+        if len(raw) == 3:
+            legacy = [float(v) for v in raw]
+            if legacy == [0.0, 0.0, 0.0]:
+                return default_values
+            return [0.0, *legacy]
+
+        if len(raw) != 4:
+            raise ValueError("Bubble Butt requires exactly four global values.")
         return [float(v) for v in raw]
 
     def default_config(self, sex: str) -> dict[str, Any]:
         sex = self._validate_sex(sex)
         return {
             "id": None, "sex": sex, "workflow": None, "input_mapping": {},
-            "bubble_values": [0.0, 0.0, 0.0], "is_enabled": False,
+            "bubble_values": [0.0, 0.4, 0.8, 1.2], "is_enabled": False,
             "notes": None, "created_at": None, "updated_at": None,
         }
 
@@ -123,7 +134,7 @@ class BubbleButtToolService:
         bubble_config = self.get_config(db, sex)
         fat_order, ass_order, _ = body_proportion_tool_service._formula_orders(body_config["formula"])
         bubble_values = self._validate_values(bubble_config["bubble_values"])
-        expected = {(fat, ass, variant) for fat in fat_order for ass in ass_order for variant in (1, 2, 3)}
+        expected = {(fat, ass, variant) for fat in fat_order for ass in ass_order for variant in (1, 2, 3, 4)}
 
         existing_rows = db.execute(select(BubbleButtPreset).where(BubbleButtPreset.sex == sex)).scalars().all()
         removed = 0
@@ -140,7 +151,7 @@ class BubbleButtToolService:
                 base = self._grid_values(body_config, fat_band, ass_band)
                 fat_label = formula["fat_levels"][fat_band]["label"]
                 ass_label = formula["ass_levels"][ass_band]["label"]
-                for variant in (1, 2, 3):
+                for variant in (1, 2, 3, 4):
                     bubble_value = bubble_values[variant - 1]
                     name = f"{fat_label} - {ass_label} - Bubble Butt {variant}"
                     key = f"BB:{fat_band}:{ass_band}:{variant}"
@@ -280,7 +291,7 @@ class BubbleButtToolService:
                 db.delete(cfg)
                 deleted_config = True
             else:
-                cfg.bubble_values_json = [0.0, 0.0, 0.0]
+                cfg.bubble_values_json = [0.0, 0.4, 0.8, 1.2]
                 cfg.notes = None
                 db.add(cfg)
             db.commit()
@@ -317,6 +328,26 @@ class BubbleButtToolService:
 
     def generate(self, db: Session, preset_id: int):
         row = self.get_preset(db, preset_id)
+
+        # Single-execution guard for the local ComfyUI Body Proportions tool.
+        # UI disabling is not enough: this also blocks double-clicks, another
+        # browser tab or a direct API request while a generation is active.
+        active_bubble = db.execute(
+            select(BubbleButtPreset.id).where(
+                BubbleButtPreset.sex == row.sex,
+                BubbleButtPreset.status == "generating",
+                BubbleButtPreset.id != row.id,
+            ).limit(1)
+        ).scalar_one_or_none()
+        active_body = db.execute(
+            select(BodyProportionPreset.id).where(
+                BodyProportionPreset.sex == row.sex,
+                BodyProportionPreset.status == "generating",
+            ).limit(1)
+        ).scalar_one_or_none()
+        if row.status == "generating" or active_bubble is not None or active_body is not None:
+            raise ValueError("No es posible ejecutar dos generaciones de Body Proportions/Bubble Butt al mismo tiempo.")
+
         readiness = self.readiness(db, row.sex)
         if not readiness["complete"]:
             raise ValueError(
