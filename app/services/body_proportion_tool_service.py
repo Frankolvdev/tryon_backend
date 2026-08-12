@@ -1274,7 +1274,14 @@ class BodyProportionToolService:
 
     def response(self, db: Session, row: BodyProportionPreset) -> dict:
         image_url = None
-        stored = self.preview_storage_file(db, row)
+        # BackOffice Body Proportions preview follows this tool's generation storage.
+        # AppWeb/Create Model IA uses active_preview_source independently.
+        config = self.get_config(db, row.sex)
+        stored = self.preview_storage_file(db, row, source=config["storage_mode"])
+        if stored is None and row.image_storage_file_id:
+            # Backward-compatible fallback for legacy rows or a just-generated preview
+            # that has not yet been copied to another provider.
+            stored = db.get(StorageFile, row.image_storage_file_id)
         if stored:
             image_url = storage_service.create_presigned_url(db, storage_file=stored)
         return {
