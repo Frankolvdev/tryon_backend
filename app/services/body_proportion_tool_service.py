@@ -1274,16 +1274,27 @@ class BodyProportionToolService:
 
     def response(self, db: Session, row: BodyProportionPreset) -> dict:
         image_url = None
-        # BackOffice Body Proportions preview follows this tool's generation storage.
-        # AppWeb/Create Model IA uses active_preview_source independently.
+        selected_storage_file_id = None
+
+        # BackOffice Body Proportions MUST follow this tool's generation storage.
+        # AppWeb/Create Model IA continues to use active_preview_source independently.
         config = self.get_config(db, row.sex)
-        stored = self.preview_storage_file(db, row, source=config["storage_mode"])
+        selected_source = config["storage_mode"]
+        selected_provider = self._resolved_storage_provider(db, selected_source)
+
+        stored = self.preview_storage_file(db, row, source=selected_source)
+
+        # Legacy-safe fallback is allowed ONLY when the legacy file belongs to the
+        # exact provider selected for generation. Never leak another provider here.
         if stored is None and row.image_storage_file_id:
-            # Backward-compatible fallback for legacy rows or a just-generated preview
-            # that has not yet been copied to another provider.
-            stored = db.get(StorageFile, row.image_storage_file_id)
-        if stored:
+            legacy = db.get(StorageFile, row.image_storage_file_id)
+            if legacy and storage_service.provider_for_file(legacy) == selected_provider:
+                stored = legacy
+
+        if stored and storage_service.provider_for_file(stored) == selected_provider:
+            selected_storage_file_id = stored.id
             image_url = storage_service.create_presigned_url(db, storage_file=stored)
+
         return {
             "id": row.id, "sex": row.sex, "sort_order": row.sort_order, "profile_key": row.profile_key,
             "display_name": row.display_name, "category_slug": row.category_slug,
@@ -1291,7 +1302,7 @@ class BodyProportionToolService:
             "is_base_category": bool(row.is_base_category), "base_category_key": row.base_category_key,
             "hips_size": row.hips_size, "fat_thin": row.fat_thin, "breasts_size": row.breasts_size,
             "skin_tone": row.skin_tone, "hair_length": row.hair_length,
-            "image_storage_file_id": row.image_storage_file_id, "image_url": image_url,
+            "image_storage_file_id": selected_storage_file_id, "image_url": image_url,
             "local_mirror_path": row.local_mirror_path, "status": row.status, "last_error": row.last_error,
             "generation_metadata": row.generation_metadata_json or {}, "generated_at": row.generated_at,
             "created_at": row.created_at, "updated_at": row.updated_at,
