@@ -13,8 +13,11 @@ from app.schemas.body_proportion_tool import (
     BodyProportionRecalculateRequest, BodyProportionRecalculateResponse,
     BodyProportionSeedResponse, BodyProportionStorageOptionsResponse, BodyProportionResetResponse,
     BodyProportionWorkflowConfigResponse, BodyProportionWorkflowConfigUpsert,
+    BubbleButtWorkflowConfigResponse, BubbleButtWorkflowConfigUpsert,
+    BubbleButtPresetListResponse, BubbleButtGenerationResponse,
 )
 from app.services.body_proportion_tool_service import body_proportion_tool_service
+from app.services.bubble_butt_tool_service import bubble_butt_tool_service
 from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
 
 router = APIRouter(prefix="/tools-generation/body-proportions")
@@ -118,6 +121,68 @@ def import_library_zip(
     except Exception as error:
         _bad_request(error)
 
+
+
+@router.get("/bubble-butt/config/{sex}", response_model=BubbleButtWorkflowConfigResponse)
+def bubble_config(sex: str, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    try:
+        return bubble_butt_tool_service.get_config(db, sex)
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.put("/bubble-butt/config/{sex}", response_model=BubbleButtWorkflowConfigResponse)
+def put_bubble_config(
+    data: BubbleButtWorkflowConfigUpsert,
+    sex: str,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    try:
+        return bubble_butt_tool_service.upsert_config(db, sex, data)
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.get("/bubble-butt/readiness/{sex}")
+def bubble_readiness(sex: str, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    try:
+        return bubble_butt_tool_service.readiness(db, sex)
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.post("/bubble-butt/sync/{sex}")
+def bubble_sync(sex: str, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    try:
+        return bubble_butt_tool_service.sync_matrix(db, sex)
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.get("/bubble-butt/presets/{sex}", response_model=BubbleButtPresetListResponse)
+def bubble_presets(sex: str, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    try:
+        rows = bubble_butt_tool_service.list_presets(db, sex)
+        return {
+            "items": [bubble_butt_tool_service.response(db, row) for row in rows],
+            "total": len(rows),
+            "readiness": bubble_butt_tool_service.readiness(db, sex),
+        }
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.post("/bubble-butt/presets/{preset_id}/generate", response_model=BubbleButtGenerationResponse)
+def bubble_generate(preset_id: int, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    try:
+        row, prompt_id, provider, overwritten = bubble_butt_tool_service.generate(db, preset_id)
+        return {
+            "preset": bubble_butt_tool_service.response(db, row),
+            "prompt_id": prompt_id, "storage_provider": provider, "overwritten": overwritten,
+        }
+    except Exception as error:
+        _bad_request(error)
 
 @router.get("/config/{sex}", response_model=BodyProportionWorkflowConfigResponse)
 def get_config(sex: str, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):

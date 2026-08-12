@@ -196,6 +196,7 @@ class BodyProportionToolService:
             for key, value in payload.items():
                 setattr(row, key, value)
         db.commit(); db.refresh(row)
+        self.write_configuration_manifest(db, sex)
         return self.get_config(db, sex)
 
     @staticmethod
@@ -319,7 +320,15 @@ class BodyProportionToolService:
                     db.commit()
                     created += 1
                     order += 100.0
-        return {"created": created, "existing": existing, "removed": removed, "total_base": len(expected)}
+        result = {"created": created, "existing": existing, "removed": removed, "total_base": len(expected)}
+        try:
+            from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+            bubble_butt_tool_service.sync_matrix(db, sex)
+        except Exception:
+            # Bubble Butt is a dependent stage. Body matrix synchronization must remain
+            # authoritative and must never be rolled back by an optional second stage.
+            pass
+        return result
 
     def ensure_defaults(self, db: Session, sex: str) -> None:
         sex = self._validate_sex(sex)
@@ -541,12 +550,22 @@ class BodyProportionToolService:
         if mirror_removed:
             import shutil
             shutil.rmtree(root, ignore_errors=True)
+        bubble_reset = {"deleted_presets": 0, "deleted_config": False}
+        try:
+            from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+            bubble_reset = bubble_butt_tool_service.reset(
+                db, sex, delete_workflow_mappings=delete_workflow_mappings
+            )
+        except Exception:
+            db.rollback()
         return {
             "sex": sex,
             "deleted_presets": len(rows),
             "deleted_storage_files": deleted_storage,
             "deleted_config": deleted_config,
             "mirror_removed": mirror_removed,
+            "bubble_butt_deleted_presets": bubble_reset["deleted_presets"],
+            "bubble_butt_deleted_config": bubble_reset["deleted_config"],
         }
 
     @staticmethod
@@ -813,15 +832,23 @@ class BodyProportionToolService:
                     "reason": str(error),
                 })
 
+        from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+        bubble = bubble_butt_tool_service.verify_source(db, sex, source)
+        bubble_missing = [
+            {"stage": "bubble_butt", **item} for item in bubble["missing"]
+        ]
+        total_required = len(rows) + int(bubble["required"])
+        total_verified = checked + int(bubble["verified"])
+        all_missing = missing + bubble_missing
         return {
             "sex": sex,
             "source": source,
             "provider": provider,
-            "required": len(rows),
-            "verified": checked,
-            "missing_count": len(missing),
-            "complete": len(rows) > 0 and not missing,
-            "missing": missing,
+            "required": total_required,
+            "verified": total_verified,
+            "missing_count": len(all_missing),
+            "complete": total_required > 0 and not all_missing,
+            "missing": all_missing,
         }
 
     def library_status(self, db: Session, sex: str) -> dict[str, Any]:
@@ -835,11 +862,24 @@ class BodyProportionToolService:
                 stored = self.preview_storage_file(db, preset, source=source)
                 if stored and storage_service.provider_for_file(stored) == provider:
                     available += 1
+            from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+            bubble_rows = bubble_butt_tool_service.ready_rows(db, sex)
+            bubble_available = sum(
+                1 for bubble_row in bubble_rows
+                if (
+                    (bubble_file := bubble_butt_tool_service.preview_storage_file(db, bubble_row, source=source))
+                    and storage_service.provider_for_file(bubble_file) == provider
+                )
+            )
+            total_required = len(rows) + len(bubble_rows)
+            total_available = available + bubble_available
             sources[source] = {
                 "provider": provider,
-                "available": available,
-                "required": len(rows),
-                "complete_by_records": len(rows) > 0 and available == len(rows),
+                "available": total_available,
+                "required": total_required,
+                "complete_by_records": total_required > 0 and total_available == total_required,
+                "body_available": available,
+                "bubble_butt_available": bubble_available,
             }
 
         active_source = self.active_preview_source(db, sex)
@@ -909,6 +949,19 @@ class BodyProportionToolService:
                     "error": str(error),
                 })
 
+        from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+        bubble_copy = bubble_butt_tool_service.copy_ready(db, sex, source, target)
+
+        # The configuration travels with every provider-to-provider transfer.
+        manifest = self.configuration_manifest(db, sex)
+        manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+        self._save_selected(
+            db, mode=target, content=manifest_bytes, filename="configuration.json",
+            content_type="application/json",
+            folder=f"body-proportion-library/proportions_{sex}",
+        )
+        self.write_configuration_manifest(db, sex)
+
         verification = self.verify_preview_source(db, sex, target)
         return {
             "sex": sex,
@@ -916,9 +969,11 @@ class BodyProportionToolService:
             "source_provider": source_provider,
             "target": target,
             "target_provider": target_provider,
-            "copied": copied,
-            "skipped_existing": skipped_existing,
+            "copied": copied + bubble_copy["copied"],
+            "skipped_existing": skipped_existing + bubble_copy["skipped"],
             "failed": failed,
+            "bubble_butt_failed": bubble_copy["failed"],
+            "configuration_copied": True,
             "verification": verification,
         }
 
@@ -969,6 +1024,11 @@ class BodyProportionToolService:
 
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            manifest = self.configuration_manifest(db, sex)
+            archive.writestr(
+                f"proportions_{sex}/configuration.json",
+                json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
             for preset in self._required_library_rows(db, sex):
                 stored = self.preview_storage_file(db, preset, source=source)
                 if not stored:
@@ -1005,6 +1065,8 @@ class BodyProportionToolService:
                     f"{folder}/values.txt",
                     "\n".join(f"{key}={value}" for key, value in metadata.items()).encode("utf-8"),
                 )
+            from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+            bubble_butt_tool_service.add_to_zip(archive, db, sex, source)
         return buffer.getvalue()
 
     @staticmethod
@@ -1046,9 +1108,22 @@ class BodyProportionToolService:
                 raise ValueError("ZIP uncompressed content exceeds 2 GB.")
 
             safe_paths = {info.filename: self._safe_zip_path(info.filename) for info in files}
+            configuration_files = [
+                info for info in files
+                if safe_paths[info.filename].name.lower() == "configuration.json"
+                and any(part in {"proportions_woman", "proportions_man"} for part in safe_paths[info.filename].parts)
+            ]
+            for config_info in configuration_files:
+                manifest = json.loads(archive.read(config_info).decode("utf-8"))
+                self._apply_configuration_manifest(db, manifest, target=target)
+                manifest_sex = str(manifest.get("sex") or "").strip().lower()
+                if manifest_sex in self.SEXES:
+                    sexes.add(manifest_sex)
+
             metadata_files = [
                 info for info in files
                 if safe_paths[info.filename].name.lower() == "values.json"
+                and "bubble_butt" not in safe_paths[info.filename].parts
             ]
             if not metadata_files:
                 raise ValueError("ZIP has no Body Proportions values.json files.")
@@ -1170,6 +1245,27 @@ class BodyProportionToolService:
                     db.rollback()
                     errors.append({"path": metadata_info.filename, "error": str(error)})
 
+            from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+            bubble_result = bubble_butt_tool_service.import_from_archive(
+                archive, files, safe_paths, target
+            )
+            imported += bubble_result["imported"]
+            created += bubble_result["created"]
+            updated += bubble_result["updated"]
+            errors.extend(bubble_result["errors"])
+            sexes.update(
+                str(json.loads(archive.read(info)).get("sex"))
+                for info in metadata_files
+                if safe_paths[info.filename].name.lower() == "values.json"
+            )
+
+        for imported_sex in list(sexes):
+            if imported_sex in self.SEXES:
+                self.seed_defaults(db, imported_sex)
+                from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+                bubble_butt_tool_service.sync_matrix(db, imported_sex)
+                self.write_configuration_manifest(db, imported_sex)
+
         verifications = {}
         for imported_sex in sexes:
             verifications[imported_sex] = self.verify_preview_source(db, imported_sex, target)
@@ -1184,6 +1280,92 @@ class BodyProportionToolService:
             "errors": errors,
             "verifications": verifications,
         }
+
+
+
+    def configuration_manifest(self, db: Session, sex: str) -> dict[str, Any]:
+        from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+        body = self.get_config(db, sex)
+        bubble = bubble_butt_tool_service.get_config(db, sex)
+        return {
+            "format_version": 1,
+            "tool": "body_proportions",
+            "sex": sex,
+            "body": {
+                "workflow": body["workflow"],
+                "input_mapping": body["input_mapping"],
+                "limits": body["limits"],
+                "formula": body["formula"],
+                "fixed_values": body["fixed_values"],
+                "is_enabled": body["is_enabled"],
+                "notes": body["notes"],
+                "source_storage_mode": body["storage_mode"],
+                "source_active_preview_source": body["active_preview_source"],
+            },
+            "bubble_butt": {
+                "workflow": bubble["workflow"],
+                "input_mapping": bubble["input_mapping"],
+                "bubble_values": bubble["bubble_values"],
+                "is_enabled": bubble["is_enabled"],
+                "notes": bubble["notes"],
+            },
+        }
+
+    def write_configuration_manifest(self, db: Session, sex: str) -> str:
+        manifest = self.configuration_manifest(db, sex)
+        root = Path(str(getattr(settings, "LOCAL_STORAGE_DIR", "storage"))) / "body-proportions-library" / f"proportions_{sex}"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "configuration.json"
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(path)
+
+    def _apply_configuration_manifest(self, db: Session, manifest: dict[str, Any], *, target: str) -> None:
+        from app.models.body_proportion_tool import BubbleButtWorkflowConfig
+        sex = self._validate_sex(str(manifest.get("sex") or ""))
+        body = manifest.get("body") or {}
+        if body:
+            row = db.execute(select(BodyProportionWorkflowConfig).where(BodyProportionWorkflowConfig.sex == sex)).scalar_one_or_none()
+            limits = self._normalize_limits(body.get("limits") or DEFAULT_LIMITS)
+            formula = self._validate_formula(body.get("formula") or DEFAULT_FORMULA, limits)
+            payload = {
+                "workflow_json": body.get("workflow"),
+                "input_mapping_json": body.get("input_mapping") or {},
+                "limits_json": limits,
+                "formula_json": formula,
+                "fixed_values_json": self._deep_merge(DEFAULT_FIXED_VALUES, body.get("fixed_values") or {}),
+                "storage_mode": self._validate_storage_mode(target),
+                "is_enabled": bool(body.get("is_enabled", False)),
+                "notes": body.get("notes"),
+            }
+            if row is None:
+                row = BodyProportionWorkflowConfig(sex=sex, active_preview_source="auto", **payload)
+                db.add(row)
+            else:
+                for key, value in payload.items():
+                    setattr(row, key, value)
+                db.add(row)
+            db.commit()
+
+        bubble = manifest.get("bubble_butt") or {}
+        if bubble:
+            row = db.execute(select(BubbleButtWorkflowConfig).where(BubbleButtWorkflowConfig.sex == sex)).scalar_one_or_none()
+            payload = {
+                "workflow_json": bubble.get("workflow"),
+                "input_mapping_json": bubble.get("input_mapping") or {},
+                "bubble_values_json": [float(x) for x in (bubble.get("bubble_values") or [0.0,0.0,0.0])][:3],
+                "is_enabled": bool(bubble.get("is_enabled", False)),
+                "notes": bubble.get("notes"),
+            }
+            if len(payload["bubble_values_json"]) != 3:
+                raise ValueError("Imported Bubble Butt configuration requires exactly three values.")
+            if row is None:
+                row = BubbleButtWorkflowConfig(sex=sex, **payload)
+                db.add(row)
+            else:
+                for key, value in payload.items():
+                    setattr(row, key, value)
+                db.add(row)
+            db.commit()
 
 
     @staticmethod

@@ -243,3 +243,63 @@ class BodyProportionGenerationResponse(BaseModel):
 class BodyProportionHealthResponse(BaseModel):
     local_only: bool = True
     comfyui: dict[str, Any]
+
+
+class BubbleButtWorkflowConfigUpsert(BaseModel):
+    workflow: dict[str, Any] | None = None
+    input_mapping: dict[str, dict[str, str]] = Field(default_factory=dict)
+    bubble_values: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
+    is_enabled: bool = False
+    notes: str | None = None
+
+
+class BubbleButtWorkflowConfigResponse(BaseModel):
+    id: int | None = None
+    sex: SexName
+    workflow: dict[str, Any] | None = None
+    input_mapping: dict[str, dict[str, str]]
+    bubble_values: list[float]
+    is_enabled: bool
+    notes: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class BubbleButtPresetResponse(BaseModel):
+    id: int
+    sex: SexName
+    sort_order: float
+    profile_key: str
+    display_name: str
+    category_slug: str
+    fat_band: str
+    ass_band: str
+    variant_index: int
+    hips_size: float
+    fat_thin: float
+    breasts_size: float
+    bubble_butt: float
+    skin_tone: float
+    hair_length: float
+    image_storage_file_id: int | None
+    image_url: str | None = None
+    local_mirror_path: str | None
+    status: str
+    last_error: str | None
+    generation_metadata: dict[str, Any]
+    generated_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BubbleButtPresetListResponse(BaseModel):
+    items: list[BubbleButtPresetResponse]
+    total: int
+    readiness: dict[str, Any]
+
+
+class BubbleButtGenerationResponse(BaseModel):
+    preset: BubbleButtPresetResponse
+    prompt_id: str
+    storage_provider: str
+    overwritten: bool
