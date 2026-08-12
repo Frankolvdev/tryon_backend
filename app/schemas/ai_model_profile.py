@@ -23,6 +23,17 @@ class BodyVariantCatalogResponse(BaseModel):
     items: list[BodyVariantResponse]
     total: int
 
+class BubbleButtVariantResponse(BaseModel):
+    id: int
+    variant_index: int
+    display_name: str
+    bubble_butt: float
+    image_url: str
+
+class BubbleButtVariantCatalogResponse(BaseModel):
+    items: list[BubbleButtVariantResponse]
+    total: int
+
 class AiModelProfileCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     sex: SexName = "woman"

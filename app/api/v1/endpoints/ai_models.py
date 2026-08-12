@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
 from app.api.v1.guards.auth_guard import auth_guard
 from app.models.user import User
-from app.schemas.ai_model_profile import AiModelProfileBodyUpdate, AiModelProfileCreate, AiModelProfileResponse, BodyVariantCatalogResponse
+from app.schemas.ai_model_profile import AiModelProfileBodyUpdate, AiModelProfileCreate, AiModelProfileResponse, BodyVariantCatalogResponse, BubbleButtVariantCatalogResponse
 from app.services.ai_model_profile_service import ai_model_profile_service
 
 router = APIRouter()
@@ -18,6 +18,18 @@ def body_variants(sex: str = "woman", db: Session = Depends(get_db), current_use
         items = ai_model_profile_service.catalog(db, sex)
         return {"items": items, "total": len(items)}
     except Exception as error: _fail(error)
+
+@router.get("/body-variants/{preset_id}/bubble-butt", response_model=BubbleButtVariantCatalogResponse)
+def body_bubble_variants(
+    preset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(auth_guard),
+):
+    try:
+        items = ai_model_profile_service.bubble_variants_for_body(db, preset_id)
+        return {"items": items, "total": len(items)}
+    except Exception as error:
+        _fail(error)
 
 @router.get("/", response_model=list[AiModelProfileResponse])
 def list_models(db: Session = Depends(get_db), current_user: User = Depends(auth_guard)):

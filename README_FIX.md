@@ -1,24 +1,17 @@
-# Fix — false concurrent generation lock
+# Models — vinculación visual con Bubble Butt
 
 Base exacta:
-tryon_backend-main - 2026-08-11T232506.110.zip
+tryon_backend-main - 2026-08-12T095524.287.zip
 
-Problem:
-The previous guard considered any DB row with status=`generating` to be an
-active execution. A crashed/restarted request could leave that state forever,
-causing every future generation to return:
-"No es posible ejecutar dos generaciones..."
+Cambio aislado:
+- Añade endpoint de SOLO LECTURA:
+  GET /api/v1/ai-models/body-variants/{preset_id}/bubble-butt
+- Obtiene BubbleButtPreset ready que coincidan con:
+  sex + fat_band + ass/hips_band del BodyProportionPreset visible.
+- Devuelve únicamente las variantes Bubble Butt disponibles y su image_url.
+- La imagen se resuelve con `active_preview_source`, igual que Models/AppWeb.
+- No cambia generación, configuración, biblioteca, storage, perfiles ni DB.
+- No hay migración.
+- No modifica qué guarda actualmente "Usar este cuerpo".
 
-Fix:
-- Shared non-blocking in-process lock remains active across Body Proportions
-  and Bubble Butt.
-- DB `generating` flags are reconciled with ComfyUI `/queue`.
-- If ComfyUI has queue_running or queue_pending -> the second generation is blocked.
-- If ComfyUI queue is empty -> orphaned `generating` rows are automatically
-  recovered to `error`, then the requested generation is allowed to continue.
-- If ComfyUI queue lookup itself fails, stale DB state is released; the actual
-  queue_prompt call then reports the real ComfyUI connectivity error.
-- No UI, formulas, Bubble values, workflows, mappings, storage or library logic changed.
-
-No migration required.
-Python AST validation: OK.
+Validación Python AST: OK.

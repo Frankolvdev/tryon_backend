@@ -2,10 +2,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.ai_model_profile import AiModelProfile
-from app.models.body_proportion_tool import BodyProportionPreset
+from app.models.body_proportion_tool import BodyProportionPreset, BubbleButtPreset
 from app.models.storage_file import StorageFile
 from app.services.storage_service import storage_service
 from app.services.body_proportion_tool_service import body_proportion_tool_service
+from app.services.bubble_butt_tool_service import bubble_butt_tool_service
 
 
 class AiModelProfileService:
@@ -34,6 +35,36 @@ class AiModelProfileService:
                 "fat_band": row.fat_band, "hips_band": row.ass_band, "breast_band": row.breast_band,
                 "image_url": image_url, "sort_order": row.sort_order,
             })
+        return result
+
+    def bubble_variants_for_body(self, db: Session, preset_id: int) -> list[dict]:
+        body = db.get(BodyProportionPreset, preset_id)
+        if not body or body.status != "ready":
+            raise LookupError("Body variant not found.")
+        if not body.fat_band or not body.ass_band:
+            return []
+
+        rows = list(db.execute(select(BubbleButtPreset).where(
+            BubbleButtPreset.sex == body.sex,
+            BubbleButtPreset.fat_band == body.fat_band,
+            BubbleButtPreset.ass_band == body.ass_band,
+            BubbleButtPreset.status == "ready",
+        ).order_by(BubbleButtPreset.variant_index.asc(), BubbleButtPreset.id.asc())).scalars().all())
+
+        result = []
+        for row in rows:
+            stored = bubble_butt_tool_service.preview_storage_file(db, row)
+            if not stored:
+                continue
+            image_url = storage_service.create_presigned_url(db, storage_file=stored)
+            if image_url:
+                result.append({
+                    "id": row.id,
+                    "variant_index": row.variant_index,
+                    "display_name": row.display_name,
+                    "bubble_butt": row.bubble_butt,
+                    "image_url": image_url,
+                })
         return result
 
     def list_models(self, db: Session, user_id: int) -> list[AiModelProfile]:
