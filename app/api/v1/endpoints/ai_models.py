@@ -47,5 +47,16 @@ def get_model(model_id: int, db: Session = Depends(get_db), current_user: User =
 
 @router.put("/{model_id}/body", response_model=AiModelProfileResponse)
 def set_body(model_id: int, data: AiModelProfileBodyUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_guard)):
-    try: return ai_model_profile_service.response(db, ai_model_profile_service.set_body(db, current_user.id, model_id, data.body_proportion_preset_id))
-    except Exception as error: _fail(error)
+    try:
+        return ai_model_profile_service.response(
+            db,
+            ai_model_profile_service.set_body(
+                db,
+                current_user.id,
+                model_id,
+                data.body_proportion_preset_id,
+                data.bubble_butt_preset_id,
+            ),
+        )
+    except Exception as error:
+        _fail(error)

@@ -17,6 +17,9 @@ class AiModelProfile(Base):
     body_proportion_preset_id: Mapped[int | None] = mapped_column(
         ForeignKey("body_proportion_presets.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    bubble_butt_preset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("bubble_butt_presets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     stage: Mapped[str] = mapped_column(String(32), nullable=False, default="body", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)

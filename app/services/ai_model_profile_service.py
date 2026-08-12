@@ -82,20 +82,43 @@ class AiModelProfileService:
         row = AiModelProfile(user_id=user_id, name=name.strip(), sex=sex, stage="body")
         db.add(row); db.commit(); db.refresh(row); return row
 
-    def set_body(self, db: Session, user_id: int, model_id: int, preset_id: int) -> AiModelProfile:
+    def set_body(
+        self,
+        db: Session,
+        user_id: int,
+        model_id: int,
+        preset_id: int,
+        bubble_butt_preset_id: int,
+    ) -> AiModelProfile:
         row = self.get(db, user_id, model_id)
         preset = db.get(BodyProportionPreset, preset_id)
         if not preset or preset.sex != row.sex or preset.status != "ready" or not self._image_url(db, preset):
             raise ValueError("The selected body variant is not available from the active preview source.")
+
+        bubble = db.get(BubbleButtPreset, bubble_butt_preset_id)
+        if (
+            not bubble
+            or bubble.sex != row.sex
+            or bubble.status != "ready"
+            or bubble.fat_band != preset.fat_band
+            or bubble.ass_band != preset.ass_band
+            or bubble_butt_tool_service.preview_storage_file(db, bubble) is None
+        ):
+            raise ValueError("The selected Butt Elevation does not belong to the selected body or is not available.")
+
         row.body_proportion_preset_id = preset.id
+        row.bubble_butt_preset_id = bubble.id
         row.stage = "body_selected"
         db.add(row); db.commit(); db.refresh(row); return row
 
     def response(self, db: Session, row: AiModelProfile) -> dict:
         preset = db.get(BodyProportionPreset, row.body_proportion_preset_id) if row.body_proportion_preset_id else None
+        bubble = db.get(BubbleButtPreset, row.bubble_butt_preset_id) if row.bubble_butt_preset_id else None
         return {
             "id": row.id, "name": row.name, "sex": row.sex,
             "body_proportion_preset_id": row.body_proportion_preset_id,
+            "bubble_butt_preset_id": row.bubble_butt_preset_id,
+            "bubble_butt_variant_index": bubble.variant_index if bubble else None,
             "body_image_url": self._image_url(db, preset), "stage": row.stage,
             "created_at": row.created_at, "updated_at": row.updated_at,
         }

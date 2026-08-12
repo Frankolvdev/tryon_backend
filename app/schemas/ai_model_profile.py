@@ -40,12 +40,15 @@ class AiModelProfileCreate(BaseModel):
 
 class AiModelProfileBodyUpdate(BaseModel):
     body_proportion_preset_id: int
+    bubble_butt_preset_id: int
 
 class AiModelProfileResponse(BaseModel):
     id: int
     name: str
     sex: SexName
     body_proportion_preset_id: int | None
+    bubble_butt_preset_id: int | None = None
+    bubble_butt_variant_index: int | None = None
     body_image_url: str | None = None
     stage: str
     created_at: datetime
