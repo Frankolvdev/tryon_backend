@@ -1,8 +1,11 @@
 import hashlib
 import json
 import re
+import io
+import mimetypes
+import zipfile
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 from typing import Any
 
@@ -143,6 +146,7 @@ class BodyProportionToolService:
             "formula": deepcopy(DEFAULT_FORMULA),
             "fixed_values": deepcopy(DEFAULT_FIXED_VALUES),
             "storage_mode": "auto",
+            "active_preview_source": "auto",
             "is_enabled": False,
             "notes": None,
             "created_at": None,
@@ -163,6 +167,7 @@ class BodyProportionToolService:
             "formula": self._normalize_formula(row.formula_json or {}),
             "fixed_values": self._deep_merge(DEFAULT_FIXED_VALUES, row.fixed_values_json),
             "storage_mode": self._validate_storage_mode(getattr(row, "storage_mode", "auto")),
+            "active_preview_source": self._validate_storage_mode(getattr(row, "active_preview_source", "auto")),
             "is_enabled": bool(row.is_enabled),
             "notes": row.notes,
             "created_at": row.created_at,
@@ -701,6 +706,486 @@ class BodyProportionToolService:
     def storage_options(self, db: Session) -> dict:
         return {"active_provider": storage_service.active_provider(db), "modes": ["auto", "local", "amazon_s3", "cloudflare_r2"]}
 
+
+    @staticmethod
+    def _portable_preview_name(stored: StorageFile) -> str:
+        content_type = str(stored.content_type or "").lower()
+        original = str(stored.original_filename or "").lower()
+        if "webp" in content_type or original.endswith(".webp"):
+            return "preview.webp"
+        if "jpeg" in content_type or original.endswith((".jpg", ".jpeg")):
+            return "preview.jpg"
+        return "preview.png"
+
+    def _preview_storage_map(self, db: Session, preset: BodyProportionPreset) -> dict[str, int]:
+        mapping: dict[str, int] = {}
+        for provider, raw_id in (getattr(preset, "preview_storage_json", {}) or {}).items():
+            try:
+                storage_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if db.get(StorageFile, storage_id):
+                mapping[str(provider)] = storage_id
+
+        # Backward compatibility: existing rows only know image_storage_file_id.
+        if preset.image_storage_file_id:
+            stored = db.get(StorageFile, preset.image_storage_file_id)
+            if stored:
+                mapping.setdefault(storage_service.provider_for_file(stored), stored.id)
+        return mapping
+
+    def _source_provider(self, db: Session, source: str) -> str:
+        source = self._validate_storage_mode(source)
+        return self._resolved_storage_provider(db, source)
+
+    def active_preview_source(self, db: Session, sex: str) -> str:
+        sex = self._validate_sex(sex)
+        row = db.execute(
+            select(BodyProportionWorkflowConfig).where(BodyProportionWorkflowConfig.sex == sex)
+        ).scalar_one_or_none()
+        return self._validate_storage_mode(getattr(row, "active_preview_source", "auto") if row else "auto")
+
+    def preview_storage_file(
+        self,
+        db: Session,
+        preset: BodyProportionPreset,
+        *,
+        source: str | None = None,
+    ) -> StorageFile | None:
+        selected_source = source or self.active_preview_source(db, preset.sex)
+        provider = self._source_provider(db, selected_source)
+        mapping = self._preview_storage_map(db, preset)
+        storage_id = mapping.get(provider)
+        if storage_id:
+            return db.get(StorageFile, storage_id)
+
+        # Legacy-safe fallback only when no multi-source map exists yet.
+        if not getattr(preset, "preview_storage_json", None) and preset.image_storage_file_id:
+            return db.get(StorageFile, preset.image_storage_file_id)
+        return None
+
+    def _persist_storage_copy(
+        self,
+        db: Session,
+        preset: BodyProportionPreset,
+        stored: StorageFile,
+    ) -> None:
+        mapping = self._preview_storage_map(db, preset)
+        mapping[storage_service.provider_for_file(stored)] = stored.id
+        preset.preview_storage_json = mapping
+        if not preset.image_storage_file_id:
+            preset.image_storage_file_id = stored.id
+        db.add(preset)
+        db.commit()
+        db.refresh(preset)
+
+    def _required_library_rows(self, db: Session, sex: str) -> list[BodyProportionPreset]:
+        return list(db.execute(
+            select(BodyProportionPreset).where(
+                BodyProportionPreset.sex == sex,
+                BodyProportionPreset.status == "ready",
+            ).order_by(BodyProportionPreset.sort_order.asc(), BodyProportionPreset.id.asc())
+        ).scalars().all())
+
+    def verify_preview_source(self, db: Session, sex: str, source: str) -> dict[str, Any]:
+        sex = self._validate_sex(sex)
+        provider = self._source_provider(db, source)
+        rows = self._required_library_rows(db, sex)
+
+        checked = 0
+        missing: list[dict[str, Any]] = []
+        for preset in rows:
+            stored = self.preview_storage_file(db, preset, source=source)
+            if not stored or storage_service.provider_for_file(stored) != provider:
+                missing.append({"preset_id": preset.id, "profile_key": preset.profile_key, "reason": "missing"})
+                continue
+            try:
+                # Explicit verification is allowed to read the object. This proves that the
+                # DB record is not stale and that credentials/path are actually usable.
+                content = storage_service.read_bytes(db, storage_file=stored)
+                if not content:
+                    raise ValueError("empty file")
+                checked += 1
+            except Exception as error:
+                missing.append({
+                    "preset_id": preset.id,
+                    "profile_key": preset.profile_key,
+                    "reason": str(error),
+                })
+
+        return {
+            "sex": sex,
+            "source": source,
+            "provider": provider,
+            "required": len(rows),
+            "verified": checked,
+            "missing_count": len(missing),
+            "complete": len(rows) > 0 and not missing,
+            "missing": missing,
+        }
+
+    def library_status(self, db: Session, sex: str) -> dict[str, Any]:
+        sex = self._validate_sex(sex)
+        rows = self._required_library_rows(db, sex)
+        sources = {}
+        for source in ("local", "cloudflare_r2", "amazon_s3"):
+            provider = self._source_provider(db, source)
+            available = 0
+            for preset in rows:
+                stored = self.preview_storage_file(db, preset, source=source)
+                if stored and storage_service.provider_for_file(stored) == provider:
+                    available += 1
+            sources[source] = {
+                "provider": provider,
+                "available": available,
+                "required": len(rows),
+                "complete_by_records": len(rows) > 0 and available == len(rows),
+            }
+
+        active_source = self.active_preview_source(db, sex)
+        return {
+            "sex": sex,
+            "active_source": active_source,
+            "active_provider": self._source_provider(db, active_source),
+            "required": len(rows),
+            "sources": sources,
+        }
+
+    def copy_preview_library(
+        self,
+        db: Session,
+        sex: str,
+        source: str,
+        target: str,
+    ) -> dict[str, Any]:
+        sex = self._validate_sex(sex)
+        source_provider = self._source_provider(db, source)
+        target_provider = self._source_provider(db, target)
+        if source_provider == target_provider:
+            raise ValueError("Source and target resolve to the same storage provider.")
+
+        rows = self._required_library_rows(db, sex)
+        copied = 0
+        skipped_existing = 0
+        failed: list[dict[str, Any]] = []
+
+        for preset in rows:
+            try:
+                source_file = self.preview_storage_file(db, preset, source=source)
+                if not source_file or storage_service.provider_for_file(source_file) != source_provider:
+                    raise ValueError("Source preview is not available.")
+
+                existing_target = self.preview_storage_file(db, preset, source=target)
+                if existing_target and storage_service.provider_for_file(existing_target) == target_provider:
+                    try:
+                        if storage_service.read_bytes(db, storage_file=existing_target):
+                            skipped_existing += 1
+                            continue
+                    except Exception:
+                        pass
+
+                content = storage_service.read_bytes(db, storage_file=source_file)
+                content_type = source_file.content_type or "image/png"
+                folder = "/".join([
+                    "body-proportion-library",
+                    f"proportions_{preset.sex}",
+                    *self._category_parts(preset),
+                ])
+                stored = self._save_selected(
+                    db,
+                    mode=target,
+                    content=content,
+                    filename=self._portable_preview_name(source_file),
+                    content_type=content_type,
+                    folder=folder,
+                )
+                self._persist_storage_copy(db, preset, stored)
+                copied += 1
+            except Exception as error:
+                db.rollback()
+                failed.append({
+                    "preset_id": preset.id,
+                    "profile_key": preset.profile_key,
+                    "error": str(error),
+                })
+
+        verification = self.verify_preview_source(db, sex, target)
+        return {
+            "sex": sex,
+            "source": source,
+            "source_provider": source_provider,
+            "target": target,
+            "target_provider": target_provider,
+            "copied": copied,
+            "skipped_existing": skipped_existing,
+            "failed": failed,
+            "verification": verification,
+        }
+
+    def activate_preview_source(self, db: Session, sex: str, source: str) -> dict[str, Any]:
+        sex = self._validate_sex(sex)
+        source = self._validate_storage_mode(source)
+        verification = self.verify_preview_source(db, sex, source)
+        if not verification["complete"]:
+            raise ValueError(
+                f"Cannot activate {source}: {verification['missing_count']} required previews are missing or unreadable."
+            )
+
+        row = db.execute(
+            select(BodyProportionWorkflowConfig).where(BodyProportionWorkflowConfig.sex == sex)
+        ).scalar_one_or_none()
+        if row is None:
+            row = BodyProportionWorkflowConfig(
+                sex=sex,
+                workflow_json=None,
+                input_mapping_json={},
+                limits_json=deepcopy(DEFAULT_LIMITS),
+                formula_json=deepcopy(DEFAULT_FORMULA),
+                fixed_values_json=deepcopy(DEFAULT_FIXED_VALUES),
+                storage_mode="auto",
+                active_preview_source=source,
+                is_enabled=False,
+            )
+            db.add(row)
+        else:
+            row.active_preview_source = source
+            db.add(row)
+        db.commit()
+        db.refresh(row)
+        return {
+            "sex": sex,
+            "active_source": source,
+            "active_provider": self._source_provider(db, source),
+            "verification": verification,
+        }
+
+    def build_portable_zip(self, db: Session, sex: str, source: str) -> bytes:
+        sex = self._validate_sex(sex)
+        verification = self.verify_preview_source(db, sex, source)
+        if not verification["complete"]:
+            raise ValueError(
+                f"ZIP export requires a complete source. Missing: {verification['missing_count']}."
+            )
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for preset in self._required_library_rows(db, sex):
+                stored = self.preview_storage_file(db, preset, source=source)
+                if not stored:
+                    continue
+                content = storage_service.read_bytes(db, storage_file=stored)
+                folder = "/".join([
+                    f"proportions_{preset.sex}",
+                    *self._category_parts(preset),
+                ])
+                metadata = {
+                    "format_version": 2,
+                    "profile_key": preset.profile_key,
+                    "display_name": preset.display_name,
+                    "category_slug": preset.category_slug,
+                    "sex": preset.sex,
+                    "sort_order": preset.sort_order,
+                    "fat_band": preset.fat_band,
+                    "ass_band": preset.ass_band,
+                    "breast_band": preset.breast_band,
+                    "is_base_category": bool(preset.is_base_category),
+                    "base_category_key": preset.base_category_key,
+                    "hips_size": preset.hips_size,
+                    "fat_thin": preset.fat_thin,
+                    "breasts_size": preset.breasts_size,
+                    "skin_tone": preset.skin_tone,
+                    "hair_length": preset.hair_length,
+                }
+                archive.writestr(f"{folder}/{self._portable_preview_name(stored)}", content)
+                archive.writestr(
+                    f"{folder}/values.json",
+                    json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"),
+                )
+                archive.writestr(
+                    f"{folder}/values.txt",
+                    "\n".join(f"{key}={value}" for key, value in metadata.items()).encode("utf-8"),
+                )
+        return buffer.getvalue()
+
+    @staticmethod
+    def _safe_zip_path(filename: str) -> PurePosixPath:
+        normalized = str(filename or "").replace("\\", "/").lstrip("/")
+        path = PurePosixPath(normalized)
+        if not normalized or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError(f"Unsafe ZIP path: {filename}")
+        return path
+
+    @staticmethod
+    def _portable_sex_root(path: PurePosixPath) -> tuple[str, int]:
+        for index, part in enumerate(path.parts):
+            if part == "proportions_woman":
+                return "woman", index
+            if part == "proportions_man":
+                return "man", index
+        raise ValueError("Path is outside proportions_woman/proportions_man.")
+
+    def import_portable_zip(self, db: Session, file_obj, target: str) -> dict[str, Any]:
+        target = self._validate_storage_mode(target)
+        imported = 0
+        created = 0
+        updated = 0
+        skipped = 0
+        sexes: set[str] = set()
+        errors: list[dict[str, str]] = []
+
+        try:
+            archive = zipfile.ZipFile(file_obj)
+        except zipfile.BadZipFile as error:
+            raise ValueError("The imported file is not a valid ZIP.") from error
+
+        with archive:
+            files = [info for info in archive.infolist() if not info.is_dir()]
+            if len(files) > 10000:
+                raise ValueError("ZIP contains more than 10,000 files.")
+            if sum(max(0, int(info.file_size)) for info in files) > 2 * 1024 * 1024 * 1024:
+                raise ValueError("ZIP uncompressed content exceeds 2 GB.")
+
+            safe_paths = {info.filename: self._safe_zip_path(info.filename) for info in files}
+            metadata_files = [
+                info for info in files
+                if safe_paths[info.filename].name.lower() == "values.json"
+            ]
+            if not metadata_files:
+                raise ValueError("ZIP has no Body Proportions values.json files.")
+
+            for metadata_info in metadata_files:
+                metadata_path = safe_paths[metadata_info.filename]
+                try:
+                    sex, root_index = self._portable_sex_root(metadata_path)
+                    sexes.add(sex)
+                    relative_dir = PurePosixPath(*metadata_path.parts[root_index + 1:-1])
+                    if not relative_dir.parts:
+                        raise ValueError("Invalid category path.")
+
+                    metadata = json.loads(archive.read(metadata_info).decode("utf-8"))
+                    if str(metadata.get("sex") or sex).strip().lower() != sex:
+                        raise ValueError("Metadata sex does not match proportions_* folder.")
+
+                    preview_info = next((
+                        info for info in files
+                        if safe_paths[info.filename].parent == metadata_path.parent
+                        and safe_paths[info.filename].name.lower()
+                        in {"preview.png", "preview.jpg", "preview.jpeg", "preview.webp"}
+                    ), None)
+                    if preview_info is None:
+                        skipped += 1
+                        continue
+
+                    preview_path = safe_paths[preview_info.filename]
+                    image = archive.read(preview_info)
+                    if not image:
+                        raise ValueError("Preview image is empty.")
+
+                    profile_key = str(metadata.get("profile_key") or "").strip()
+                    category_slug = str(metadata.get("category_slug") or metadata_path.parent.name).strip()
+                    display_name = str(metadata.get("display_name") or category_slug).strip()
+                    if not profile_key:
+                        profile_key = f"import_{self._slug(category_slug)}"
+
+                    row = db.execute(select(BodyProportionPreset).where(
+                        BodyProportionPreset.sex == sex,
+                        BodyProportionPreset.profile_key == profile_key,
+                    )).scalar_one_or_none()
+                    if row is None:
+                        row = db.execute(select(BodyProportionPreset).where(
+                            BodyProportionPreset.sex == sex,
+                            BodyProportionPreset.category_slug == category_slug,
+                        )).scalar_one_or_none()
+
+                    values = {
+                        "hips_size": float(metadata["hips_size"]),
+                        "fat_thin": float(metadata["fat_thin"]),
+                        "breasts_size": float(metadata["breasts_size"]),
+                        "skin_tone": float(metadata.get("skin_tone", DEFAULT_FIXED_VALUES["skin_tone"])),
+                        "hair_length": float(metadata.get("hair_length", DEFAULT_FIXED_VALUES["hair_length"])),
+                    }
+
+                    if row is None:
+                        row = BodyProportionPreset(
+                            sex=sex,
+                            sort_order=float(metadata.get("sort_order") or self._next_sort_order(db, sex)),
+                            profile_key=profile_key,
+                            display_name=display_name,
+                            category_slug=category_slug,
+                            fat_band=metadata.get("fat_band"),
+                            ass_band=metadata.get("ass_band"),
+                            breast_band=metadata.get("breast_band"),
+                            is_base_category=bool(metadata.get("is_base_category", False)),
+                            base_category_key=metadata.get("base_category_key"),
+                            preview_storage_json={},
+                            **values,
+                        )
+                        db.add(row)
+                        db.flush()
+                        created += 1
+                    else:
+                        row.display_name = display_name
+                        row.sort_order = float(metadata.get("sort_order") or row.sort_order)
+                        row.fat_band = metadata.get("fat_band")
+                        row.ass_band = metadata.get("ass_band")
+                        row.breast_band = metadata.get("breast_band")
+                        row.is_base_category = bool(metadata.get("is_base_category", row.is_base_category))
+                        row.base_category_key = metadata.get("base_category_key")
+                        for key, value in values.items():
+                            setattr(row, key, value)
+                        updated += 1
+
+                    content_type = mimetypes.guess_type(preview_path.name.lower())[0] or "image/png"
+                    folder = "/".join([
+                        "body-proportion-library",
+                        f"proportions_{sex}",
+                        *relative_dir.parts,
+                    ])
+                    stored = self._save_selected(
+                        db,
+                        mode=target,
+                        content=image,
+                        filename=preview_path.name.lower(),
+                        content_type=content_type,
+                        folder=folder,
+                    )
+                    self._persist_storage_copy(db, row, stored)
+
+                    row.local_mirror_path = self._write_mirror(row, image, content_type)
+                    row.status = "ready"
+                    row.last_error = None
+                    row.generated_at = utc_now()
+                    row.generation_metadata_json = {
+                        **(row.generation_metadata_json or {}),
+                        "portable_import": True,
+                        "portable_path": f"proportions_{sex}/{relative_dir.as_posix()}",
+                        "import_target": target,
+                        "storage_provider": stored.provider,
+                    }
+                    db.add(row)
+                    db.commit()
+                    db.refresh(row)
+                    imported += 1
+                except Exception as error:
+                    db.rollback()
+                    errors.append({"path": metadata_info.filename, "error": str(error)})
+
+        verifications = {}
+        for imported_sex in sexes:
+            verifications[imported_sex] = self.verify_preview_source(db, imported_sex, target)
+
+        return {
+            "imported": imported,
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+            "sexes": sorted(sexes),
+            "target": target,
+            "errors": errors,
+            "verifications": verifications,
+        }
+
+
     @staticmethod
     def _single_save_image_node_id(workflow: dict[str, Any]) -> str:
         save_nodes = [
@@ -753,20 +1238,34 @@ class BodyProportionToolService:
             image_output = next((item for item in execution.get("outputs", []) if str(item.get("content_type") or "").startswith("image/")), None)
             if not image_output: raise RuntimeError("The ComfyUI workflow completed without an image output.")
             content = Path(image_output["local_path"]).read_bytes(); content_type = image_output.get("content_type") or "image/png"
-            overwritten = bool(preset.image_storage_file_id)
-            if preset.image_storage_file_id:
-                old = db.get(StorageFile, preset.image_storage_file_id); preset.image_storage_file_id = None; db.add(preset); db.commit()
-                if old:
-                    storage_service.delete_file(db, storage_file=old); db.delete(old); db.commit()
+            previous_map = self._preview_storage_map(db, preset)
+            overwritten = bool(previous_map or preset.image_storage_file_id)
+            target_provider = self._resolved_storage_provider(db, config["storage_mode"])
+            old_target = db.get(StorageFile, previous_map.get(target_provider)) if previous_map.get(target_provider) else None
+
             folder = "/".join(["body-proportion-presets", f"proportions_{preset.sex}", *self._category_parts(preset)])
             stored = self._save_selected(db, mode=config["storage_mode"], content=content,
                                          filename=f"{preset.category_slug}.png", content_type=content_type, folder=folder)
-            preset.image_storage_file_id = stored.id; preset.local_mirror_path = self._write_mirror(preset, content, content_type)
+
+            next_map = dict(previous_map)
+            next_map[target_provider] = stored.id
+            preset.preview_storage_json = next_map
+            preset.image_storage_file_id = stored.id
+            preset.local_mirror_path = self._write_mirror(preset, content, content_type)
             preset.status = "ready"; preset.generated_at = utc_now(); preset.last_error = None
             preset.generation_metadata_json = {"prompt_id": queued["prompt_id"], "provider": "comfyui_local",
                                                "storage_mode": config["storage_mode"], "storage_provider": stored.provider, "values": values,
                                                "preview_execution_values": execution_values}
             db.add(preset); db.commit(); db.refresh(preset)
+
+            if old_target and old_target.id != stored.id:
+                try:
+                    storage_service.delete_file(db, storage_file=old_target)
+                    db.delete(old_target)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+
             try: Path(image_output["local_path"]).unlink(missing_ok=True)
             except OSError: pass
             return preset, queued["prompt_id"], stored.provider, overwritten
@@ -775,9 +1274,9 @@ class BodyProportionToolService:
 
     def response(self, db: Session, row: BodyProportionPreset) -> dict:
         image_url = None
-        if row.image_storage_file_id:
-            stored = db.get(StorageFile, row.image_storage_file_id)
-            if stored: image_url = storage_service.create_presigned_url(db, storage_file=stored)
+        stored = self.preview_storage_file(db, row)
+        if stored:
+            image_url = storage_service.create_presigned_url(db, storage_file=stored)
         return {
             "id": row.id, "sex": row.sex, "sort_order": row.sort_order, "profile_key": row.profile_key,
             "display_name": row.display_name, "category_slug": row.category_slug,

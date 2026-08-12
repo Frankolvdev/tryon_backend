@@ -19,6 +19,7 @@ class BodyProportionWorkflowConfig(Base):
     fixed_values_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     storage_mode: Mapped[str] = mapped_column(String(32), default="auto", nullable=False)
+    active_preview_source: Mapped[str] = mapped_column(String(32), default="auto", nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
@@ -48,6 +49,7 @@ class BodyProportionPreset(Base):
     image_storage_file_id: Mapped[int | None] = mapped_column(
         ForeignKey("storage_files.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    preview_storage_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     local_mirror_path: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False, index=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -5,13 +5,14 @@ from app.models.ai_model_profile import AiModelProfile
 from app.models.body_proportion_tool import BodyProportionPreset
 from app.models.storage_file import StorageFile
 from app.services.storage_service import storage_service
+from app.services.body_proportion_tool_service import body_proportion_tool_service
 
 
 class AiModelProfileService:
     def _image_url(self, db: Session, preset: BodyProportionPreset | None) -> str | None:
-        if not preset or not preset.image_storage_file_id:
+        if not preset:
             return None
-        stored = db.get(StorageFile, preset.image_storage_file_id)
+        stored = body_proportion_tool_service.preview_storage_file(db, preset)
         return storage_service.create_presigned_url(db, storage_file=stored) if stored else None
 
     def catalog(self, db: Session, sex: str) -> list[dict]:
@@ -20,7 +21,6 @@ class AiModelProfileService:
         rows = list(db.execute(select(BodyProportionPreset).where(
             BodyProportionPreset.sex == sex,
             BodyProportionPreset.status == "ready",
-            BodyProportionPreset.image_storage_file_id.is_not(None),
         ).order_by(BodyProportionPreset.sort_order.asc(), BodyProportionPreset.id.asc())).scalars().all())
         result = []
         for row in rows:
@@ -54,8 +54,8 @@ class AiModelProfileService:
     def set_body(self, db: Session, user_id: int, model_id: int, preset_id: int) -> AiModelProfile:
         row = self.get(db, user_id, model_id)
         preset = db.get(BodyProportionPreset, preset_id)
-        if not preset or preset.sex != row.sex or preset.status != "ready" or not preset.image_storage_file_id:
-            raise ValueError("The selected body variant is not available.")
+        if not preset or preset.sex != row.sex or preset.status != "ready" or not self._image_url(db, preset):
+            raise ValueError("The selected body variant is not available from the active preview source.")
         row.body_proportion_preset_id = preset.id
         row.stage = "body_selected"
         db.add(row); db.commit(); db.refresh(row); return row

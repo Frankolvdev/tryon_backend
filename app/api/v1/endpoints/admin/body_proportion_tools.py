@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
+from fastapi.responses import Response
 
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
@@ -34,6 +35,88 @@ def health(current_admin: User = Depends(admin_guard)):
 def storage_options(db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
     try: return body_proportion_tool_service.storage_options(db)
     except Exception as error: _bad_request(error)
+
+
+@router.get("/library/status/{sex}")
+def library_status(sex: str, db: Session = Depends(get_db), current_admin: User = Depends(admin_guard)):
+    try:
+        return body_proportion_tool_service.library_status(db, sex)
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.post("/library/copy")
+def copy_library(
+    sex: str = Form(...),
+    source: str = Form(...),
+    target: str = Form(...),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    try:
+        return body_proportion_tool_service.copy_preview_library(db, sex, source, target)
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.post("/library/verify")
+def verify_library(
+    sex: str = Form(...),
+    source: str = Form(...),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    try:
+        return body_proportion_tool_service.verify_preview_source(db, sex, source)
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.post("/library/activate")
+def activate_library(
+    sex: str = Form(...),
+    source: str = Form(...),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    try:
+        return body_proportion_tool_service.activate_preview_source(db, sex, source)
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.get("/library/export-zip/{sex}")
+def export_library_zip(
+    sex: str,
+    source: str = "auto",
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    try:
+        content = body_proportion_tool_service.build_portable_zip(db, sex, source)
+        return Response(
+            content=content,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="proportions_{sex}.zip"'},
+        )
+    except Exception as error:
+        _bad_request(error)
+
+
+@router.post("/library/import-zip")
+def import_library_zip(
+    archive: UploadFile = File(...),
+    target: str = Form("auto"),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    try:
+        if not str(archive.filename or "").lower().endswith(".zip"):
+            raise ValueError("Select a .zip file.")
+        archive.file.seek(0)
+        return body_proportion_tool_service.import_portable_zip(db, archive.file, target)
+    except Exception as error:
+        _bad_request(error)
 
 
 @router.get("/config/{sex}", response_model=BodyProportionWorkflowConfigResponse)
