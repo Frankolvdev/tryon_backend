@@ -1,26 +1,24 @@
-# Bubble Butt — ajuste incremental 4 variantes
+# Fix — false concurrent generation lock
 
 Base exacta:
-tryon_backend-main - 2026-08-11T231112.220.zip
+tryon_backend-main - 2026-08-11T232506.110.zip
 
-Cambios ÚNICOS:
-- Bubble Butt ahora tiene 4 variantes.
-- Defaults: V1=0.0, V2=0.4, V3=0.8, V4=1.2.
-- Compatibilidad con configuración legacy de 3 valores:
-  - [0,0,0] -> nuevos defaults.
-  - valores custom de 3 posiciones -> se preservan como V2/V3/V4 y se antepone V1=0.
-- La malla genera 4 presets por cada Fat x Hips.
-- Protección backend de una sola ejecución simultánea compartida entre
-  Body Proportions y Bubble Butt.
-- Importación de configuration.json acepta el nuevo arreglo de 4 valores.
-- Reset Bubble Butt:
-  - checkbox DESMARCADO: elimina datos/imágenes pero conserva workflow + mappings Bubble Butt.
-  - checkbox MARCADO: elimina también la configuración/workflow/mappings Bubble Butt.
-  - valores Bubble Butt vuelven a 0 / 0.4 / 0.8 / 1.2.
+Problem:
+The previous guard considered any DB row with status=`generating` to be an
+active execution. A crashed/restarted request could leave that state forever,
+causing every future generation to return:
+"No es posible ejecutar dos generaciones..."
 
-No hay nueva migración en este fix.
-La columna existente es JSON y no cambia su esquema.
+Fix:
+- Shared non-blocking in-process lock remains active across Body Proportions
+  and Bubble Butt.
+- DB `generating` flags are reconciled with ComfyUI `/queue`.
+- If ComfyUI has queue_running or queue_pending -> the second generation is blocked.
+- If ComfyUI queue is empty -> orphaned `generating` rows are automatically
+  recovered to `error`, then the requested generation is allowed to continue.
+- If ComfyUI queue lookup itself fails, stale DB state is released; the actual
+  queue_prompt call then reports the real ComfyUI connectivity error.
+- No UI, formulas, Bubble values, workflows, mappings, storage or library logic changed.
 
-Validación:
-- Python AST: OK
-- Python compileall: OK
+No migration required.
+Python AST validation: OK.

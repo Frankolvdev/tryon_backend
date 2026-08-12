@@ -17,6 +17,7 @@ from app.models.body_proportion_tool import (
 from app.models.storage_file import StorageFile
 from app.services.body_proportion_tool_service import body_proportion_tool_service
 from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
+from app.services.body_proportion_generation_guard import single_body_proportion_generation
 from app.services.storage_service import storage_service
 
 
@@ -326,27 +327,15 @@ class BubbleButtToolService:
             raise RuntimeError("Bubble Butt workflow integrity check failed. Unexpected changes: " + preview)
         return result
 
+    @single_body_proportion_generation
     def generate(self, db: Session, preset_id: int):
         row = self.get_preset(db, preset_id)
 
-        # Single-execution guard for the local ComfyUI Body Proportions tool.
-        # UI disabling is not enough: this also blocks double-clicks, another
-        # browser tab or a direct API request while a generation is active.
-        active_bubble = db.execute(
-            select(BubbleButtPreset.id).where(
-                BubbleButtPreset.sex == row.sex,
-                BubbleButtPreset.status == "generating",
-                BubbleButtPreset.id != row.id,
-            ).limit(1)
-        ).scalar_one_or_none()
-        active_body = db.execute(
-            select(BodyProportionPreset.id).where(
-                BodyProportionPreset.sex == row.sex,
-                BodyProportionPreset.status == "generating",
-            ).limit(1)
-        ).scalar_one_or_none()
-        if row.status == "generating" or active_bubble is not None or active_body is not None:
+        # Reconcile DB state with the real ComfyUI queue. This automatically
+        # releases orphaned `generating` rows left behind by a crash/restart.
+        if body_proportion_tool_service._reconcile_generation_states(db, row.sex):
             raise ValueError("No es posible ejecutar dos generaciones de Body Proportions/Bubble Butt al mismo tiempo.")
+        db.refresh(row)
 
         readiness = self.readiness(db, row.sex)
         if not readiness["complete"]:

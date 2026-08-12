@@ -19,6 +19,7 @@ from app.models.body_proportion_tool import BodyProportionPreset, BodyProportion
 from app.models.storage_file import StorageFile
 from app.schemas.body_proportion_tool import DEFAULT_FIXED_VALUES, DEFAULT_FORMULA, DEFAULT_LIMITS
 from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
+from app.services.body_proportion_generation_guard import single_body_proportion_generation
 from app.services.storage_service import storage_service
 
 
@@ -1391,27 +1392,62 @@ class BodyProportionToolService:
             )
         return save_nodes[0]
 
+    def _reconcile_generation_states(self, db: Session, sex: str) -> bool:
+        """Return True only when ComfyUI confirms there is actually work in flight.
+
+        Old DB rows can remain `generating` after a backend/ComfyUI crash. Those
+        rows must not become a permanent mutex.
+        """
+        body_rows = list(db.execute(
+            select(BodyProportionPreset).where(
+                BodyProportionPreset.sex == sex,
+                BodyProportionPreset.status == "generating",
+            )
+        ).scalars().all())
+        bubble_rows = list(db.execute(
+            select(BubbleButtPreset).where(
+                BubbleButtPreset.sex == sex,
+                BubbleButtPreset.status == "generating",
+            )
+        ).scalars().all())
+
+        if not body_rows and not bubble_rows:
+            return False
+
+        try:
+            queue = comfyui_local_adapter_service.get_queue() or {}
+            running = list(queue.get("queue_running") or [])
+            pending = list(queue.get("queue_pending") or [])
+        except Exception:
+            # If ComfyUI cannot even report a queue, a stale DB flag must not
+            # masquerade as an active generation. The real queue operation below
+            # will surface the actual connectivity error if ComfyUI is unavailable.
+            running = []
+            pending = []
+
+        if running or pending:
+            return True
+
+        # No real ComfyUI work exists: recover orphaned DB state.
+        recovered_message = (
+            "Recovered stale generating state: ComfyUI had no running or pending prompt."
+        )
+        for stale in [*body_rows, *bubble_rows]:
+            stale.status = "error"
+            stale.last_error = recovered_message
+            db.add(stale)
+        db.commit()
+        return False
+
+    @single_body_proportion_generation
     def generate(self, db: Session, preset_id: int) -> tuple[BodyProportionPreset, str, str, bool]:
         preset = self.get_preset(db, preset_id); config = self.get_config(db, preset.sex)
 
-        # Shared single-execution guard across Body Proportions and Bubble Butt.
-        # Prevents a second local ComfyUI prompt from starting from another card,
-        # tab or direct API request while one generation is already active.
-        active_body = db.execute(
-            select(BodyProportionPreset.id).where(
-                BodyProportionPreset.sex == preset.sex,
-                BodyProportionPreset.status == "generating",
-                BodyProportionPreset.id != preset.id,
-            ).limit(1)
-        ).scalar_one_or_none()
-        active_bubble = db.execute(
-            select(BubbleButtPreset.id).where(
-                BubbleButtPreset.sex == preset.sex,
-                BubbleButtPreset.status == "generating",
-            ).limit(1)
-        ).scalar_one_or_none()
-        if preset.status == "generating" or active_body is not None or active_bubble is not None:
+        # DB `generating` flags are advisory only. Confirm against the real
+        # ComfyUI queue so a crashed request cannot leave a permanent false lock.
+        if self._reconcile_generation_states(db, preset.sex):
             raise ValueError("No es posible ejecutar dos generaciones de Body Proportions/Bubble Butt al mismo tiempo.")
+        db.refresh(preset)
 
         if not config["is_enabled"] or not config["workflow"]: raise ValueError(f"The {preset.sex} workflow is not configured/enabled.")
         self._assert_limits(config, {k: getattr(preset, k) for k in ("hips_size", "fat_thin", "breasts_size", "skin_tone", "hair_length")})
