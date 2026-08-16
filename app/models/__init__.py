@@ -148,7 +148,9 @@ from app.models.promotional_credit import PromotionalCreditFund, PromotionalToke
 from app.models.promotional_funding_cycle import PromotionalFundingSource, PromotionalFundingCycle
 from app.models.body_proportion_tool import BodyProportionWorkflowConfig, BodyProportionPreset
 from app.models.ai_model_profile import AiModelProfile
+from app.models.ancestry_media_asset import AncestryMediaAsset
 __all__ = [
+    "AncestryMediaAsset",
     "BodyProportionWorkflowConfig",
     "BodyProportionPreset",
     "AbuseEvent",

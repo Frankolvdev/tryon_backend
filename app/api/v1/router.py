@@ -6,6 +6,7 @@ from app.api.v1.deps import get_db
 from app.api.v1.endpoints import (
     account_verification,
     ai_models,
+    ancestry_media_assets,
     admin_mfa,
     auth,
     background_jobs,
@@ -139,6 +140,11 @@ api_router.include_router(
     ai_models.router,
     prefix="/ai-models",
     tags=["AI Models"],
+)
+api_router.include_router(
+    ancestry_media_assets.router,
+    prefix="/ancestry-assets",
+    tags=["Ancestry Assets"],
 )
 api_router.include_router(
     generation_modules.router,

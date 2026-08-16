@@ -21,6 +21,7 @@ from app.api.v1.endpoints.admin import (
     billing_operations,
     billing_payments,
     body_proportion_tools,
+    ancestry_media_assets,
     cache,
     cache_locks,
     cache_operations,
@@ -80,6 +81,7 @@ from app.api.v1.endpoints.admin import (
 admin_router = APIRouter()
 
 admin_router.include_router(body_proportion_tools.router, tags=["Admin - Tools Generation"])
+admin_router.include_router(ancestry_media_assets.router, tags=["Admin - Tools Generation"])
 
 
 admin_router.include_router(
