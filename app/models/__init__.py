@@ -243,3 +243,5 @@ from app.models.runtime_builder_build import RuntimeBuilderBuild
 from app.models.runtime_project import RuntimeProject
 
 from app.models.operational_expense import OperationalExpense
+
+from app.models.model_generation_asset import ModelGenerationAsset

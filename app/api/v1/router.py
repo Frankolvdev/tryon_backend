@@ -7,6 +7,7 @@ from app.api.v1.endpoints import (
     account_verification,
     ai_models,
     ancestry_media_assets,
+    model_generation_assets,
     admin_mfa,
     auth,
     background_jobs,
@@ -145,6 +146,11 @@ api_router.include_router(
     ancestry_media_assets.router,
     prefix="/ancestry-assets",
     tags=["Ancestry Assets"],
+)
+api_router.include_router(
+    model_generation_assets.router,
+    prefix="/model-generation-assets",
+    tags=["Model Generation Assets"],
 )
 api_router.include_router(
     generation_modules.router,
