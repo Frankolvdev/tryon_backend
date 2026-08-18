@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
 from app.api.v1.guards.auth_guard import auth_guard
 from app.models.user import User
-from app.schemas.ai_model_profile import AiModelProfileBodyUpdate, AiModelProfileCreate, AiModelProfileResponse, BodyVariantCatalogResponse, BubbleButtVariantCatalogResponse
+from app.schemas.ai_model_profile import AiModelProfileBodyUpdate, AiModelProfileCreate, AiModelProfileDraftUpdate, AiModelProfileResponse, BodyVariantCatalogResponse, BubbleButtVariantCatalogResponse
 from app.services.ai_model_profile_service import ai_model_profile_service
 
 router = APIRouter()
@@ -44,6 +44,16 @@ def create_model(data: AiModelProfileCreate, db: Session = Depends(get_db), curr
 def get_model(model_id: int, db: Session = Depends(get_db), current_user: User = Depends(auth_guard)):
     try: return ai_model_profile_service.response(db, ai_model_profile_service.get(db, current_user.id, model_id))
     except Exception as error: _fail(error)
+
+
+@router.put("/{model_id}/draft", response_model=AiModelProfileResponse)
+def save_draft(model_id: int, data: AiModelProfileDraftUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_guard)):
+    try:
+        return ai_model_profile_service.response(
+            db, ai_model_profile_service.save_draft(db, current_user.id, model_id, data.draft, data.name)
+        )
+    except Exception as error:
+        _fail(error)
 
 @router.put("/{model_id}/body", response_model=AiModelProfileResponse)
 def set_body(model_id: int, data: AiModelProfileBodyUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_guard)):

@@ -1,3 +1,5 @@
+import json
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -111,6 +113,27 @@ class AiModelProfileService:
         row.stage = "body_selected"
         db.add(row); db.commit(); db.refresh(row); return row
 
+
+    def save_draft(self, db: Session, user_id: int, model_id: int, draft: dict, name: str | None = None) -> AiModelProfile:
+        row = self.get(db, user_id, model_id)
+        if name is not None:
+            clean_name = name.strip()
+            if not clean_name:
+                raise ValueError("Model name cannot be empty.")
+            duplicate = db.execute(select(AiModelProfile).where(
+                AiModelProfile.user_id == user_id,
+                AiModelProfile.name == clean_name,
+                AiModelProfile.id != model_id,
+            )).scalar_one_or_none()
+            if duplicate:
+                raise ValueError("You already have a model with that name.")
+            row.name = clean_name
+        safe_draft = dict(draft or {})
+        if len(json.dumps(safe_draft, ensure_ascii=False)) > 65536:
+            raise ValueError("Draft is too large.")
+        row.draft_json = safe_draft
+        db.add(row); db.commit(); db.refresh(row); return row
+
     def response(self, db: Session, row: AiModelProfile) -> dict:
         preset = db.get(BodyProportionPreset, row.body_proportion_preset_id) if row.body_proportion_preset_id else None
         bubble = db.get(BubbleButtPreset, row.bubble_butt_preset_id) if row.bubble_butt_preset_id else None
@@ -120,6 +143,7 @@ class AiModelProfileService:
             "bubble_butt_preset_id": row.bubble_butt_preset_id,
             "bubble_butt_variant_index": bubble.variant_index if bubble else None,
             "body_image_url": self._image_url(db, preset), "stage": row.stage,
+            "draft_json": row.draft_json or {},
             "created_at": row.created_at, "updated_at": row.updated_at,
         }
 

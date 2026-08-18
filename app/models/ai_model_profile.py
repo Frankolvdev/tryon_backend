@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.common.time import utc_now
@@ -21,6 +21,7 @@ class AiModelProfile(Base):
         ForeignKey("bubble_butt_presets.id", ondelete="SET NULL"), nullable=True, index=True
     )
     stage: Mapped[str] = mapped_column(String(32), nullable=False, default="body", index=True)
+    draft_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 

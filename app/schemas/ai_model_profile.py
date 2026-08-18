@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 SexName = Literal["woman", "man"]
@@ -42,6 +42,10 @@ class AiModelProfileBodyUpdate(BaseModel):
     body_proportion_preset_id: int
     bubble_butt_preset_id: int
 
+class AiModelProfileDraftUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    draft: dict[str, Any] = Field(default_factory=dict)
+
 class AiModelProfileResponse(BaseModel):
     id: int
     name: str
@@ -51,5 +55,6 @@ class AiModelProfileResponse(BaseModel):
     bubble_butt_variant_index: int | None = None
     body_image_url: str | None = None
     stage: str
+    draft_json: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
