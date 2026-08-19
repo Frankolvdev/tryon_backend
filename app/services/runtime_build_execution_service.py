@@ -72,7 +72,7 @@ class RuntimeBuildExecutionService:
         return None
 
     @staticmethod
-    def _validate_context(path):
+    def _validate_context(path, config=None):
         # Estos son los nombres que genera RuntimeContextGeneratorService.
         # El Dockerfile utiliza scripts/startup.sh como ENTRYPOINT.
         required = [
@@ -129,6 +129,31 @@ class RuntimeBuildExecutionService:
                 "contexto reproducible antes de compilar; no es seguro reutilizarlo."
             )
 
+        if config is not None:
+            current_profile = RuntimeBuilderService.validated_profile_for_config(config)
+            context_profile = runtime_manifest.get("compatibility_profile") or {}
+            current_profile_id = (
+                current_profile.get("id")
+                if isinstance(current_profile, dict)
+                else None
+            )
+            context_profile_id = (
+                context_profile.get("id")
+                if isinstance(context_profile, dict)
+                else None
+            )
+            if (
+                current_profile_id
+                and context_profile_id
+                and current_profile_id != context_profile_id
+            ):
+                raise ValueError(
+                    "El contexto persistido fue generado con un perfil de "
+                    f"compatibilidad distinto ({context_profile_id}) al perfil "
+                    f"seleccionado actualmente ({current_profile_id}). "
+                    "Regenera el contexto reproducible antes de compilar."
+                )
+
         return {
             "valid": True,
             "context_path": str(path),
@@ -144,7 +169,7 @@ class RuntimeBuildExecutionService:
         context = RuntimeBuildExecutionService._resolve_context(db, config, context_directory)
         if context is None:
             raise ValueError("No se encontró una exportación válida. Selecciona el directorio generado, por ejemplo ...\generation-runtime-1.0.0, antes de construir.")
-        context_validation = RuntimeBuildExecutionService._validate_context(context)
+        context_validation = RuntimeBuildExecutionService._validate_context(context, config)
         build=RuntimeBuilderBuild(
             runtime_config_id=config.id,
             version=config.runtime_version,
@@ -177,7 +202,7 @@ class RuntimeBuildExecutionService:
             if ctx is None:
                 raise RuntimeError("No se encontró el directorio de exportación seleccionado para este build.")
             try:
-                RuntimeBuildExecutionService._validate_context(ctx)
+                RuntimeBuildExecutionService._validate_context(ctx, cfg)
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
             build.context_path=str(ctx)

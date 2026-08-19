@@ -56,6 +56,7 @@ class RuntimeBuilderService:
             "comfyui_commit": "3dd10a59c00248d00f0cb0ab794ff1bb9fb00a5f",
             "torch_packages": None,
             "gpu_profile": "universal-cu128",
+            "dependency_overrides": {},
         },
         {
             "id": "universal-modern-2026-08",
@@ -69,6 +70,11 @@ class RuntimeBuilderService:
             "comfyui_commit": "v0.31.0",
             "torch_packages": "torch==2.13.0+cu130 torchvision==0.28.0+cu130 torchaudio==2.11.0+cu130",
             "gpu_profile": "universal-cu130",
+            "dependency_overrides": {
+                "mediapipe==0.8.0": "mediapipe==1.0.0",
+                "mediapipe==0.10.0": "mediapipe==1.0.0",
+                "mediapipe==0.10.21": "mediapipe==1.0.0",
+            },
         },
     )
     DEFAULT_VALIDATED_PROFILE_ID = "universal-legacy-2026-02"
@@ -293,11 +299,41 @@ class RuntimeBuilderService:
         return candidate
 
     @staticmethod
-    def render_requirements(dependencies: list[dict[str, Any]]) -> list[str]:
+    def _dependency_override_key(requirement: str) -> str:
+        return re.sub(r"\s+", "", str(requirement or "")).lower()
+
+    @classmethod
+    def apply_profile_dependency_override(
+        cls,
+        config: RuntimeBuilderConfig | None,
+        requirement: str,
+    ) -> str:
+        if config is None:
+            return requirement
+        profile = cls.validated_profile_for_config(config)
+        if not profile:
+            return requirement
+        overrides = profile.get("dependency_overrides") or {}
+        if not isinstance(overrides, dict):
+            return requirement
+        key = cls._dependency_override_key(requirement)
+        for source, target in overrides.items():
+            if cls._dependency_override_key(str(source)) == key:
+                return str(target).strip()
+        return requirement
+
+    @staticmethod
+    def render_requirements(
+        dependencies: list[dict[str, Any]],
+        config: RuntimeBuilderConfig | None = None,
+    ) -> list[str]:
         rendered: list[str] = []
         seen: set[str] = set()
         for dependency in dependencies:
             requirement = RuntimeBuilderService.render_requirement(dependency)
+            requirement = RuntimeBuilderService.apply_profile_dependency_override(
+                config, requirement
+            )
             if not RuntimeBuilderService.is_runtime_dependency(requirement):
                 continue
             key = requirement.lower()
@@ -1700,7 +1736,7 @@ class ComfyUIServer:
                     f"/app/ComfyUI/custom_nodes/{folder}/requirements.txt; fi"
                 )
 
-        requirements = RuntimeBuilderService.render_requirements(deps)
+        requirements = RuntimeBuilderService.render_requirements(deps, config)
         requirements_txt = "\n".join(requirements) + ("\n" if requirements else "")
 
         model_lines: list[str] = []

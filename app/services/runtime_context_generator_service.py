@@ -197,8 +197,11 @@ class RuntimeContextGeneratorService:
         return None
 
     @staticmethod
-    def _normalize_copied_requirements(root: Path) -> list[str]:
-        """Normaliza requisitos de ejecución y elimina herramientas solo de desarrollo."""
+    def _normalize_copied_requirements(
+        root: Path,
+        config: RuntimeBuilderConfig,
+    ) -> list[str]:
+        """Normaliza requirements usando únicamente overrides del perfil activo."""
         changed: list[str] = []
         mediapipe_pattern = re.compile(r"(?i)^\s*mediapipe\s*==\s*0\.10\.0\s*$")
         av_pattern = re.compile(r"(?i)^\s*av\s*==\s*(?:8|9|10|11)(?:\.\d+){0,2}\s*$")
@@ -216,6 +219,9 @@ class RuntimeContextGeneratorService:
                     continue
                 normalized_line = mediapipe_pattern.sub("mediapipe==0.10.21", line)
                 normalized_line = av_pattern.sub("av==12.3.0", normalized_line)
+                normalized_line = RuntimeBuilderService.apply_profile_dependency_override(
+                    config, normalized_line
+                )
                 if not RuntimeBuilderService.is_runtime_dependency(normalized_line):
                     continue
                 output_lines.append(normalized_line)
@@ -412,7 +418,7 @@ class RuntimeContextGeneratorService:
                     dirs_exist_ok=True,
                 )
                 copied_node_sources[source_key] = context_path
-                normalized_files = RuntimeContextGeneratorService._normalize_copied_requirements(destination)
+                normalized_files = RuntimeContextGeneratorService._normalize_copied_requirements(destination, config)
                 for normalized_file in normalized_files:
                     warnings.append(
                         "Requirements de Custom Node normalizados para producción "
@@ -440,7 +446,7 @@ class RuntimeContextGeneratorService:
             )
 
         dependencies = [d for d in (config.python_dependencies or []) if d.get("enabled", True)]
-        requirements_lines = RuntimeBuilderService.render_requirements(dependencies)
+        requirements_lines = RuntimeBuilderService.render_requirements(dependencies, config)
         requirements = "\n".join(requirements_lines) + ("\n" if requirements_lines else "")
 
         manifest = {
