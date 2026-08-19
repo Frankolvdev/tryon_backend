@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from app.models.runtime_builder_config import RuntimeBuilderConfig
@@ -55,6 +55,22 @@ class RuntimeContextGeneratorService:
 
         target = str(item.get("target_path") or "").replace("\\", "/").lstrip("/")
         name = str(item.get("name") or "").strip()
+
+        # First try the exact logical path persisted by the workflow resolver.
+        # This is the canonical ComfyUI model namespace and avoids a second
+        # resolver/index pass incorrectly marking an existing model as missing.
+        # Keep it strictly rooted under ComfyUI/models: absolute paths and path
+        # traversal are rejected.
+        if target:
+            logical = PurePosixPath(target)
+            if (
+                not logical.is_absolute()
+                and all(part not in {"", ".", ".."} for part in logical.parts)
+            ):
+                exact_candidate = (comfy / "models").joinpath(*logical.parts)
+                if exact_candidate.is_file():
+                    return exact_candidate.resolve()
+
         try:
             from app.services.runtime_import_service import RuntimeImportService
             roots = RuntimeImportService._configured_model_roots(comfy)
