@@ -4,6 +4,7 @@ from enum import Enum
 class GenerationExecutionEngine(str, Enum):
     SIMULATED = "simulated"
     LOCAL_DOCKER = "local_docker"
+    OWNER_LOCAL = "owner_local"
     RUNPOD_SERVERLESS = "runpod_serverless"
     MODAL = "modal"
     BEAM = "beam"

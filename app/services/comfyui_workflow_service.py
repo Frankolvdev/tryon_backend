@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.common.enums import IntegrationProvider
 from app.common.exceptions import ConflictException
-from app.services.comfyui_client_service import comfyui_client_service
+from app.services.comfyui_client_service import ComfyUIClientService, comfyui_client_service
 from app.services.integration_service import integration_service
 
 
@@ -114,11 +114,13 @@ class ComfyUIWorkflowService:
         patches: list,
         client_id: str | None = None,
         wait_for_result: bool = True,
+        client_service: ComfyUIClientService | None = None,
     ) -> dict[str, Any]:
         workflow = self.load_workflow(db, workflow_name=workflow_name)
         patched_workflow = self.apply_patches(workflow, patches)
+        target_client = client_service or comfyui_client_service
 
-        queue_response = comfyui_client_service.queue_prompt(
+        queue_response = target_client.queue_prompt(
             db,
             workflow=patched_workflow,
             client_id=client_id,
@@ -144,13 +146,13 @@ class ComfyUIWorkflowService:
         images: list[dict[str, Any]] = []
 
         while time.time() - started < timeout_seconds:
-            history = comfyui_client_service.get_history(
+            history = target_client.get_history(
                 db,
                 prompt_id=prompt_id,
             )
 
             if prompt_id in history:
-                images = comfyui_client_service.extract_output_images_from_history(
+                images = target_client.extract_output_images_from_history(
                     history,
                     prompt_id=prompt_id,
                 )

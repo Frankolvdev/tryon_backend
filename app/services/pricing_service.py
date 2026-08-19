@@ -29,6 +29,7 @@ from app.schemas.provider_pricing import AppliedPricingRuleResponse
 from app.services.ai_engine_settings_service import ai_engine_settings_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.provider_pricing_service import provider_pricing_service
+from app.services.infrastructure_provider_service import infrastructure_provider_service
 from app.services.token_financial_snapshot_service import token_financial_snapshot_service
 
 TOKEN_VALUE_KEY = "commercial_token_value_usd"
@@ -392,6 +393,8 @@ class PricingService:
         )
         samples: list[tuple[float, object]] = []
         for row in rows:
+            if str(getattr(row, "accounting_mode", "commercial") or "commercial") != "commercial":
+                continue
             duration = self._execution_duration_seconds(row)
             if duration is not None:
                 samples.append((duration, row))
@@ -439,8 +442,20 @@ class PricingService:
             if module is None:
                 continue
             provider = str(module.default_execution_engine or "").lower()
-            gpu_key = settings.modal_gpu if provider == "modal" else None
-            scaledown = settings.modal_scaledown_window_seconds if provider == "modal" else 0
+            if provider == "modal":
+                gpu_key = settings.modal_gpu
+                scaledown = settings.modal_scaledown_window_seconds
+            elif provider == "local_docker":
+                local_cfg = infrastructure_provider_service.get_local_docker(db)
+                gpu_key = str(local_cfg.gpu or "").strip() or None
+                scaledown = 0
+            elif provider == "owner_local":
+                owner_cfg = infrastructure_provider_service.get_owner_local(db)
+                gpu_key = str(owner_cfg.gpu or "").strip() or None
+                scaledown = 0
+            else:
+                gpu_key = None
+                scaledown = 0
             gpu_cost = provider_pricing_service.get_cost(db, provider=provider, gpu_key=gpu_key)
             duration, source, sample_count, confidence, estimate_updated_at = self._historical_duration(
                 module.id, int(rule.initial_estimated_duration_seconds or 30)

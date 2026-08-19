@@ -37,7 +37,7 @@ class GenerationJobQueueService:
     @staticmethod
     def queue_name(engine: GenerationExecutionEngine | str) -> str:
         value = engine.value if isinstance(engine, GenerationExecutionEngine) else str(engine)
-        if value == GenerationExecutionEngine.LOCAL_DOCKER.value:
+        if value in {GenerationExecutionEngine.LOCAL_DOCKER.value, GenerationExecutionEngine.OWNER_LOCAL.value}:
             return "local"
         if value == GenerationExecutionEngine.RUNPOD_SERVERLESS.value:
             return "runpod"

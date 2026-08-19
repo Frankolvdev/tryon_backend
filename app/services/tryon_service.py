@@ -1,7 +1,7 @@
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
-from app.common.enums import IntegrationProvider, QualityMode, TryOnItemType, TryOnJobStatus
+from app.common.enums import IntegrationProvider, QualityMode, TryOnItemType, TryOnJobStatus, UserRole
 from app.common.exceptions import ConflictException, ForbiddenException, NotFoundException
 from app.common.time import utc_now
 from app.models.tryon_job import TryOnJob
@@ -12,6 +12,7 @@ from app.schemas.runpod_external import RunPodSubmitRequest
 from app.schemas.tryon import TryOnJobAdminUpdate
 from app.services.external_ai_job_service import external_ai_job_service
 from app.services.integration_service import integration_service
+from app.services.infrastructure_provider_service import infrastructure_provider_service
 from app.services.pricing_service import pricing_service
 from app.services.runpod_config_service import runpod_config_service
 from app.services.runtime_settings_service import runtime_settings_service
@@ -31,6 +32,8 @@ class TryOnService:
         quality_mode: QualityMode,
         prompt: str | None = None,
     ) -> TryOnJob:
+        is_owner = user.role == UserRole.OWNER.value
+
         if not runtime_settings_service.tryon_enabled(db):
             raise ForbiddenException("Try-on generation is currently disabled.")
 
@@ -71,7 +74,7 @@ class TryOnService:
             item_type=item_type.value,
             quality_mode=quality_mode.value,
             status=TryOnJobStatus.QUEUED.value,
-            tokens_cost=pricing_quote.required_tokens,
+            tokens_cost=0 if is_owner else pricing_quote.required_tokens,
             estimated_gpu_seconds=pricing_quote.estimated_gpu_seconds,
             estimated_gpu_cost_cents=pricing_quote.estimated_gpu_cost_cents,
             prompt=prompt,
@@ -85,20 +88,32 @@ class TryOnService:
         db.add(job)
         db.flush()
 
-        token_service.debit_tokens(
-            db=db,
-            user_id=user.id,
-            amount=pricing_quote.required_tokens,
-            source="tryon",
-            reference_id=str(job.id),
-            description=f"Try-on job #{job.id} token consumption",
-            commit=False,
-        )
+        if not is_owner:
+            token_service.debit_tokens(
+                db=db,
+                user_id=user.id,
+                amount=pricing_quote.required_tokens,
+                source="tryon",
+                reference_id=str(job.id),
+                description=f"Try-on job #{job.id} token consumption",
+                commit=False,
+            )
 
         db.commit()
         db.refresh(job)
 
         try:
+            if is_owner:
+                owner_config = infrastructure_provider_service.get_owner_local(db)
+                if not owner_config.enabled:
+                    raise ConflictException("Owner Local is disabled.")
+                self.process_comfyui_tryon_job(
+                    db=db,
+                    job_id=job.id,
+                    base_url_override=owner_config.endpoint,
+                )
+                return tryon_job_repository.get_by_id(db, job.id)
+
             execution_mode = runtime_settings_service.get_string(
                 db, "ai_execution_mode", default="simulated"
             ).lower()
@@ -152,6 +167,8 @@ class TryOnService:
         job: TryOnJob,
         reason: str,
     ) -> None:
+        if int(job.tokens_cost or 0) <= 0:
+            return
         token_service.refund_tryon_tokens(
             db,
             user_id=job.user_id,
@@ -165,6 +182,7 @@ class TryOnService:
         db: Session,
         *,
         job_id: int,
+        base_url_override: str | None = None,
     ) -> TryOnJob:
         job = tryon_job_repository.get_by_id(db, job_id)
 
@@ -184,6 +202,7 @@ class TryOnService:
             result_file = comfyui_tryon_service.execute_tryon_job(
                 db=db,
                 job=job,
+                base_url_override=base_url_override,
             )
 
             job.result_file_id = result_file.id

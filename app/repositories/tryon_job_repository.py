@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 
 from app.common.enums import TryOnJobStatus
 from app.models.tryon_job import TryOnJob
+from app.models.user import User
+from app.common.enums import UserRole
 from app.repositories.base import BaseRepository
 
 
@@ -62,6 +64,42 @@ class TryOnJobRepository(BaseRepository[TryOnJob]):
 
     def sum_actual_gpu_cost_cents(self, db: Session) -> int:
         statement = select(func.coalesce(func.sum(TryOnJob.actual_gpu_cost_cents), 0))
+        return int(db.execute(statement).scalar_one())
+
+
+    def count_commercial_all(self, db: Session) -> int:
+        statement = (
+            select(func.count())
+            .select_from(TryOnJob)
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
+        )
+        return int(db.execute(statement).scalar_one())
+
+    def count_commercial_by_status(self, db: Session, status: TryOnJobStatus) -> int:
+        statement = (
+            select(func.count())
+            .select_from(TryOnJob)
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
+            .where(TryOnJob.status == status.value)
+        )
+        return int(db.execute(statement).scalar_one())
+
+    def sum_commercial_estimated_gpu_cost_cents(self, db: Session) -> int:
+        statement = (
+            select(func.coalesce(func.sum(TryOnJob.estimated_gpu_cost_cents), 0))
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
+        )
+        return int(db.execute(statement).scalar_one())
+
+    def sum_commercial_actual_gpu_cost_cents(self, db: Session) -> int:
+        statement = (
+            select(func.coalesce(func.sum(TryOnJob.actual_gpu_cost_cents), 0))
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
+        )
         return int(db.execute(statement).scalar_one())
 
 

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import AppException, NotFoundException
 from app.repositories.storage_file_repository import storage_file_repository
-from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
+from app.services.comfyui_local_adapter_service import ComfyUILocalAdapterService, comfyui_local_adapter_service
 from app.services.storage_service import storage_service
 
 
@@ -54,10 +54,13 @@ class GenerationModuleFileMaterializerService:
         execution_id: UUID,
         module_input_key: str,
         reference: dict[str, Any],
+        adapter: ComfyUILocalAdapterService | None = None,
+        engine: str = "local_docker",
     ) -> dict[str, Any]:
         content, filename, content_type = self._read_bytes(db, reference)
         subfolder = f"generation-modules/{execution_id}"
-        uploaded = comfyui_local_adapter_service.upload_input(
+        target_adapter = adapter or comfyui_local_adapter_service
+        uploaded = target_adapter.upload_input(
             content=content,
             filename=filename,
             content_type=content_type,
@@ -66,7 +69,7 @@ class GenerationModuleFileMaterializerService:
         relative_name = "/".join(part for part in [uploaded.get("subfolder"), uploaded.get("name")] if part)
         return {
             "module_input_key": module_input_key,
-            "engine": "local_docker",
+            "engine": engine,
             "filename": uploaded.get("name") or filename,
             "subfolder": uploaded.get("subfolder") or subfolder,
             "relative_name": relative_name or filename,

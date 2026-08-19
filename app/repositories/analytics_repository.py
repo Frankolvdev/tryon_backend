@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import Date, cast, func, select
 from sqlalchemy.orm import Session
 
-from app.common.enums import TokenTransactionType, TryOnJobStatus
+from app.common.enums import TokenTransactionType, TryOnJobStatus, UserRole
 from app.models.storage_file import StorageFile
 from app.models.token_transaction import TokenTransaction
 from app.models.tryon_job import TryOnJob
@@ -29,7 +29,13 @@ class AnalyticsRepository:
         return int(db.execute(statement).scalar_one())
 
     def count_tryon_jobs(self, db: Session) -> int:
-        return int(db.execute(select(func.count()).select_from(TryOnJob)).scalar_one())
+        statement = (
+            select(func.count())
+            .select_from(TryOnJob)
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
+        )
+        return int(db.execute(statement).scalar_one())
 
     def count_tryon_jobs_by_status(
         self,
@@ -39,6 +45,8 @@ class AnalyticsRepository:
         statement = (
             select(func.count())
             .select_from(TryOnJob)
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
             .where(TryOnJob.status == status.value)
         )
         return int(db.execute(statement).scalar_one())
@@ -58,11 +66,19 @@ class AnalyticsRepository:
         return abs(int(db.execute(statement).scalar_one()))
 
     def sum_estimated_gpu_cost_cents(self, db: Session) -> int:
-        statement = select(func.coalesce(func.sum(TryOnJob.estimated_gpu_cost_cents), 0))
+        statement = (
+            select(func.coalesce(func.sum(TryOnJob.estimated_gpu_cost_cents), 0))
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
+        )
         return int(db.execute(statement).scalar_one())
 
     def sum_actual_gpu_cost_cents(self, db: Session) -> int:
-        statement = select(func.coalesce(func.sum(TryOnJob.actual_gpu_cost_cents), 0))
+        statement = (
+            select(func.coalesce(func.sum(TryOnJob.actual_gpu_cost_cents), 0))
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
+        )
         return int(db.execute(statement).scalar_one())
 
     def count_storage_files(self, db: Session) -> int:
@@ -91,6 +107,8 @@ class AnalyticsRepository:
                 cast(TryOnJob.created_at, Date).label("day"),
                 func.count(TryOnJob.id),
             )
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
             .where(TryOnJob.created_at >= start_date)
             .group_by("day")
             .order_by("day")
@@ -137,6 +155,8 @@ class AnalyticsRepository:
                 func.coalesce(func.sum(TryOnJob.estimated_gpu_cost_cents), 0),
                 func.coalesce(func.sum(TryOnJob.actual_gpu_cost_cents), 0),
             )
+            .join(User, User.id == TryOnJob.user_id)
+            .where(User.role != UserRole.OWNER.value)
             .where(TryOnJob.created_at >= start_date)
             .group_by("day")
             .order_by("day")

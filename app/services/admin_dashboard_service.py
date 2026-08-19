@@ -15,23 +15,23 @@ class AdminDashboardService:
             active_users=user_repository.count_active(db),
             suspended_users=user_repository.count_suspended(db),
             deleted_users=user_repository.count_deleted(db),
-            total_tryon_jobs=tryon_job_repository.count_all(db),
-            completed_tryon_jobs=tryon_job_repository.count_by_status(
+            total_tryon_jobs=tryon_job_repository.count_commercial_all(db),
+            completed_tryon_jobs=tryon_job_repository.count_commercial_by_status(
                 db,
                 TryOnJobStatus.COMPLETED,
             ),
-            failed_tryon_jobs=tryon_job_repository.count_by_status(
+            failed_tryon_jobs=tryon_job_repository.count_commercial_by_status(
                 db,
                 TryOnJobStatus.FAILED,
             ),
-            queued_tryon_jobs=tryon_job_repository.count_by_status(
+            queued_tryon_jobs=tryon_job_repository.count_commercial_by_status(
                 db,
                 TryOnJobStatus.QUEUED,
             ),
             total_tokens_issued=token_transaction_repository.sum_credits(db),
             total_tokens_consumed=token_transaction_repository.sum_debits(db),
-            estimated_gpu_cost_cents=tryon_job_repository.sum_estimated_gpu_cost_cents(db),
-            actual_gpu_cost_cents=tryon_job_repository.sum_actual_gpu_cost_cents(db),
+            estimated_gpu_cost_cents=tryon_job_repository.sum_commercial_estimated_gpu_cost_cents(db),
+            actual_gpu_cost_cents=tryon_job_repository.sum_commercial_actual_gpu_cost_cents(db),
             total_storage_files=storage_file_repository.count_all(db),
         )
 

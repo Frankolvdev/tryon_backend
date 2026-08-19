@@ -27,7 +27,7 @@ from app.schemas.generation_module_runtime import (
     GenerationModuleExecutionResponse,
     GenerationModuleStepExecution,
 )
-from app.services.comfyui_local_adapter_service import comfyui_local_adapter_service
+from app.services.comfyui_local_adapter_service import ComfyUILocalAdapterService, comfyui_local_adapter_service
 from app.services.comfyui_prompt_preprocessor_service import comfyui_prompt_preprocessor_service
 from app.services.generation_module_service import generation_module_service
 from app.services.generation_module_file_materializer_service import generation_module_file_materializer_service
@@ -65,7 +65,16 @@ class GenerationModuleRuntimeService:
         self._lock = threading.RLock()
         self._runtime_steps = GenerationRuntimeStepRegistry(self)
 
-    def create(self, db: Session, *, module_id: int, data: GenerationModuleExecutionCreate, user_id: int | None = None) -> GenerationModuleExecutionResponse:
+    def create(
+        self,
+        db: Session,
+        *,
+        module_id: int,
+        data: GenerationModuleExecutionCreate,
+        user_id: int | None = None,
+        user_role: str = "user",
+        accounting_mode: str = "commercial",
+    ) -> GenerationModuleExecutionResponse:
         module = generation_module_service.get_response(db, module_id=module_id)
         if not module.is_active:
             raise AppException("The generation module is inactive.")
@@ -78,15 +87,18 @@ class GenerationModuleRuntimeService:
             db,
             module_id=module.id,
             engine=engine,
+            accounting_mode=accounting_mode,
         )
         if user_id is not None:
-            generation_module_security_service.ensure_user_can_start(self, user_id=user_id, engine=engine)
+            generation_module_security_service.ensure_user_can_start(
+                self, user_id=user_id, engine=engine, user_role=user_role
+            )
         now = utc_now()
         execution_id = uuid4()
         pricing = module.pricing
-        if user_id is not None and (pricing is None or not pricing.is_active):
+        if accounting_mode == "commercial" and user_id is not None and (pricing is None or not pricing.is_active):
             raise AppException("The generation module has no active pricing rule.")
-        tokens = int(pricing.required_tokens) if pricing and user_id is not None else 0
+        tokens = int(pricing.required_tokens) if pricing and user_id is not None and accounting_mode == "commercial" else 0
         applied_pricing = (
             pricing_service.get_applied_rule_for_module(db, module.id)
             if pricing is not None
@@ -140,13 +152,14 @@ class GenerationModuleRuntimeService:
             "token_charge_basis": "current_pricing_rule_then_fifo_allocation",
             "estimated_token_bag_quote": None,
         }
-        if user_id is not None and tokens > 0:
+        if accounting_mode == "commercial" and user_id is not None and tokens > 0:
             generation_module_billing_service.charge(
                 db, user_id=user_id, execution_id=str(execution_id), module_key=module.key, tokens=tokens,
                 provider=(pricing.provider if pricing else None),
             )
         execution = GenerationModuleExecutionResponse(
             id=execution_id, module_id=module.id, module_key=module.key, user_id=user_id, engine=engine,
+            accounting_mode=accounting_mode,
             status="queued", progress=0, inputs=copy.deepcopy(data.inputs), context=copy.deepcopy(data.inputs),
             outputs={}, steps=[GenerationModuleStepExecution(step_key=s.key, step_name=s.name, step_type=s.step_type, status="pending") for s in sorted(module.steps, key=lambda item: item.position) if s.is_enabled],
             logs=[GenerationModuleExecutionLog(timestamp=now, message=(f"Execution queued. {tokens} tokens charged." if tokens else "Execution queued."))], created_at=now,
@@ -392,11 +405,20 @@ class GenerationModuleRuntimeService:
         if was_queued:
             return self._confirm_cancellation(execution_id, "Cancelled before provider dispatch.")
 
-        if provider.get("engine") == GenerationExecutionEngine.LOCAL_DOCKER.value:
+        if provider.get("engine") in {
+            GenerationExecutionEngine.LOCAL_DOCKER.value,
+            GenerationExecutionEngine.OWNER_LOCAL.value,
+        }:
             prompt_id = str(provider.get("prompt_id") or "").strip()
             if not prompt_id:
                 raise AppException("Local cancellation could not start because no ComfyUI prompt_id was persisted.")
-            confirmation = comfyui_local_adapter_service.cancel_prompt_and_wait(prompt_id=prompt_id)
+            db = SessionLocal()
+            try:
+                local_engine = GenerationExecutionEngine(provider.get("engine"))
+                local_adapter = self._local_adapter_for_engine(db, local_engine)
+                confirmation = local_adapter.cancel_prompt_and_wait(prompt_id=prompt_id)
+            finally:
+                db.close()
             if not confirmation.get("confirmed"):
                 raise AppException("ComfyUI did not confirm the interruption.")
             return self._confirm_cancellation(execution_id, f"ComfyUI prompt {prompt_id} interruption confirmed.")
@@ -472,13 +494,42 @@ class GenerationModuleRuntimeService:
             self._owners.pop(execution_id, None)
         generation_module_execution_store_service.delete(execution_id)
 
+    @staticmethod
+    def _local_adapter_for_engine(
+        db: Session,
+        engine: GenerationExecutionEngine,
+    ) -> ComfyUILocalAdapterService:
+        if engine == GenerationExecutionEngine.OWNER_LOCAL:
+            cfg = infrastructure_provider_service.get_owner_local(db)
+            return ComfyUILocalAdapterService(base_url=cfg.endpoint)
+        if engine == GenerationExecutionEngine.LOCAL_DOCKER:
+            cfg = infrastructure_provider_service.get_local_docker(db)
+            return ComfyUILocalAdapterService(base_url=cfg.endpoint)
+        return comfyui_local_adapter_service
+
+    @staticmethod
+    def _local_gpu_settings(
+        db: Session,
+        engine: GenerationExecutionEngine,
+    ) -> tuple[str | None, int]:
+        if engine == GenerationExecutionEngine.OWNER_LOCAL:
+            cfg = infrastructure_provider_service.get_owner_local(db)
+            return str(cfg.gpu or "").strip() or None, 0
+        if engine == GenerationExecutionEngine.LOCAL_DOCKER:
+            cfg = infrastructure_provider_service.get_local_docker(db)
+            return str(cfg.gpu or "").strip() or None, 0
+        return None, 0
+
     def health(self, db: Session) -> dict[str, Any]:
         try:
             runpod_health = runpod_serverless_adapter_service.health(db)
         except Exception as exc:
             runpod_health = {"available": False, "error": str(exc)}
+        local_cfg = infrastructure_provider_service.get_local_docker(db)
+        owner_cfg = infrastructure_provider_service.get_owner_local(db)
         return {
-            "local_docker": comfyui_local_adapter_service.health(),
+            "local_docker": ComfyUILocalAdapterService(base_url=local_cfg.endpoint).health(),
+            "owner_local": ComfyUILocalAdapterService(base_url=owner_cfg.endpoint).health(),
             "runpod_serverless": runpod_health,
             "modal": self._modal_health(db),
             "beam": beam_serverless_adapter_service.health(db),
@@ -495,7 +546,7 @@ class GenerationModuleRuntimeService:
             transition_execution(item, "running")
             item.started_at = started
             item.queue_position = None
-            item.provider_status = ("running_local" if item.engine == GenerationExecutionEngine.LOCAL_DOCKER else ("dispatching_to_runpod" if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS else ("dispatching_to_modal" if item.engine == GenerationExecutionEngine.MODAL else ("dispatching_to_beam" if item.engine == GenerationExecutionEngine.BEAM else "running_simulation"))))
+            item.provider_status = ("running_local" if item.engine in {GenerationExecutionEngine.LOCAL_DOCKER, GenerationExecutionEngine.OWNER_LOCAL} else ("dispatching_to_runpod" if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS else ("dispatching_to_modal" if item.engine == GenerationExecutionEngine.MODAL else ("dispatching_to_beam" if item.engine == GenerationExecutionEngine.BEAM else "running_simulation"))))
             item.heartbeat_at = started
             item.logs.append(GenerationModuleExecutionLog(timestamp=resumed_at, message=("Execution resumed by the unified provider worker." if item.provider_job_id else "Execution started by the unified provider worker.")))
             running_snapshot = item.model_copy(deep=True)
@@ -606,6 +657,7 @@ class GenerationModuleRuntimeService:
         if item.billing_breakdown.get("finalized"):
             return
         provider = item.engine.value if hasattr(item.engine, "value") else str(item.engine)
+        accounting_mode = str(getattr(item, "accounting_mode", "commercial") or "commercial")
         rule = pricing_rule_repository.get_by_id(db, item.pricing_rule_id) if item.pricing_rule_id else None
         runtime_metrics = item.runtime_metrics or {}
         provider_metrics = item.provider_metrics or {}
@@ -650,11 +702,50 @@ class GenerationModuleRuntimeService:
 
         gpu_key = None
         scaledown_seconds = 0
-        if provider == GenerationExecutionEngine.MODAL.value:
+        if item.engine in {GenerationExecutionEngine.LOCAL_DOCKER, GenerationExecutionEngine.OWNER_LOCAL}:
+            gpu_key, scaledown_seconds = self._local_gpu_settings(db, item.engine)
+        elif provider == GenerationExecutionEngine.MODAL.value:
             engine_settings = ai_engine_settings_service.get(db)
             gpu_key = engine_settings.modal_gpu
             scaledown_seconds = int(engine_settings.modal_scaledown_window_seconds)
         gpu_cost = provider_pricing_service.get_cost(db, provider=provider, gpu_key=gpu_key)
+
+        if accounting_mode != "commercial":
+            actual_seconds = round(item.real_provider_duration_ms / 1000, 3)
+            technical_cost = actual_seconds * gpu_cost if gpu_cost is not None else None
+            item.billing_breakdown = {
+                **dict(item.billing_breakdown or {}),
+                "finalized": True,
+                "accounting_mode": accounting_mode,
+                "commercial_accounting_applied": False,
+                "provider": provider,
+                "gpu_key": gpu_key,
+                "gpu_cost_usd_per_second": gpu_cost,
+                "real_provider_seconds": actual_seconds,
+                "billable_seconds": actual_seconds,
+                "technical_infrastructure_cost_usd": (
+                    round(float(technical_cost), 9) if technical_cost is not None else None
+                ),
+                "infrastructure_cost_usd": None,
+                "final_price_usd": None,
+                "final_tokens": 0,
+                "extra_tokens_debited": 0,
+                "tokens_refunded": 0,
+                "settlement_pending": False,
+                "result_locked": False,
+                "billing_access_status": "unlocked",
+                "termination_status": item.status,
+            }
+            item.tokens_charged = 0
+            item.tokens_refunded = False
+            item.result_locked = False
+            item.billing_access_status = "unlocked"
+            item.estimated_pending_tokens = None
+            # Deliberately return before FIFO, promotional settlement and
+            # generation_finance_service.finalize(). This is the hard financial
+            # boundary protecting the commercial model.
+            return
+
         margin_seconds = int(getattr(rule, "technical_margin_seconds", 0) or 0)
         profit_per_token_usd = float(getattr(rule, "desired_profit_per_token_usd", 0) or 0)
         actual_seconds = round(item.real_provider_duration_ms / 1000, 3)
@@ -1833,15 +1924,16 @@ class GenerationModuleRuntimeService:
             }
             return self._map_workflow_outputs(configuration, files, result)
         timeout = int(configuration.get("timeout_seconds") or 900)
-        if engine == GenerationExecutionEngine.LOCAL_DOCKER:
-            queued = comfyui_local_adapter_service.queue_prompt(workflow=workflow, extra_data={"generation_execution_id": str(execution_id), "materialized_inputs": engine_files})
+        if engine in {GenerationExecutionEngine.LOCAL_DOCKER, GenerationExecutionEngine.OWNER_LOCAL}:
+            local_adapter = self._local_adapter_for_engine(db, engine)
+            queued = local_adapter.queue_prompt(workflow=workflow, extra_data={"generation_execution_id": str(execution_id), "materialized_inputs": engine_files})
             with self._lock:
                 self._provider_refs[execution_id] = {"engine": engine.value, "prompt_id": queued["prompt_id"], "client_id": queued["client_id"]}
                 item = self._items[execution_id]
                 item.provider_job_id = queued["prompt_id"]
                 item.provider_status = "comfyui_queued"
                 generation_module_execution_store_service.save(item.model_copy(deep=True))
-            result = comfyui_local_adapter_service.execute_queued_prompt(
+            result = local_adapter.execute_queued_prompt(
                 prompt_id=queued["prompt_id"], client_id=queued["client_id"], job_public_id=str(execution_id),
                 timeout_seconds=timeout, download_outputs=True,
                 progress_callback=lambda progress, message, meta=None: self._provider_progress(execution_id, step["key"], progress, message),
@@ -1886,7 +1978,7 @@ class GenerationModuleRuntimeService:
             item.heartbeat_at = utc_now()
             if item.engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:
                 item.provider_status = "IN_PROGRESS"
-            elif item.engine == GenerationExecutionEngine.LOCAL_DOCKER:
+            elif item.engine in {GenerationExecutionEngine.LOCAL_DOCKER, GenerationExecutionEngine.OWNER_LOCAL}:
                 item.provider_status = "comfyui_running"
             item.logs.append(GenerationModuleExecutionLog(timestamp=item.heartbeat_at, step_key=step_key, message=message))
             progress_snapshot = item.model_copy(deep=True)
@@ -1917,9 +2009,14 @@ class GenerationModuleRuntimeService:
             if isinstance(value, dict) and self._is_generation_file_reference(value):
                 cached = cache.get(str(source_key))
                 if cached is None:
-                    if engine == GenerationExecutionEngine.LOCAL_DOCKER:
+                    if engine in {GenerationExecutionEngine.LOCAL_DOCKER, GenerationExecutionEngine.OWNER_LOCAL}:
                         cached = generation_module_file_materializer_service.materialize_local(
-                            db, execution_id=execution_id, module_input_key=str(source_key), reference=value
+                            db,
+                            execution_id=execution_id,
+                            module_input_key=str(source_key),
+                            reference=value,
+                            adapter=self._local_adapter_for_engine(db, engine),
+                            engine=engine.value,
                         )
                     elif engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:
                         cached = generation_module_file_materializer_service.materialize_runpod(

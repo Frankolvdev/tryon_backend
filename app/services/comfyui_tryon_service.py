@@ -6,7 +6,7 @@ from app.common.enums import IntegrationProvider
 from app.common.exceptions import ConflictException
 from app.models.tryon_job import TryOnJob
 from app.repositories.storage_file_repository import storage_file_repository
-from app.services.comfyui_client_service import comfyui_client_service
+from app.services.comfyui_client_service import ComfyUIClientService, comfyui_client_service
 from app.services.comfyui_workflow_service import comfyui_workflow_service
 from app.services.integration_service import integration_service
 from app.services.storage_service import storage_service
@@ -64,7 +64,13 @@ class ComfyUITryOnService:
         db: Session,
         *,
         job: TryOnJob,
+        base_url_override: str | None = None,
     ):
+        target_client = (
+            ComfyUIClientService(base_url=base_url_override)
+            if base_url_override
+            else comfyui_client_service
+        )
         person_file = storage_file_repository.get_by_id(db, job.person_image_file_id)
         item_file = storage_file_repository.get_by_id(db, job.item_image_file_id)
 
@@ -78,10 +84,10 @@ class ComfyUITryOnService:
             person_path.write_bytes(storage_service.read_bytes(db, storage_file=person_file))
             item_path.write_bytes(storage_service.read_bytes(db, storage_file=item_file))
 
-            uploaded_person = comfyui_client_service.upload_image(
+            uploaded_person = target_client.upload_image(
                 db=db, file_path=str(person_path), filename=person_path.name, overwrite=True,
             )
-            uploaded_item = comfyui_client_service.upload_image(
+            uploaded_item = target_client.upload_image(
                 db=db, file_path=str(item_path), filename=item_path.name, overwrite=True,
             )
 
@@ -98,6 +104,7 @@ class ComfyUITryOnService:
             ),
             client_id=None,
             wait_for_result=True,
+            client_service=target_client,
         )
 
         images = result.get("images") or []
@@ -107,7 +114,7 @@ class ComfyUITryOnService:
 
         first_image = images[0]
 
-        result_url = comfyui_client_service.get_view_url(
+        result_url = target_client.get_view_url(
             db=db,
             filename=first_image["filename"],
             subfolder=first_image.get("subfolder") or "",

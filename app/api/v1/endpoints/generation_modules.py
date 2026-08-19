@@ -7,6 +7,8 @@ from app.api.v1.deps import get_db
 from app.api.v1.guards.auth_guard import auth_guard
 from app.common.exceptions import NotFoundException
 from app.models.user import User
+from app.common.enums import UserRole
+from app.common.generation_module_enums import GenerationExecutionEngine
 from app.schemas.generation_module import GenerationModuleListResponse, GenerationModuleResponse
 from app.schemas.generation_module_runtime import GenerationModuleExecutionCreate, GenerationModuleExecutionResponse
 from app.services.generation_module_runtime_service import generation_module_runtime_service
@@ -110,8 +112,19 @@ async def execute_available_generation_module(
     payload = await generation_module_upload_service.parse_execution_request(
         db, module_id=module_id, request=request, user_id=current_user.id,
     )
+    accounting_mode = "commercial"
+    if current_user.role == UserRole.OWNER.value:
+        # Owner uses the same module/workflow/history, but execution is forced
+        # to the private Windows/Pinokio provider and never enters finance.
+        payload.engine = GenerationExecutionEngine.OWNER_LOCAL
+        accounting_mode = "owner_private"
     result = generation_module_runtime_service.create(
-        db, module_id=module_id, data=payload, user_id=current_user.id
+        db,
+        module_id=module_id,
+        data=payload,
+        user_id=current_user.id,
+        user_role=current_user.role,
+        accounting_mode=accounting_mode,
     )
     audit_service.create_log(db, actor_user_id=current_user.id, action="generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started generation for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
     return generation_execution_media_service.hydrate(db, result)

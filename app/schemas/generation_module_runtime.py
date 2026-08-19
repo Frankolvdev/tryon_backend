@@ -37,6 +37,7 @@ class GenerationModuleExecutionResponse(BaseModel):
     module_key: str
     user_id: int | None = None
     engine: GenerationExecutionEngine
+    accounting_mode: Literal["commercial", "admin_test", "owner_private"] = "commercial"
     status: Literal["queued", "running", "completed", "failed", "cancelled"]
     progress: int = Field(ge=0, le=100)
     inputs: dict[str, Any]

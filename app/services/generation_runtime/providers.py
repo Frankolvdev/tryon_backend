@@ -19,6 +19,10 @@ class RuntimeProviderRegistry:
             key="local", engine=GenerationExecutionEngine.LOCAL_DOCKER, remote=False,
             supports_single_job_module_runtime=True,
         ),
+        GenerationExecutionEngine.OWNER_LOCAL: RuntimeProviderDescriptor(
+            key="owner_local", engine=GenerationExecutionEngine.OWNER_LOCAL, remote=False,
+            supports_single_job_module_runtime=True,
+        ),
         GenerationExecutionEngine.RUNPOD_SERVERLESS: RuntimeProviderDescriptor(
             key="runpod_serverless", engine=GenerationExecutionEngine.RUNPOD_SERVERLESS, remote=True,
             supports_single_job_module_runtime=True,

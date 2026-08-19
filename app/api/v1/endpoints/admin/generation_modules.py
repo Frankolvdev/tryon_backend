@@ -400,6 +400,37 @@ from app.services.generation_module_runtime_service import generation_module_run
 from app.services.generation_execution_media_service import generation_execution_media_service
 
 
+@router.post("/generation-modules/{module_id}/test-execution", response_model=GenerationModuleExecutionResponse, status_code=202)
+async def test_generation_module(
+    module_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    data = await generation_module_upload_service.parse_execution_request(
+        db, module_id=module_id, request=request, user_id=None
+    )
+    result = generation_module_runtime_service.create(
+        db,
+        module_id=module_id,
+        data=data,
+        user_id=None,
+        user_role=current_admin.role,
+        accounting_mode="admin_test",
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_test_started",
+        entity_type="generation_execution",
+        entity_id=str(result.id),
+        description=f"Started non-commercial test execution for module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
 @router.post("/generation-modules/{module_id}/executions", response_model=GenerationModuleExecutionResponse, status_code=202)
 async def execute_generation_module(
     module_id: int,
@@ -414,7 +445,12 @@ async def execute_generation_module(
         db, module_id=module_id, request=request, user_id=None
     )
     result = generation_module_runtime_service.create(
-        db, module_id=module_id, data=data, user_id=None
+        db,
+        module_id=module_id,
+        data=data,
+        user_id=None,
+        user_role=current_admin.role,
+        accounting_mode="admin_test",
     )
     audit_service.create_log(db, actor_user_id=current_admin.id, action="admin_generation_execution_started", entity_type="generation_execution", entity_id=str(result.id), description=f"Started {result.engine.value if hasattr(result.engine, 'value') else result.engine} execution for module {module_id}.", ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
     return result

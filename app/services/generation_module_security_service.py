@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.common.exceptions import AppException
 from app.common.generation_module_enums import GenerationExecutionEngine
 from app.core.config import settings
+from app.common.enums import UserRole
 
 
 class GenerationModuleSecurityService:
@@ -29,9 +30,22 @@ class GenerationModuleSecurityService:
             "audit_enabled": True,
         }
 
-    def ensure_user_can_start(self, runtime_service, *, user_id: int, engine: GenerationExecutionEngine) -> None:
-        if engine not in self._user_allowed_engines():
-            raise AppException("This execution engine is not available to end users.")
+    def ensure_user_can_start(
+        self,
+        runtime_service,
+        *,
+        user_id: int,
+        engine: GenerationExecutionEngine,
+        user_role: str = UserRole.USER.value,
+    ) -> None:
+        if user_role == UserRole.OWNER.value:
+            if engine != GenerationExecutionEngine.OWNER_LOCAL:
+                raise AppException("Owner accounts may only use Owner Local.")
+        else:
+            if engine == GenerationExecutionEngine.OWNER_LOCAL:
+                raise AppException("Owner Local is reserved for the owner account.")
+            if engine not in self._user_allowed_engines():
+                raise AppException("This execution engine is not available to end users.")
         items, _ = runtime_service.list(user_id=user_id, skip=0, limit=1000)
         active = sum(1 for item in items if item.status in {"queued", "running"})
         if active >= settings.GENERATION_MAX_ACTIVE_EXECUTIONS_PER_USER:

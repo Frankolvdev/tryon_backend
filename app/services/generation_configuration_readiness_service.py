@@ -62,6 +62,7 @@ class GenerationConfigurationReadinessService:
         *,
         module_id: int,
         engine: GenerationExecutionEngine | None,
+        accounting_mode: str = "commercial",
     ) -> GenerationReadiness:
         missing: list[str] = []
 
@@ -71,35 +72,57 @@ class GenerationConfigurationReadinessService:
         if engine is None:
             self._fail(["generation_module.default_execution_engine"])
 
-        # GenerationModule does not own a pricing_rule_id column. The binding
-        # is stored on PricingRule.generation_module_id and must be resolved
-        # through the repository.
-        rule = pricing_rule_repository.get_for_generation_module(db, module.id)
-        if rule is None:
-            missing.append("pricing_rule")
-        else:
-            if not rule.is_active:
-                missing.append("pricing_rule.active")
-            if rule.generation_module_id != module.id:
-                missing.append("pricing_rule.generation_module_id")
-            if not self._positive(rule.initial_estimated_duration_seconds):
-                missing.append("pricing_rule.initial_estimated_duration_seconds")
-            if int(rule.technical_margin_seconds or 0) < 0:
-                missing.append("pricing_rule.technical_margin_seconds")
-            profit_per_token = Decimal(str(rule.desired_profit_per_token_usd or 0))
-            token_value = Decimal(str(pricing_service.get_commercial_settings(db).token_value_usd))
-            if profit_per_token < 0 or profit_per_token >= token_value:
-                missing.append("pricing_rule.desired_profit_per_token_usd")
+        # Only commercial executions enter pricing/FIFO/accounting readiness.
+        # Owner/admin technical executions are deliberately stopped before the
+        # financial boundary and therefore must not depend on commercial token
+        # configuration.
+        if accounting_mode == "commercial":
+            rule = pricing_rule_repository.get_for_generation_module(db, module.id)
+            if rule is None:
+                missing.append("pricing_rule")
+            else:
+                if not rule.is_active:
+                    missing.append("pricing_rule.active")
+                if rule.generation_module_id != module.id:
+                    missing.append("pricing_rule.generation_module_id")
+                if not self._positive(rule.initial_estimated_duration_seconds):
+                    missing.append("pricing_rule.initial_estimated_duration_seconds")
+                if int(rule.technical_margin_seconds or 0) < 0:
+                    missing.append("pricing_rule.technical_margin_seconds")
+                profit_per_token = Decimal(str(rule.desired_profit_per_token_usd or 0))
+                token_value = Decimal(str(pricing_service.get_commercial_settings(db).token_value_usd))
+                if profit_per_token < 0 or profit_per_token >= token_value:
+                    missing.append("pricing_rule.desired_profit_per_token_usd")
 
-        token_setting = system_setting_repository.get_by_key(db, TOKEN_VALUE_KEY)
-        if token_setting is None or not self._positive(token_setting.value_float):
-            missing.append("commercial_token_value_usd")
+            token_setting = system_setting_repository.get_by_key(db, TOKEN_VALUE_KEY)
+            if token_setting is None or not self._positive(token_setting.value_float):
+                missing.append("commercial_token_value_usd")
 
         provider = engine.value if hasattr(engine, "value") else str(engine)
         gpu_key = ""
         scaledown_seconds = 0
 
-        if engine == GenerationExecutionEngine.MODAL:
+        if engine == GenerationExecutionEngine.LOCAL_DOCKER:
+            cfg = infrastructure_provider_service.get_local_docker(db)
+            gpu_key = str(cfg.gpu or "").strip()
+            if not cfg.enabled:
+                missing.append("local_docker.enabled")
+            if not str(cfg.endpoint or "").strip():
+                missing.append("local_docker.endpoint")
+            if not gpu_key:
+                missing.append("local_docker.gpu")
+
+        elif engine == GenerationExecutionEngine.OWNER_LOCAL:
+            cfg = infrastructure_provider_service.get_owner_local(db)
+            gpu_key = str(cfg.gpu or "").strip()
+            if not cfg.enabled:
+                missing.append("owner_local.enabled")
+            if not str(cfg.endpoint or "").strip():
+                missing.append("owner_local.endpoint")
+            if not gpu_key:
+                missing.append("owner_local.gpu")
+
+        elif engine == GenerationExecutionEngine.MODAL:
             cfg = infrastructure_provider_service.get_modal(db)
             settings = ai_engine_settings_service.get(db)
             gpu_key = str(settings.modal_gpu or cfg.gpu or "").strip()

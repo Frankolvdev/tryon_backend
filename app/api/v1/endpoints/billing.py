@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
 from app.api.v1.guards.auth_guard import auth_guard
+from app.api.v1.guards.commercial_account_guard import commercial_account_guard
 from app.models.user import User
 from app.schemas.subscription import (
     SubscriptionActionResponse,
@@ -28,7 +29,7 @@ from app.services.token_purchase_service import (
     token_purchase_service,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(commercial_account_guard)])
 
 
 @router.post(

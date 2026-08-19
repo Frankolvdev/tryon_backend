@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 class ComfyUILocalAdapterService:
+    def __init__(self, base_url: str | None = None) -> None:
+        self._configured_base_url = str(base_url).rstrip("/") if base_url else None
+
     def _base_url(self) -> str:
+        if self._configured_base_url:
+            return self._configured_base_url
         configured_url = getattr(settings, "COMFYUI_BASE_URL", None)
         if configured_url:
             return str(configured_url).rstrip("/")

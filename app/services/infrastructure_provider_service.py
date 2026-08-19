@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import logging
 import re
+import httpx
 
 from app.services.runpod_control_plane_service import runpod_control_plane_service
 
@@ -12,13 +13,15 @@ logger = logging.getLogger(__name__)
 from sqlalchemy.orm import Session
 
 from app.models.system_setting import SystemSetting
-from app.schemas.infrastructure_provider import ModalProviderConfig, RunPodProviderConfig, BeamProviderConfig
+from app.schemas.infrastructure_provider import ModalProviderConfig, RunPodProviderConfig, BeamProviderConfig, LocalComfyProviderConfig
 
 
 class InfrastructureProviderService:
     KEY = "infrastructure_provider_modal"
     RUNPOD_KEY = "infrastructure_provider_runpod"
     BEAM_KEY = "infrastructure_provider_beam"
+    LOCAL_DOCKER_KEY = "infrastructure_provider_local_docker"
+    OWNER_LOCAL_KEY = "infrastructure_provider_owner_local"
 
     @classmethod
     def _get_row(cls, db: Session) -> SystemSetting | None:
@@ -80,6 +83,54 @@ class InfrastructureProviderService:
         row = cls._get_named_row(db, key) or SystemSetting(category="integrations", key=key, label=label, description=label, value_type="json", is_public=False, is_editable=True, is_sensitive=True)
         row.value_json = json.dumps(data, ensure_ascii=False); db.add(row); db.commit(); db.refresh(row)
         return type(payload).model_validate(data)
+
+    @classmethod
+    def get_local_docker(cls, db: Session) -> LocalComfyProviderConfig:
+        return cls._get_config(db, cls.LOCAL_DOCKER_KEY, LocalComfyProviderConfig)
+
+    @classmethod
+    def save_local_docker(cls, db: Session, payload: LocalComfyProviderConfig) -> LocalComfyProviderConfig:
+        return cls._save_config(
+            db, cls.LOCAL_DOCKER_KEY, "Docker Local ComfyUI infrastructure provider", payload, ()
+        )
+
+    @classmethod
+    def get_owner_local(cls, db: Session) -> LocalComfyProviderConfig:
+        return cls._get_config(db, cls.OWNER_LOCAL_KEY, LocalComfyProviderConfig)
+
+    @classmethod
+    def save_owner_local(cls, db: Session, payload: LocalComfyProviderConfig) -> LocalComfyProviderConfig:
+        return cls._save_config(
+            db, cls.OWNER_LOCAL_KEY, "Owner Local Pinokio infrastructure provider", payload, ()
+        )
+
+    @classmethod
+    def _test_local_comfy(cls, config: LocalComfyProviderConfig) -> dict:
+        endpoint = str(config.endpoint or "").rstrip("/")
+        if not config.enabled:
+            return {"success": False, "message": "El proveedor está desactivado.", "details": {"endpoint": endpoint}}
+        try:
+            response = httpx.get(f"{endpoint}/system_stats", timeout=min(float(config.timeout_seconds), 30.0))
+            response.raise_for_status()
+            return {
+                "success": True,
+                "message": "Conexión con ComfyUI validada.",
+                "details": {"endpoint": endpoint, "gpu": config.gpu, "system_stats": response.json()},
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "message": "No fue posible conectar con ComfyUI.",
+                "details": {"endpoint": endpoint, "error": str(exc)},
+            }
+
+    @classmethod
+    def test_local_docker(cls, db: Session) -> dict:
+        return cls._test_local_comfy(cls.get_local_docker(db))
+
+    @classmethod
+    def test_owner_local(cls, db: Session) -> dict:
+        return cls._test_local_comfy(cls.get_owner_local(db))
 
     @classmethod
     def get_runpod(cls, db: Session): return cls._get_config(db, cls.RUNPOD_KEY, RunPodProviderConfig)

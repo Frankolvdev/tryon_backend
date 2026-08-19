@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
-from app.schemas.infrastructure_provider import ModalProviderConfig, ModalProviderResponse, RunPodProviderConfig, RunPodProviderResponse, BeamProviderConfig, BeamProviderResponse, ProviderActionResponse
+from app.schemas.infrastructure_provider import ModalProviderConfig, ModalProviderResponse, RunPodProviderConfig, RunPodProviderResponse, BeamProviderConfig, BeamProviderResponse, LocalComfyProviderConfig, ProviderActionResponse
 from app.services.infrastructure_provider_service import infrastructure_provider_service
 
 router = APIRouter(prefix="/infrastructure-providers", dependencies=[Depends(admin_guard)])
@@ -14,6 +14,36 @@ def _response(config: ModalProviderConfig) -> ModalProviderResponse:
         **{**config.model_dump(), "token_secret": ""},
         token_secret_configured=bool(config.token_secret),
     )
+
+
+@router.get("/local-docker", response_model=LocalComfyProviderConfig)
+def read_local_docker(db: Session = Depends(get_db)):
+    return infrastructure_provider_service.get_local_docker(db)
+
+
+@router.put("/local-docker", response_model=LocalComfyProviderConfig)
+def update_local_docker(payload: LocalComfyProviderConfig, db: Session = Depends(get_db)):
+    return infrastructure_provider_service.save_local_docker(db, payload)
+
+
+@router.post("/local-docker/test", response_model=ProviderActionResponse)
+def test_local_docker(db: Session = Depends(get_db)):
+    return infrastructure_provider_service.test_local_docker(db)
+
+
+@router.get("/owner-local", response_model=LocalComfyProviderConfig)
+def read_owner_local(db: Session = Depends(get_db)):
+    return infrastructure_provider_service.get_owner_local(db)
+
+
+@router.put("/owner-local", response_model=LocalComfyProviderConfig)
+def update_owner_local(payload: LocalComfyProviderConfig, db: Session = Depends(get_db)):
+    return infrastructure_provider_service.save_owner_local(db, payload)
+
+
+@router.post("/owner-local/test", response_model=ProviderActionResponse)
+def test_owner_local(db: Session = Depends(get_db)):
+    return infrastructure_provider_service.test_owner_local(db)
 
 
 @router.get("/modal", response_model=ModalProviderResponse)

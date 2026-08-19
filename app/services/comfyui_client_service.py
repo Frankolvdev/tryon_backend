@@ -12,6 +12,9 @@ from app.services.integration_service import integration_service
 
 
 class ComfyUIClientService:
+    def __init__(self, base_url: str | None = None) -> None:
+        self._configured_base_url = str(base_url).rstrip("/") if base_url else None
+
     def _get_config(self, db: Session):
         config = integration_service.get_config(db, IntegrationProvider.COMFYUI)
 
@@ -24,6 +27,8 @@ class ComfyUIClientService:
         return config
 
     def _base_url(self, db: Session) -> str:
+        if self._configured_base_url:
+            return self._configured_base_url
         config = self._get_config(db)
         return config.base_url.rstrip("/")
 
