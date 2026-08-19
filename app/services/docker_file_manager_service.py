@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, hashlib, json, os, re, secrets, subprocess, tempfile, uuid
+import asyncio, hashlib, json, os, re, secrets, shlex, subprocess, tempfile, uuid
 from urllib.parse import quote
 from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, BinaryIO
@@ -374,10 +374,49 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
         if operation=="move": cls.delete_path(sv,sp)
         return {"success":True,"operation":operation,"destination_path":dp}
     @classmethod
-    def copy_local_tree_to_volume(cls,source:Path,volume:str,destination_path:str,overwrite:bool)->None:
+    def copy_local_tree_to_volume(
+        cls,
+        source:Path,
+        volume:str,
+        destination_path:str,
+        overwrite:bool,
+        skip_identical:bool=False,
+    )->None:
         dest=cls._path(destination_path)
-        with tempfile.NamedTemporaryFile(suffix=".tar") as temp:
-            cls._run(["run","--rm","-v",f"{source.resolve()}:/source:ro","-v",f"{cls._volume(volume)}:/data",cls.HELPER_IMAGE,"sh","-lc",f"mkdir -p '/data/{dest}'; {'rm -rf /data/'+dest+'/*;' if overwrite and dest else ''} cp -a /source/. '/data/{dest}/'"],timeout=3600)
+
+        # Backwards-compatible fast path: callers that do not request
+        # skip-identical retain the exact historical copy behavior.
+        if not skip_identical:
+            with tempfile.NamedTemporaryFile(suffix=".tar") as temp:
+                cls._run(["run","--rm","-v",f"{source.resolve()}:/source:ro","-v",f"{cls._volume(volume)}:/data",cls.HELPER_IMAGE,"sh","-lc",f"mkdir -p '/data/{dest}'; {'rm -rf /data/'+dest+'/*;' if overwrite and dest else ''} cp -a /source/. '/data/{dest}/'"],timeout=3600)
+            return
+
+        # Selective path used only by the model-volume exporter's
+        # "Omitir idénticos" option. cmp performs byte-for-byte comparison:
+        # identical files are skipped; different files are replaced only when
+        # overwrite=True.
+        base = f"/data/{dest}" if dest else "/data"
+        script = (
+            f"mkdir -p {shlex.quote(base)}; "
+            "find /source -type f -exec sh -c '"
+            "base=\"$1\"; overwrite=\"$2\"; shift 2; "
+            "for src do "
+            "rel=${src#/source/}; dst=\"$base/$rel\"; "
+            "mkdir -p \"$(dirname \"$dst\")\"; "
+            "if [ -e \"$dst\" ]; then "
+            "if cmp -s \"$src\" \"$dst\"; then continue; fi; "
+            "if [ \"$overwrite\" != \"1\" ]; then continue; fi; "
+            "fi; "
+            "cp -a \"$src\" \"$dst\"; "
+            "done' sh "
+            f"{shlex.quote(base)} {'1' if overwrite else '0'} {{}} +"
+        )
+        cls._run([
+            "run","--rm",
+            "-v",f"{source.resolve()}:/source:ro",
+            "-v",f"{cls._volume(volume)}:/data",
+            cls.HELPER_IMAGE,"sh","-lc",script
+        ],timeout=3600)
     @classmethod
     def preview(cls,operation:str,params:dict[str,Any])->dict[str,Any]:
         return {"operation":operation,"command":f"docker run --rm -v <volume>:/data {cls.HELPER_IMAGE} sh -lc <safe-{operation}-command>","parameters":params,"note":"Vista sanitizada; las rutas reales se validan antes de ejecutar."}

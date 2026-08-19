@@ -54,6 +54,19 @@ AUXILIARY_ASSET_RULES = {
     },
 }
 
+# Normal ComfyUI workflows store many widget selections in widgets_values
+# instead of API-format inputs. Keep this mapping exact by node class and
+# filename suffix so unrelated model references are never reclassified.
+AUXILIARY_WIDGET_RULES = {
+    'DepthAnythingPreprocessor': (
+        ('.pth', 'Depth Anything checkpoint'),
+    ),
+    'DWPreprocessor': (
+        ('.torchscript.pt', 'DWPose pose estimator'),
+        ('.onnx', 'DWPose bbox detector'),
+    ),
+}
+
 MODEL_FIELD_HINTS = ('model','ckpt','checkpoint','unet','diffusion','vae','clip','lora','control','adapter','ipadapter','sam','yolo','ultralytics','upscale','gguf','encoder','detector','bbox','segm')
 
 # Workflow values that configure algorithms, interpolation, schedulers or UI
@@ -303,9 +316,10 @@ class RuntimeImportService:
     def _auxiliary_asset_references_for_node(node: dict[str, Any]) -> list[dict[str, Any]]:
         cls = node.get('class_type', '')
         inputs = node.get('inputs') if isinstance(node.get('inputs'), dict) else {}
-        rules = AUXILIARY_ASSET_RULES.get(cls, {})
         refs: list[dict[str, Any]] = []
-        for field, label in rules.items():
+
+        # API-format workflow: exact class + exact input field.
+        for field, label in AUXILIARY_ASSET_RULES.get(cls, {}).items():
             value = inputs.get(field)
             if isinstance(value, str) and value.strip():
                 refs.append({
@@ -316,6 +330,26 @@ class RuntimeImportService:
                     'blocking': False,
                     'managed_as': 'auxiliary_asset',
                 })
+
+        # Normal UI workflow: the same values can live only in widgets_values.
+        # Restrict recognition to exact preprocessor classes and known suffixes.
+        widget_rules = AUXILIARY_WIDGET_RULES.get(cls, ())
+        if widget_rules:
+            for value in RuntimeImportService._string_values(node.get('widgets_values')):
+                normalized = value.strip().lower()
+                for suffix, label in widget_rules:
+                    if normalized.endswith(suffix):
+                        if not any(ref['value'] == value for ref in refs):
+                            refs.append({
+                                'value': value,
+                                'field': 'widgets_values',
+                                'class_type': cls,
+                                'label': label,
+                                'blocking': False,
+                                'managed_as': 'auxiliary_asset',
+                            })
+                        break
+
         return refs
 
     @staticmethod

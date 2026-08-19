@@ -156,26 +156,97 @@ class ModalFileManagerService:
             return destination.read_bytes()
 
     @classmethod
-    def copy_tree(cls, db: Session, source: Path, volume: str, destination_path: str, overwrite: bool = True):
+    def copy_tree(
+        cls,
+        db: Session,
+        source: Path,
+        volume: str,
+        destination_path: str,
+        overwrite: bool = True,
+        skip_identical: bool = False,
+    ):
         config, _ = cls._config(db)
         resolved_volume = config.volume_name
         clean_destination = (destination_path or "").strip("/\\")
         remote_parent = f"{clean_destination}/" if clean_destination else "/"
 
-        # Subir el CONTENIDO de models_root, no la carpeta models_root. Modal
-        # conserva el basename cuando el destino termina en '/', por eso cada
-        # categoría se carga individualmente en la raíz o subcarpeta elegida.
-        children = sorted(source.iterdir(), key=lambda item: item.name.lower())
-        for child in children:
+        # Preserve the exact historical bulk-upload behavior unless the caller
+        # explicitly requests "Omitir idénticos".
+        if not skip_identical:
+            children = sorted(source.iterdir(), key=lambda item: item.name.lower())
+            for child in children:
+                args = ["volume", "put"]
+                if overwrite:
+                    args.append("--force")
+                args += [resolved_volume, str(child), remote_parent]
+                cls._run(db, args, timeout=86400)
+            return {
+                "success": True,
+                "volume": resolved_volume,
+                "path": clean_destination,
+                "items_uploaded": len(children),
+                "items_skipped": 0,
+            }
+
+        uploaded = 0
+        skipped = 0
+        overwritten = 0
+        directory_cache: dict[str, dict[str, dict]] = {}
+
+        def remote_entries(parent: str) -> dict[str, dict]:
+            clean_parent = parent.strip("/\\")
+            cached = directory_cache.get(clean_parent)
+            if cached is not None:
+                return cached
+            listing = cls.list_directory(db, resolved_volume, clean_parent)
+            mapped = {
+                str(item.get("name") or ""): item
+                for item in listing.get("items", [])
+                if isinstance(item, dict)
+            }
+            directory_cache[clean_parent] = mapped
+            return mapped
+
+        for local_file in sorted(
+            (item for item in source.rglob("*") if item.is_file()),
+            key=lambda item: item.as_posix().casefold(),
+        ):
+            relative = local_file.relative_to(source).as_posix()
+            remote_file = "/".join(
+                part for part in (clean_destination, relative) if part
+            )
+            remote_dir = str(Path(remote_file).parent).replace("\\", "/")
+            if remote_dir == ".":
+                remote_dir = ""
+            filename = Path(remote_file).name
+            existing = remote_entries(remote_dir).get(filename)
+
+            if existing is not None:
+                remote_size = int(existing.get("size") or 0)
+                if remote_size == local_file.stat().st_size:
+                    skipped += 1
+                    continue
+                if not overwrite:
+                    skipped += 1
+                    continue
+
             args = ["volume", "put"]
-            if overwrite:
+            if existing is not None and overwrite:
                 args.append("--force")
-            args += [resolved_volume, str(child), remote_parent]
+            args += [resolved_volume, str(local_file), remote_file]
             cls._run(db, args, timeout=86400)
+            uploaded += 1
+            if existing is not None:
+                overwritten += 1
+
+            # Keep cached directory coherent for a second file with same name.
+            directory_cache.pop(remote_dir.strip("/\\"), None)
 
         return {
             "success": True,
             "volume": resolved_volume,
             "path": clean_destination,
-            "items_uploaded": len(children),
+            "items_uploaded": uploaded,
+            "items_skipped": skipped,
+            "items_overwritten": overwritten,
         }

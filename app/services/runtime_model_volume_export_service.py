@@ -134,6 +134,7 @@ class RuntimeModelVolumeExportService:
         models_root: Path,
         remote_path: str,
         overwrite: bool,
+        skip_identical: bool,
         notify: ProgressCallback,
         logical_models: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -144,7 +145,7 @@ class RuntimeModelVolumeExportService:
             session,
             manifest_models=logical_models,
             remote_prefix=remote_path,
-            skip_identical=not overwrite,
+            skip_identical=(skip_identical or not overwrite),
             notify=notify,
         )
 
@@ -325,7 +326,7 @@ class RuntimeModelVolumeExportService:
             if not docker_volume:
                 raise ValueError("Selecciona un volumen Docker de destino.")
             notify("docker-copy", 94, f"Copiando archivos al volumen Docker {docker_volume}…")
-            DockerFileManagerService.copy_local_tree_to_volume(models_root, docker_volume, docker_path, payload.overwrite)
+            DockerFileManagerService.copy_local_tree_to_volume(models_root, docker_volume, docker_path, payload.overwrite, payload.skip_identical)
             manifest["docker_destination"] = {"volume": docker_volume, "path": docker_path}
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -336,7 +337,7 @@ class RuntimeModelVolumeExportService:
                 from app.services.infrastructure_provider_service import InfrastructureProviderService
                 modal_config = InfrastructureProviderService.get_modal(session)
                 notify("modal-copy", 94, f"Subiendo archivos al volumen Modal {modal_config.volume_name}…")
-                ModalFileManagerService.copy_tree(session, models_root, modal_config.volume_name, docker_path, payload.overwrite)
+                ModalFileManagerService.copy_tree(session, models_root, modal_config.volume_name, docker_path, payload.overwrite, payload.skip_identical)
                 manifest["modal_destination"] = {"volume": modal_config.volume_name, "path": docker_path}
                 manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
             finally:
@@ -355,6 +356,7 @@ class RuntimeModelVolumeExportService:
                         models_root,
                         docker_path,
                         payload.overwrite,
+                        payload.skip_identical,
                         notify,
                         [item for item in records if item.get("found")],
                     )
