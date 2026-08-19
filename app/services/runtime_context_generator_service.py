@@ -635,7 +635,7 @@ fi
             'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PATH="/opt/conda/bin:$PATH" TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',
             "RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git curl bzip2 ffmpeg libgl1 libopengl0 libglib2.0-0 build-essential pkg-config libgeos-dev libgdal-dev libcairo2-dev libjpeg-dev libpng-dev libtiff-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && rm -rf /var/lib/apt/lists/*",
             "RUN geos-config --version && ldconfig -p | grep -F libgeos_c.so",
-            "RUN curl -fL https://github.com/conda-forge/miniforge/releases/download/26.3.2-3/Miniforge3-26.3.2-3-Linux-x86_64.sh -o /tmp/miniforge.sh && echo '848194851a98903134187fbb4ab50efe87b003e0c0f808f97644b7524a62bf2c  /tmp/miniforge.sh' | sha256sum -c - && bash /tmp/miniforge.sh -b -p /opt/conda && rm /tmp/miniforge.sh && conda install -y python=3.11 pip && conda clean -afy",
+            f"RUN curl -fL https://github.com/conda-forge/miniforge/releases/download/26.3.2-3/Miniforge3-26.3.2-3-Linux-x86_64.sh -o /tmp/miniforge.sh && echo '848194851a98903134187fbb4ab50efe87b003e0c0f808f97644b7524a62bf2c  /tmp/miniforge.sh' | sha256sum -c - && bash /tmp/miniforge.sh -b -p /opt/conda && rm /tmp/miniforge.sh && conda install -y python={config.python_version} pip && conda clean -afy",
             "RUN python --version && python -m pip install --upgrade 'pip>=25,<26' setuptools wheel",
             f"RUN git clone {config.comfyui_repository} {comfy_target}",
         ]
@@ -667,7 +667,7 @@ fi
                 "COPY modal-snapshot-warmup.json "
                 "/app/runtime/modal-snapshot-warmup.json"
             ),
-            f"RUN python -m pip install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
+            f"RUN python -m pip install --index-url {config.pytorch_index_url} {RuntimeBuilderService.torch_install_packages(config)}",
             f"RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' {comfy_target}/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r {comfy_target}/requirements.txt",
             "COPY requirements.txt /tmp/runtime-requirements.txt",
             "RUN if [ -s /tmp/runtime-requirements.txt ]; then python -m pip install --constraint /tmp/runtime-constraints.txt -r /tmp/runtime-requirements.txt; fi",
@@ -677,7 +677,7 @@ fi
                 f"COPY custom_nodes/ {comfy_target}/custom_nodes/",
                 f"RUN find {comfy_target}/custom_nodes -type f -name requirements.txt -print | sort | while IFS= read -r req; do echo '[runtime] Installing' \"$req\"; sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|\\$)/Id\" \"$req\"; python -m pip install --constraint /tmp/runtime-constraints.txt -r \"$req\" || exit 1; done",
                 'RUN set -eu; check_output="$(python -m pip check 2>&1)" && { printf \'%s\\n\' "$check_output"; exit 0; }; check_status=$?; printf \'%s\\n\' "$check_output"; unexpected="$(printf \'%s\\n\' "$check_output" | sed -E \'/^decord 0\\.6\\.0 is not supported on this platform$/d; /^[[:space:]]*$/d\')"; if [ -n "$unexpected" ]; then echo \'[runtime] pip check encontró errores no permitidos.\' >&2; exit "$check_status"; fi; echo \'[runtime] Advertencia conocida ignorada: decord 0.6.0 no declara soporte para esta plataforma.\'',
-                "RUN python -c 'import sys, torch, transformers; assert sys.version_info[:2] == (3, 11); assert torch.version.cuda and torch.version.cuda.startswith(\"12.8\"); assert int(transformers.__version__.split(\".\")[0]) < 5; print(sys.version); print(torch.__version__, torch.version.cuda); print(transformers.__version__)'",
+                RuntimeBuilderService.runtime_stack_assertion(config),
             ]
         if models:
             lines.append(f"COPY models/ {comfy_target}/models/")

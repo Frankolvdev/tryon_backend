@@ -66,19 +66,25 @@ def get_or_create(db: Session) -> RuntimeBuilderConfig:
         config.runtime_name = safe_name
         changed = True
 
-    profile = RuntimeBuilderService.RECOMMENDED_PROFILE
-    profile_values = {
-        "python_version": profile["python_version"],
-        "cuda_version": profile["cuda_version"],
-        "pytorch_index_url": profile["pytorch_index_url"],
-        "comfyui_commit": profile["comfyui_commit"],
-        "include_comfyui_manager": True,
-        "target_platform": "linux/amd64",
-    }
-    for field, value in profile_values.items():
-        if getattr(config, field) != value:
-            setattr(config, field, value)
-            changed = True
+    profile = (
+        RuntimeBuilderService.validated_profile_for_config(config)
+        or RuntimeBuilderService.default_validated_profile()
+    )
+    before_profile = tuple(
+        getattr(config, field)
+        for field in RuntimeBuilderService._VALIDATED_PROFILE_FIELDS
+    )
+    RuntimeBuilderService.apply_validated_profile(config, profile)
+    after_profile = tuple(
+        getattr(config, field)
+        for field in RuntimeBuilderService._VALIDATED_PROFILE_FIELDS
+    )
+    if before_profile != after_profile:
+        changed = True
+    if not config.include_comfyui_manager or config.target_platform != "linux/amd64":
+        config.include_comfyui_manager = True
+        config.target_platform = "linux/amd64"
+        changed = True
 
     merged_nodes = RuntimeBuilderService.merge_required_custom_nodes(config.custom_nodes)
     if merged_nodes != (config.custom_nodes or []):
@@ -219,6 +225,39 @@ def delete_profile_compat(profile_id: int, db: Session = Depends(get_db)):
     return {"success": True, "deleted_profile_id": profile_id}
 
 
+@router.get("/validated-profiles")
+def list_validated_profiles(db: Session = Depends(get_db)):
+    config = get_or_create(db)
+    selected = (
+        RuntimeBuilderService.validated_profile_for_config(config)
+        or RuntimeBuilderService.default_validated_profile()
+    )
+    return {
+        "selected_id": selected["id"],
+        "items": [dict(item) for item in RuntimeBuilderService.VALIDATED_PROFILES],
+    }
+
+
+@router.post(
+    "/validated-profiles/{validated_profile_id}/apply",
+    response_model=RuntimeBuilderConfigResponse,
+)
+def apply_validated_profile(
+    validated_profile_id: str,
+    db: Session = Depends(get_db),
+):
+    config = get_or_create(db)
+    try:
+        profile = RuntimeBuilderService.validated_profile(validated_profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    RuntimeBuilderService.apply_validated_profile(config, profile)
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+    return config
+
+
 @router.get("/config", response_model=RuntimeBuilderConfigResponse)
 def read_config(db: Session = Depends(get_db)):
     return get_or_create(db)
@@ -233,7 +272,10 @@ def update_config(
     values = payload.model_dump()
     # El proveedor pertenece al runtime desde su creación y no puede cambiarse al editarlo.
     values["provider"] = config.provider
-    profile = RuntimeBuilderService.RECOMMENDED_PROFILE
+    profile = (
+        RuntimeBuilderService.validated_profile_for_config(config)
+        or RuntimeBuilderService.default_validated_profile()
+    )
     values.update(
         {
             "python_version": profile["python_version"],

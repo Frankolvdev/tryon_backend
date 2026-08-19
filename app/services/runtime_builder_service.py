@@ -40,19 +40,115 @@ class RuntimeBuilderService:
         "onnxruntime-gpu", "flash-attn",
     }
 
-    # Single source of truth used by the API endpoint, validation and exports.
-    # MEGA31 accidentally removed this class attribute while the endpoint still
-    # referenced it, causing GET /runtime-builder/config to fail at runtime.
-    RECOMMENDED_PROFILE = {
-        "id": "universal-modal-rtx5090",
-        "label": "Universal GPU — Modal + RTX 5090",
-        "python_version": "3.11",
-        "cuda_version": "12.8.1",
-        "pytorch_index_url": "https://download.pytorch.org/whl/cu128",
-        "comfyui_version": "0.15.1",
-        "comfyui_frontend_version": "1.39.19",
-        "comfyui_commit": "3dd10a59c00248d00f0cb0ab794ff1bb9fb00a5f",
-    }
+    # Validated GPU stacks. Selecting one only changes protected runtime
+    # compatibility fields; workflows, nodes, models, provider settings and
+    # workspace data are intentionally untouched.
+    VALIDATED_PROFILES = (
+        {
+            "id": "universal-legacy-2026-02",
+            "label": "Universal GPU — Legacy",
+            "date": "2026-02-26",
+            "python_version": "3.11",
+            "cuda_version": "12.8.1",
+            "pytorch_index_url": "https://download.pytorch.org/whl/cu128",
+            "comfyui_version": "0.15.1",
+            "comfyui_frontend_version": "1.39.19",
+            "comfyui_commit": "3dd10a59c00248d00f0cb0ab794ff1bb9fb00a5f",
+            "torch_packages": None,
+            "gpu_profile": "universal-cu128",
+        },
+        {
+            "id": "universal-modern-2026-08",
+            "label": "Universal GPU — Modern",
+            "date": "2026-08-08",
+            "python_version": "3.10.20",
+            "cuda_version": "13.0.0",
+            "pytorch_index_url": "https://download.pytorch.org/whl/cu130",
+            "comfyui_version": "0.31.0",
+            "comfyui_frontend_version": "1.48.7",
+            "comfyui_commit": "v0.31.0",
+            "torch_packages": "torch==2.13.0+cu130 torchvision==0.28.0+cu130 torchaudio==2.11.0+cu130",
+            "gpu_profile": "universal-cu130",
+        },
+    )
+    DEFAULT_VALIDATED_PROFILE_ID = "universal-legacy-2026-02"
+
+    # Backward-compatible alias: old callers still see the exact legacy profile.
+    RECOMMENDED_PROFILE = VALIDATED_PROFILES[0]
+
+    _VALIDATED_PROFILE_FIELDS = (
+        "python_version",
+        "cuda_version",
+        "pytorch_index_url",
+        "comfyui_commit",
+    )
+
+    @classmethod
+    def validated_profile(cls, profile_id: str | None) -> dict[str, Any]:
+        for profile in cls.VALIDATED_PROFILES:
+            if profile["id"] == profile_id:
+                return dict(profile)
+        raise ValueError(f"Unknown validated runtime profile: {profile_id}")
+
+    @classmethod
+    def default_validated_profile(cls) -> dict[str, Any]:
+        return cls.validated_profile(cls.DEFAULT_VALIDATED_PROFILE_ID)
+
+    @classmethod
+    def validated_profile_for_config(
+        cls, config: RuntimeBuilderConfig
+    ) -> dict[str, Any] | None:
+        for profile in cls.VALIDATED_PROFILES:
+            if all(
+                str(getattr(config, field, "") or "") == str(profile[field] or "")
+                for field in cls._VALIDATED_PROFILE_FIELDS
+            ):
+                return dict(profile)
+        return None
+
+    @classmethod
+    def apply_validated_profile(
+        cls,
+        config: RuntimeBuilderConfig,
+        profile: dict[str, Any],
+    ) -> None:
+        for field in cls._VALIDATED_PROFILE_FIELDS:
+            setattr(config, field, profile[field])
+        config.include_comfyui_manager = True
+        config.target_platform = "linux/amd64"
+
+    @classmethod
+    def torch_install_packages(cls, config: RuntimeBuilderConfig) -> str:
+        profile = cls.validated_profile_for_config(config)
+        packages = profile.get("torch_packages") if profile else None
+        return str(packages or "torch torchvision torchaudio")
+
+    @staticmethod
+    def python_minor_tuple(version: str) -> tuple[int, int]:
+        match = re.match(r"^(\d+)\.(\d+)", str(version or "").strip())
+        if not match:
+            raise ValueError("Python version must begin with major.minor.")
+        return int(match.group(1)), int(match.group(2))
+
+    @staticmethod
+    def cuda_major_minor(version: str) -> str:
+        match = re.match(r"^(\d+)\.(\d+)", str(version or "").strip())
+        if not match:
+            raise ValueError("CUDA version must begin with major.minor.")
+        return f"{match.group(1)}.{match.group(2)}"
+
+    @classmethod
+    def runtime_stack_assertion(cls, config: RuntimeBuilderConfig) -> str:
+        py_major, py_minor = cls.python_minor_tuple(config.python_version)
+        cuda_series = cls.cuda_major_minor(config.cuda_version)
+        return (
+            "RUN python -c 'import sys, torch, transformers; "
+            f"assert sys.version_info[:2] == ({py_major}, {py_minor}); "
+            f"assert torch.version.cuda and torch.version.cuda.startswith(\"{cuda_series}\"); "
+            "assert int(transformers.__version__.split(\".\")[0]) < 5; "
+            "print(sys.version); print(torch.__version__, torch.version.cuda); "
+            "print(transformers.__version__)'"
+        )
 
     # Nombres alternativos de carpetas locales. El exportador siempre copia la
     # instalación local y nunca descarga ni reemplaza Custom Nodes desde Git.
@@ -1635,7 +1731,7 @@ class ComfyUIServer:
                     'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PATH="/opt/conda/bin:$PATH" TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',
                     "RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git curl bzip2 ffmpeg libgl1 libopengl0 libglib2.0-0 build-essential pkg-config libgeos-dev libgdal-dev libcairo2-dev libjpeg-dev libpng-dev libtiff-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && rm -rf /var/lib/apt/lists/*",
                     "RUN geos-config --version && ldconfig -p | grep -F libgeos_c.so",
-                    "RUN curl -fL https://github.com/conda-forge/miniforge/releases/download/26.3.2-3/Miniforge3-26.3.2-3-Linux-x86_64.sh -o /tmp/miniforge.sh && echo '848194851a98903134187fbb4ab50efe87b003e0c0f808f97644b7524a62bf2c  /tmp/miniforge.sh' | sha256sum -c - && bash /tmp/miniforge.sh -b -p /opt/conda && rm /tmp/miniforge.sh && conda install -y python=3.11 pip && conda clean -afy",
+                    f"RUN curl -fL https://github.com/conda-forge/miniforge/releases/download/26.3.2-3/Miniforge3-26.3.2-3-Linux-x86_64.sh -o /tmp/miniforge.sh && echo '848194851a98903134187fbb4ab50efe87b003e0c0f808f97644b7524a62bf2c  /tmp/miniforge.sh' | sha256sum -c - && bash /tmp/miniforge.sh -b -p /opt/conda && rm /tmp/miniforge.sh && conda install -y python={config.python_version} pip && conda clean -afy",
                     "RUN python --version && python -m pip install --upgrade 'pip>=25,<26' setuptools wheel",
                     f"RUN git clone {config.comfyui_repository} /app/ComfyUI",
                     commit_line,
@@ -1659,13 +1755,13 @@ class ComfyUIServer:
                         "RUN python -m pip install --no-cache-dir "
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
                     ) if modal_enabled else "",
-                    f"RUN python -m pip install --index-url {config.pytorch_index_url} torch torchvision torchaudio",
+                    f"RUN python -m pip install --index-url {config.pytorch_index_url} {RuntimeBuilderService.torch_install_packages(config)}",
                     "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r /app/ComfyUI/requirements.txt",
                     *node_lines,
                     "COPY runtime-builder/requirements.txt /tmp/runtime-requirements.txt",
                     "RUN if [ -s /tmp/runtime-requirements.txt ]; then python -m pip install --constraint /tmp/runtime-constraints.txt -r /tmp/runtime-requirements.txt; fi",
                     'RUN set -eu; check_output="$(python -m pip check 2>&1)" && { printf \'%s\\n\' "$check_output"; exit 0; }; check_status=$?; printf \'%s\\n\' "$check_output"; unexpected="$(printf \'%s\\n\' "$check_output" | sed -E \'/^decord 0\\.6\\.0 is not supported on this platform$/d; /^[[:space:]]*$/d\')"; if [ -n "$unexpected" ]; then echo \'[runtime] pip check encontró errores no permitidos.\' >&2; exit "$check_status"; fi; echo \'[runtime] Advertencia conocida ignorada: decord 0.6.0 no declara soporte para esta plataforma.\'',
-                    "RUN python -c 'import sys, torch, transformers; assert sys.version_info[:2] == (3, 11); assert torch.version.cuda and torch.version.cuda.startswith(\"12.8\"); assert int(transformers.__version__.split(\".\")[0]) < 5; print(sys.version); print(torch.__version__, torch.version.cuda); print(transformers.__version__)'",
+                    RuntimeBuilderService.runtime_stack_assertion(config),
                     *model_lines,
                     extra_paths_copy,
                     "COPY runtime-builder/tryon_runtime_guard/ /app/ComfyUI/custom_nodes/zzz_tryon_runtime_guard/",
@@ -1725,10 +1821,14 @@ fi
 wait $COMFY_PID
 """
 
+        selected_profile = (
+            RuntimeBuilderService.validated_profile_for_config(config)
+            or RuntimeBuilderService.default_validated_profile()
+        )
         runtime_manifest = {
             "contract": "runtime-builder/v2",
             "runtime_name": RuntimeBuilderService.sanitize_runtime_name(config.runtime_name),
-            "gpu_profile": "universal-cu128",
+            "gpu_profile": selected_profile["gpu_profile"],
             "gpu_targets": ["RTX 5090", "L4", "L40S", "A10G", "A100", "H100", "H200"],
             "name": config.name,
             "version": config.runtime_version,
@@ -1737,10 +1837,10 @@ wait $COMFY_PID
             "comfyui": {
                 "repository": config.comfyui_repository,
                 "commit": config.comfyui_commit,
-                "version": RuntimeBuilderService.RECOMMENDED_PROFILE["comfyui_version"],
-                "frontend_version": RuntimeBuilderService.RECOMMENDED_PROFILE["comfyui_frontend_version"],
+                "version": selected_profile["comfyui_version"],
+                "frontend_version": selected_profile["comfyui_frontend_version"],
             },
-            "compatibility_profile": RuntimeBuilderService.RECOMMENDED_PROFILE,
+            "compatibility_profile": selected_profile,
             "python": config.python_version,
             "cuda": config.cuda_version,
             "volumes": config.volumes or [],
