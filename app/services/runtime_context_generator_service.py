@@ -657,32 +657,39 @@ fi
         ]
         if config.comfyui_commit:
             lines.append(f"RUN git -C {comfy_target} checkout {config.comfyui_commit}")
+        # GPU snapshot/runtime-engine support is Modal-only.  Keep the normal
+        # Docker/RunPod/Beam image free of Modal snapshot artifacts so local
+        # builds never require runtime-engine.toml or modal-snapshot-warmup.json.
+        if modal_enabled:
+            lines += [
+                (
+                    "ARG COMFY_RUNTIME_ENGINE_GIT_URL="
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REPOSITORY
+                ),
+                (
+                    "ARG COMFY_RUNTIME_ENGINE_GIT_REF="
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
+                ),
+                (
+                    "RUN git clone --filter=blob:none "
+                    "${COMFY_RUNTIME_ENGINE_GIT_URL} "
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                    + " && git -C "
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                    + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
+                ),
+                (
+                    "RUN python -m pip install --no-cache-dir "
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                ),
+                "COPY runtime-engine.toml /app/runtime/runtime-engine.toml",
+                (
+                    "COPY modal-snapshot-warmup.json "
+                    "/app/runtime/modal-snapshot-warmup.json"
+                ),
+            ]
+
         lines += [
-            (
-                "ARG COMFY_RUNTIME_ENGINE_GIT_URL="
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REPOSITORY
-            ),
-            (
-                "ARG COMFY_RUNTIME_ENGINE_GIT_REF="
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
-            ),
-            (
-                "RUN git clone --filter=blob:none "
-                "${COMFY_RUNTIME_ENGINE_GIT_URL} "
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                + " && git -C "
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
-            ),
-            (
-                "RUN python -m pip install --no-cache-dir "
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-            ),
-            "COPY runtime-engine.toml /app/runtime/runtime-engine.toml",
-            (
-                "COPY modal-snapshot-warmup.json "
-                "/app/runtime/modal-snapshot-warmup.json"
-            ),
             f"RUN python -m pip install --index-url {config.pytorch_index_url} {RuntimeBuilderService.torch_install_packages(config)}",
             f"RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' {comfy_target}/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r {comfy_target}/requirements.txt",
             "COPY requirements.txt /tmp/runtime-requirements.txt",
