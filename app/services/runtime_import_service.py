@@ -7,7 +7,7 @@ import re
 import subprocess
 import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from app.models.runtime_builder_config import RuntimeBuilderConfig
@@ -420,6 +420,36 @@ class RuntimeImportService:
         ))
 
     @staticmethod
+    def _direct_model_candidate(models_root: Path, reference: str) -> Path | None:
+        """Resolve an exact workflow-relative model path safely.
+
+        This is a narrow fallback for installations where a models subfolder is
+        a Windows junction/symlink and therefore may not be present in the
+        recursive index.  It does not guess filenames or weaken missing-model
+        validation: the exact path declared by the workflow must exist.
+
+        Traversal/absolute paths are rejected so the logical model namespace
+        remains rooted under ComfyUI/models.
+        """
+        raw = str(reference or "").strip().replace("\\", "/")
+        while raw.startswith("./"):
+            raw = raw[2:]
+        if not raw:
+            return None
+
+        relative = PurePosixPath(raw)
+        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+            return None
+
+        candidate = models_root.joinpath(*relative.parts)
+        if (
+            candidate.is_file()
+            and candidate.suffix.lower() in MODEL_EXTENSIONS
+        ):
+            return candidate
+        return None
+
+    @staticmethod
     def _model_index(comfy: Path) -> tuple[dict[str, list[Path]], int]:
         index: dict[str, list[Path]] = {}
         count = 0
@@ -591,7 +621,20 @@ class RuntimeImportService:
         for ref in reference_records:
             reference=ref['value']; normalized=reference.replace('\\','/').lstrip('./').lower()
             matches=model_index.get(normalized) or model_index.get(Path(normalized).name.lower()) or []
-            if not matches: matches=[p for key,paths in model_index.items() if key.endswith('/'+normalized) or key.endswith(normalized) for p in paths]
+            if not matches:
+                matches=[p for key,paths in model_index.items() if key.endswith('/'+normalized) or key.endswith(normalized) for p in paths]
+
+            # Exact-path fallback for Pinokio model directories implemented as
+            # junctions/symlinks.  The recursive index can miss such folders,
+            # while the declared models/<reference> path is still perfectly
+            # accessible.  Only the exact safe workflow path is accepted.
+            if not matches:
+                direct = RuntimeImportService._direct_model_candidate(
+                    models_root, reference
+                )
+                if direct is not None:
+                    matches=[direct]
+
             unique=list(dict.fromkeys(matches))
             if not unique: missing_models.append(reference); continue
             if len(unique)>1: ambiguous_models.append(reference)
