@@ -381,6 +381,7 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
         destination_path:str,
         overwrite:bool,
         skip_identical:bool=False,
+        calculate_sha256:bool=False,
     )->None:
         dest=cls._path(destination_path)
 
@@ -391,25 +392,30 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
                 cls._run(["run","--rm","-v",f"{source.resolve()}:/source:ro","-v",f"{cls._volume(volume)}:/data",cls.HELPER_IMAGE,"sh","-lc",f"mkdir -p '/data/{dest}'; {'rm -rf /data/'+dest+'/*;' if overwrite and dest else ''} cp -a /source/. '/data/{dest}/'"],timeout=3600)
             return
 
-        # Selective path used only by the model-volume exporter's
-        # "Omitir idénticos" option. cmp performs byte-for-byte comparison:
-        # identical files are skipped; different files are replaced only when
-        # overwrite=True.
+        # Docker LOCAL only: fast skip-identical. Equal size is enough when
+        # SHA-256 is disabled; strict hashing is opt-in through the existing
+        # "Calcular SHA-256" checkbox. Other providers do not use this path.
         base = f"/data/{dest}" if dest else "/data"
         script = (
             f"mkdir -p {shlex.quote(base)}; "
             "find /source -type f -exec sh -c '"
-            "base=\"$1\"; overwrite=\"$2\"; shift 2; "
+            "base=\"$1\"; overwrite=\"$2\"; use_sha=\"$3\"; shift 3; "
             "for src do "
             "rel=${src#/source/}; dst=\"$base/$rel\"; "
             "mkdir -p \"$(dirname \"$dst\")\"; "
             "if [ -e \"$dst\" ]; then "
-            "if cmp -s \"$src\" \"$dst\"; then continue; fi; "
+            "src_size=$(stat -c %s \"$src\"); dst_size=$(stat -c %s \"$dst\"); "
+            "if [ \"$src_size\" = \"$dst_size\" ]; then "
+            "if [ \"$use_sha\" != \"1\" ]; then continue; fi; "
+            "set -- $(sha256sum \"$src\"); src_sha=$1; "
+            "set -- $(sha256sum \"$dst\"); dst_sha=$1; "
+            "if [ \"$src_sha\" = \"$dst_sha\" ]; then continue; fi; "
+            "fi; "
             "if [ \"$overwrite\" != \"1\" ]; then continue; fi; "
             "fi; "
             "cp -a \"$src\" \"$dst\"; "
             "done' sh "
-            f"{shlex.quote(base)} {'1' if overwrite else '0'} {{}} +"
+            f"{shlex.quote(base)} {'1' if overwrite else '0'} {'1' if calculate_sha256 else '0'} {{}} +"
         )
         cls._run([
             "run","--rm",

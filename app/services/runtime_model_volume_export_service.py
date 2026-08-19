@@ -326,7 +326,7 @@ class RuntimeModelVolumeExportService:
             if not docker_volume:
                 raise ValueError("Selecciona un volumen Docker de destino.")
             notify("docker-copy", 94, f"Copiando archivos al volumen Docker {docker_volume}…")
-            DockerFileManagerService.copy_local_tree_to_volume(models_root, docker_volume, docker_path, payload.overwrite, payload.skip_identical)
+            DockerFileManagerService.copy_local_tree_to_volume(models_root, docker_volume, docker_path, payload.overwrite, payload.skip_identical, payload.calculate_sha256)
             manifest["docker_destination"] = {"volume": docker_volume, "path": docker_path}
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
