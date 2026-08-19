@@ -626,25 +626,70 @@ fi
 
     @staticmethod
     def _modal_dockerfile(config: RuntimeBuilderConfig, models: bool, nodes: bool) -> str:
-        """Genera la imagen de Modal sin ENTRYPOINT ni HEALTHCHECK de Docker.
+        """Genera la imagen exclusiva de Modal con soporte de GPU Snapshot.
 
-        Modal inyecta y supervisa su propio proceso para ejecutar modal_app.py.
-        El Dockerfile normal se conserva intacto para Docker Desktop y RunPod.
+        El Dockerfile genérico permanece limpio para Docker Desktop, RunPod y
+        otros destinos.  Modal recibe aquí, y solo aquí, Runtime Engine +
+        runtime-engine.toml + modal-snapshot-warmup.json.
         """
         dockerfile = RuntimeContextGeneratorService._dockerfile(config, models, nodes)
         excluded_prefixes = ("ENTRYPOINT ", "CMD ", "HEALTHCHECK ")
-        lines = [
+        base_lines = [
             line
             for line in dockerfile.splitlines()
             if not line.lstrip().startswith(excluded_prefixes)
         ]
+
+        torch_prefix = "RUN python -m pip install --index-url "
+        insert_at = next(
+            (
+                index
+                for index, line in enumerate(base_lines)
+                if line.startswith(torch_prefix)
+            ),
+            None,
+        )
+        if insert_at is None:
+            raise RuntimeError(
+                "No se encontró el punto seguro para insertar Runtime Engine en Dockerfile.modal."
+            )
+
+        modal_runtime_lines = [
+            (
+                "ARG COMFY_RUNTIME_ENGINE_GIT_URL="
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REPOSITORY
+            ),
+            (
+                "ARG COMFY_RUNTIME_ENGINE_GIT_REF="
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
+            ),
+            (
+                "RUN git clone --filter=blob:none "
+                "${COMFY_RUNTIME_ENGINE_GIT_URL} "
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                + " && git -C "
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
+            ),
+            (
+                "RUN python -m pip install --no-cache-dir "
+                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+            ),
+            "COPY runtime-engine.toml /app/runtime/runtime-engine.toml",
+            "COPY modal-snapshot-warmup.json /app/runtime/modal-snapshot-warmup.json",
+        ]
+
+        lines = (
+            base_lines[:insert_at]
+            + modal_runtime_lines
+            + base_lines[insert_at:]
+        )
         return "\n".join(lines) + "\n"
 
     @staticmethod
     def _dockerfile(config: RuntimeBuilderConfig, models: bool, nodes: bool) -> str:
         workdir = (config.container_workdir or "/app").rstrip("/")
         comfy_target = f"{workdir}/ComfyUI"
-        modal_enabled = RuntimeBuilderService._is_modal(config)
         external_models = not models
         lines = [
             f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
@@ -657,38 +702,6 @@ fi
         ]
         if config.comfyui_commit:
             lines.append(f"RUN git -C {comfy_target} checkout {config.comfyui_commit}")
-        # GPU snapshot/runtime-engine support is Modal-only.  Keep the normal
-        # Docker/RunPod/Beam image free of Modal snapshot artifacts so local
-        # builds never require runtime-engine.toml or modal-snapshot-warmup.json.
-        if modal_enabled:
-            lines += [
-                (
-                    "ARG COMFY_RUNTIME_ENGINE_GIT_URL="
-                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REPOSITORY
-                ),
-                (
-                    "ARG COMFY_RUNTIME_ENGINE_GIT_REF="
-                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
-                ),
-                (
-                    "RUN git clone --filter=blob:none "
-                    "${COMFY_RUNTIME_ENGINE_GIT_URL} "
-                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                    + " && git -C "
-                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                    + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
-                ),
-                (
-                    "RUN python -m pip install --no-cache-dir "
-                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                ),
-                "COPY runtime-engine.toml /app/runtime/runtime-engine.toml",
-                (
-                    "COPY modal-snapshot-warmup.json "
-                    "/app/runtime/modal-snapshot-warmup.json"
-                ),
-            ]
-
         lines += [
             f"RUN python -m pip install --index-url {config.pytorch_index_url} {RuntimeBuilderService.torch_install_packages(config)}",
             f"RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' {comfy_target}/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r {comfy_target}/requirements.txt",

@@ -105,6 +105,30 @@ class RuntimeBuildExecutionService:
                 f"manifest.json no corresponde a un contexto Runtime Builder compatible en {path}."
             )
 
+        # The generic Dockerfile must never contain Modal GPU Snapshot assets.
+        # Older persisted exports may still contain them; reject those contexts
+        # before invoking Docker so the user can regenerate with the current
+        # generator. Dockerfile.modal is intentionally not affected.
+        try:
+            generic_dockerfile = (path / "Dockerfile").read_text(
+                encoding="utf-8",
+                errors="ignore",
+            )
+        except OSError as exc:
+            raise ValueError(f"No se pudo leer Dockerfile en {path}: {exc}") from exc
+
+        stale_modal_markers = (
+            "modal-snapshot-warmup.json",
+            "COPY runtime-engine.toml",
+            "/opt/comfyui-runtime-engine",
+        )
+        if any(marker in generic_dockerfile for marker in stale_modal_markers):
+            raise ValueError(
+                "El contexto persistido usa un Dockerfile antiguo que contiene "
+                "componentes exclusivos de Modal GPU Snapshot. Regenera el "
+                "contexto reproducible antes de compilar; no es seguro reutilizarlo."
+            )
+
         return {
             "valid": True,
             "context_path": str(path),
