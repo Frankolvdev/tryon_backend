@@ -41,6 +41,19 @@ MODEL_INPUT_RULES = {
     'GLIGENLoader': (('gligen_name','other',('gligen',)),),
     'unCLIPCheckpointLoader': (('ckpt_name','checkpoint',('checkpoints',)),),
 }
+# Assets consumed by preprocessors/custom nodes but not managed as normal
+# ComfyUI model-volume artifacts. These are reported separately and never
+# counted as blocking missing models. Classification is exact by class+field.
+AUXILIARY_ASSET_RULES = {
+    'DepthAnythingPreprocessor': {
+        'ckpt_name': 'Depth Anything checkpoint',
+    },
+    'DWPreprocessor': {
+        'bbox_detector': 'DWPose bbox detector',
+        'pose_estimator': 'DWPose pose estimator',
+    },
+}
+
 MODEL_FIELD_HINTS = ('model','ckpt','checkpoint','unet','diffusion','vae','clip','lora','control','adapter','ipadapter','sam','yolo','ultralytics','upscale','gguf','encoder','detector','bbox','segm')
 
 # Workflow values that configure algorithms, interpolation, schedulers or UI
@@ -50,13 +63,13 @@ NON_MODEL_WORKFLOW_VALUES = {
     'euler', 'euler_ancestral', 'euler_cfg_pp', 'heun', 'ddim',
     'uni_pc', 'uni_pc_bh2', 'dpm_fast', 'dpm_adaptive', 'dpmpp_2m',
     'dpmpp_2m_sde', 'dpmpp_sde', 'normal', 'simple', 'karras',
-    'exponential', 'sgm_uniform', 'beta', 'linear',
+    'exponential', 'sgm_uniform', 'beta', 'linear', 'lcm',
 }
 
 # Fields whose text values describe processing behavior rather than model files.
 NON_MODEL_FIELD_HINTS = {
     'algorithm', 'crop', 'interpolation', 'method', 'mode', 'preset',
-    'resample', 'resampling', 'sampler', 'sampler_name', 'scheduler',
+    'resample', 'resampling', 'sampler', 'sampler_name', 'sampling', 'scheduler',
     'upscale_method',
 }
 CORE_FALLBACK_CLASSES = {
@@ -287,12 +300,34 @@ class RuntimeImportService:
         return classes
 
     @staticmethod
+    def _auxiliary_asset_references_for_node(node: dict[str, Any]) -> list[dict[str, Any]]:
+        cls = node.get('class_type', '')
+        inputs = node.get('inputs') if isinstance(node.get('inputs'), dict) else {}
+        rules = AUXILIARY_ASSET_RULES.get(cls, {})
+        refs: list[dict[str, Any]] = []
+        for field, label in rules.items():
+            value = inputs.get(field)
+            if isinstance(value, str) and value.strip():
+                refs.append({
+                    'value': value,
+                    'field': field,
+                    'class_type': cls,
+                    'label': label,
+                    'blocking': False,
+                    'managed_as': 'auxiliary_asset',
+                })
+        return refs
+
+    @staticmethod
     def _model_references_for_node(node: dict[str, Any]) -> list[dict[str,str]]:
         cls=node.get('class_type',''); inputs=node.get('inputs') if isinstance(node.get('inputs'),dict) else {}; refs=[]
+        auxiliary_fields = set(AUXILIARY_ASSET_RULES.get(cls, {}))
         for field,model_type,folders in MODEL_INPUT_RULES.get(cls,()):
             value=inputs.get(field)
             if isinstance(value,str): refs.append({'value':value,'field':field,'model_type':model_type,'folders':','.join(folders),'class_type':cls})
         for field,value in inputs.items():
+            if field in auxiliary_fields:
+                continue
             field_lower = str(field).strip().lower()
             # UI action fields such as rgthree's "➕ Add Lora" are commonly
             # serialized as an empty string. Never attempt to resolve an empty
@@ -308,7 +343,13 @@ class RuntimeImportService:
             field_looks_model = any(h in field_lower for h in MODEL_FIELD_HINTS)
             if RuntimeImportService._looks_like_model(value) or field_looks_model:
                 if not any(r['value']==value for r in refs): refs.append({'value':value,'field':field,'model_type':'other','folders':'','class_type':cls})
+        auxiliary_values = {
+            ref['value']
+            for ref in RuntimeImportService._auxiliary_asset_references_for_node(node)
+        }
         for value in RuntimeImportService._string_values(node.get('widgets_values')):
+            if value in auxiliary_values:
+                continue
             if RuntimeImportService._looks_like_model(value) and not any(r['value']==value for r in refs):
                 refs.append({'value':value,'field':'widgets_values','model_type':'other','folders':'','class_type':cls})
         return refs
@@ -490,6 +531,18 @@ class RuntimeImportService:
             if not inferred: node_warnings.append(f'{name}: se detectó localmente, pero no se encontró repositorio.')
             required_nodes.append({'name':name,'repository':inferred or '','commit':node_commit,'enabled':True,'install_requirements':(folder/'requirements.txt').exists() or (folder/'pyproject.toml').exists(),'source_path':str(folder),'confidence':'exact-git' if node_repo else ('inferred-readme' if inferred else 'local-only'),'matched_classes':matched})
             for dep in RuntimeImportService._requirements_for_node(folder): dependencies_by_name.setdefault(dep['package'].lower(),dep)
+        auxiliary_asset_records=[]
+        for node in workflow_nodes:
+            auxiliary_asset_records.extend(
+                RuntimeImportService._auxiliary_asset_references_for_node(node)
+            )
+        unique_auxiliary_assets={}
+        for ref in auxiliary_asset_records:
+            unique_auxiliary_assets[
+                (ref['value'].replace('\\','/').lower(), ref['class_type'], ref['field'])
+            ]=ref
+        auxiliary_assets=list(unique_auxiliary_assets.values())
+
         reference_records=[]
         for node in workflow_nodes: reference_records.extend(RuntimeImportService._model_references_for_node(node))
         unique_refs={}
@@ -522,10 +575,14 @@ class RuntimeImportService:
         if not python.get('python'): warnings.append('No se detectó Python. Se revisaron venv/.venv/env/python_embeded y rutas anidadas de Pinokio.')
         if unresolved_classes: warnings.append(f'{len(unresolved_classes)} clases siguen sin resolver tras consultar ComfyUI, NODE_CLASS_MAPPINGS y reglas conocidas.')
         if missing_models: warnings.append(f'{len(set(missing_models))} modelos referenciados no fueron encontrados.')
+        if auxiliary_assets:
+            warnings.append(
+                f'{len(auxiliary_assets)} assets auxiliares de preprocessors fueron detectados y se informan por separado; no bloquean la aplicación del runtime.'
+            )
         weighted_total=max(1,len(class_types)+len(reference_records)+4)
         weighted_ok=(len(class_types)-len(unresolved_classes))+(len(reference_records)-len(set(missing_models)))+sum(bool(python.get(k)) for k in ('python','torch','cuda','gpu'))
         score=max(0,min(100,round(weighted_ok/weighted_total*100)))
-        return {'source_type':source,'selected_path':str(selected),'comfyui_path':str(comfy),'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),'torch_cuda_version':python.get('cuda'),'gpu_name':python.get('gpu'),'python_candidates':python.get('candidate_attempts',[]),'workflow':{'node_count':len(workflow_nodes),'class_types':class_types,'referenced_models':referenced},'resolved_classes':resolved_classes,'core_classes':[r['class_type'] for r in resolved_classes if r['provider']=='core'],'custom_nodes':required_nodes,'models':required_models,'python_dependencies':list(dependencies_by_name.values()),'environment_variables':[],'volumes':[{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],'unresolved_classes':unresolved_classes,'missing_models':sorted(set(missing_models)),'ambiguous_models':sorted(set(ambiguous_models)),'warnings':warnings,'summary':{'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),'core_classes':sum(1 for r in resolved_classes if r['provider']=='core'),'resolved_custom_classes':sum(1 for r in resolved_classes if r['provider']=='custom'),'required_custom_nodes':len(required_nodes),'required_models':len(required_models),'referenced_models':len(reference_records),'missing_models':len(set(missing_models)),'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),'installed_custom_nodes':len(folders),'installed_models':total_models,'runtime_catalog_classes':max(0,len(runtime_catalog)-int('__error__' in runtime_catalog)),'knowledge_base_rules':len(MODEL_INPUT_RULES),'intelligence_index_classes':int(intelligence_summary.get('classes') or 0),'intelligence_index_providers':int(intelligence_summary.get('providers') or 0),'alias_resolved_classes':sum(1 for r in resolved_classes if r.get('confidence')=='alias-resolver'),'compatibility_score':score}}
+        return {'source_type':source,'selected_path':str(selected),'comfyui_path':str(comfy),'comfyui_repository':repo or 'https://github.com/comfyanonymous/ComfyUI.git','comfyui_commit':commit,'python_executable':python.get('executable'),'python_version':python.get('python'),'torch_version':python.get('torch'),'torch_cuda_version':python.get('cuda'),'gpu_name':python.get('gpu'),'python_candidates':python.get('candidate_attempts',[]),'workflow':{'node_count':len(workflow_nodes),'class_types':class_types,'referenced_models':referenced},'resolved_classes':resolved_classes,'core_classes':[r['class_type'] for r in resolved_classes if r['provider']=='core'],'custom_nodes':required_nodes,'models':required_models,'python_dependencies':list(dependencies_by_name.values()),'environment_variables':[],'volumes':[{'name':'models','mount_path':'/opt/ComfyUI/models','read_only':False}],'unresolved_classes':unresolved_classes,'missing_models':sorted(set(missing_models)),'ambiguous_models':sorted(set(ambiguous_models)),'auxiliary_assets':auxiliary_assets,'warnings':warnings,'summary':{'workflow_nodes':len(workflow_nodes),'unique_classes':len(class_types),'core_classes':sum(1 for r in resolved_classes if r['provider']=='core'),'resolved_custom_classes':sum(1 for r in resolved_classes if r['provider']=='custom'),'required_custom_nodes':len(required_nodes),'required_models':len(required_models),'referenced_models':len(reference_records),'missing_models':len(set(missing_models)),'auxiliary_assets':len(auxiliary_assets),'python_dependencies':len(dependencies_by_name),'model_size_bytes':sum(m['size_bytes'] for m in required_models),'installed_custom_nodes':len(folders),'installed_models':total_models,'runtime_catalog_classes':max(0,len(runtime_catalog)-int('__error__' in runtime_catalog)),'knowledge_base_rules':len(MODEL_INPUT_RULES),'intelligence_index_classes':int(intelligence_summary.get('classes') or 0),'intelligence_index_providers':int(intelligence_summary.get('providers') or 0),'alias_resolved_classes':sum(1 for r in resolved_classes if r.get('confidence')=='alias-resolver'),'compatibility_score':score}}
 
     @staticmethod
     def resolve_current_workflow(path: str, workflow: dict[str, Any]) -> dict[str, Any]:
