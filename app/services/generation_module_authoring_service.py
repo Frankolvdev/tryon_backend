@@ -85,6 +85,61 @@ class GenerationModuleAuthoringService:
             raise ConflictException("A step already uses this position in the module.")
 
 
+    _PRIMITIVE_INPUT_ALIASES = frozenset({
+        "float",
+        "int",
+        "integer",
+        "string",
+        "text",
+        "boolean",
+        "bool",
+    })
+
+    @classmethod
+    def _normalize_primitive_input_bindings(
+        cls,
+        nodes: dict[str, dict[str, Any]],
+        bindings: list[WorkflowInputBinding],
+    ) -> list[WorkflowInputBinding]:
+        """Normalize safe authoring aliases for ComfyUI Primitive* nodes only.
+
+        Primitive nodes commonly serialize their editable payload under
+        ``inputs.value`` even when an authoring UI describes the field by its
+        semantic type (float/int/string/bool/etc.).
+
+        Safety constraints:
+        - the requested field must be one of the explicit aliases above;
+        - the requested field must not already exist;
+        - class_type must start with ``Primitive``;
+        - the node must actually expose ``inputs.value``.
+
+        Every other binding is left untouched and continues through the
+        existing strict validation path.
+        """
+        normalized: list[WorkflowInputBinding] = []
+
+        for binding in bindings:
+            node = nodes.get(str(binding.node_id))
+            inputs = node.get("inputs", {}) if isinstance(node, dict) else {}
+            class_type = node.get("class_type") if isinstance(node, dict) else None
+
+            can_use_value_alias = (
+                binding.input_field in cls._PRIMITIVE_INPUT_ALIASES
+                and binding.input_field not in inputs
+                and isinstance(class_type, str)
+                and class_type.startswith("Primitive")
+                and "value" in inputs
+            )
+
+            if can_use_value_alias:
+                normalized.append(
+                    binding.model_copy(update={"input_field": "value"})
+                )
+            else:
+                normalized.append(binding)
+
+        return normalized
+
     @staticmethod
     def _dedupe_input_bindings(
         bindings: list[WorkflowInputBinding],
@@ -146,7 +201,10 @@ class GenerationModuleAuthoringService:
             module, key=data.key, position=data.position
         )
         nodes = self._node_map(data.workflow_json)
-        input_bindings = self._dedupe_input_bindings(data.input_bindings)
+        input_bindings = self._normalize_primitive_input_bindings(
+            nodes, data.input_bindings
+        )
+        input_bindings = self._dedupe_input_bindings(input_bindings)
         self._assert_bindings(
             module, nodes, input_bindings, data.output_bindings
         )
@@ -200,8 +258,11 @@ class GenerationModuleAuthoringService:
         if output_bindings is None:
             output_bindings = [WorkflowOutputBinding(**item) for item in configuration.get("output_bindings", [])]
 
-        input_bindings = self._dedupe_input_bindings(input_bindings)
         nodes = self._node_map(workflow_json)
+        input_bindings = self._normalize_primitive_input_bindings(
+            nodes, input_bindings
+        )
+        input_bindings = self._dedupe_input_bindings(input_bindings)
         self._assert_bindings(module, nodes, input_bindings, output_bindings)
 
         if data.name is not None:
@@ -241,7 +302,10 @@ class GenerationModuleAuthoringService:
         if not isinstance(workflow_json, dict):
             raise AppException("The workflow step has no valid workflow JSON.")
         nodes = self._node_map(workflow_json)
-        input_bindings = self._dedupe_input_bindings(data.input_bindings)
+        input_bindings = self._normalize_primitive_input_bindings(
+            nodes, data.input_bindings
+        )
+        input_bindings = self._dedupe_input_bindings(input_bindings)
         self._assert_bindings(module, nodes, input_bindings, data.output_bindings)
         configuration["input_bindings"] = [item.model_dump() for item in input_bindings]
         configuration["output_bindings"] = [item.model_dump() for item in data.output_bindings]
