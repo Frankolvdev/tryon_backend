@@ -107,8 +107,8 @@ class GenerationConfigurationReadinessService:
             gpu_key = str(cfg.gpu or "").strip()
             if not cfg.enabled:
                 missing.append("local_docker.enabled")
-            if not str(cfg.endpoint or "").strip():
-                missing.append("local_docker.endpoint")
+            if not str(module.endpoint or "").strip():
+                missing.append("generation_module.endpoint")
             if not gpu_key:
                 missing.append("local_docker.gpu")
 
@@ -129,8 +129,8 @@ class GenerationConfigurationReadinessService:
             scaledown_seconds = int(settings.modal_scaledown_window_seconds or 0)
             if not cfg.enabled:
                 missing.append("modal.enabled")
-            if not str(cfg.app_name or "").strip():
-                missing.append("modal.app_name")
+            if not str(module.endpoint or "").strip():
+                missing.append("generation_module.modal_target")
             if not str(cfg.token_id or "").strip():
                 missing.append("modal.token_id")
             if not str(cfg.token_secret or "").strip():
@@ -148,8 +148,8 @@ class GenerationConfigurationReadinessService:
                 missing.append("runpod.enabled")
             if not str(cfg.api_key or "").strip():
                 missing.append("runpod.api_key")
-            if not str(cfg.endpoint_id or "").strip():
-                missing.append("runpod.endpoint_id")
+            if not str(module.endpoint or "").strip():
+                missing.append("generation_module.runpod_target")
             if not gpu_key:
                 missing.append("runpod.gpu_type_ids")
             if scaledown_seconds < 1:
@@ -163,8 +163,8 @@ class GenerationConfigurationReadinessService:
                 missing.append("beam.enabled")
             if not str(cfg.api_key or "").strip():
                 missing.append("beam.api_key")
-            if not str(cfg.endpoint or "").strip():
-                missing.append("beam.endpoint")
+            if not str(module.endpoint or "").strip():
+                missing.append("generation_module.beam_target")
             if not gpu_key:
                 missing.append("beam.gpu")
             if scaledown_seconds < 0:

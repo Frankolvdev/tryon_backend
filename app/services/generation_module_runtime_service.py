@@ -415,7 +415,9 @@ class GenerationModuleRuntimeService:
             db = SessionLocal()
             try:
                 local_engine = GenerationExecutionEngine(provider.get("engine"))
-                local_adapter = self._local_adapter_for_engine(db, local_engine)
+                local_adapter = self._local_adapter_for_engine(
+                    db, local_engine, request_snapshot.provider_endpoint_id
+                )
                 confirmation = local_adapter.cancel_prompt_and_wait(prompt_id=prompt_id)
             finally:
                 db.close()
@@ -498,13 +500,16 @@ class GenerationModuleRuntimeService:
     def _local_adapter_for_engine(
         db: Session,
         engine: GenerationExecutionEngine,
+        target: str | None = None,
     ) -> ComfyUILocalAdapterService:
         if engine == GenerationExecutionEngine.OWNER_LOCAL:
             cfg = infrastructure_provider_service.get_owner_local(db)
             return ComfyUILocalAdapterService(base_url=cfg.endpoint)
         if engine == GenerationExecutionEngine.LOCAL_DOCKER:
-            cfg = infrastructure_provider_service.get_local_docker(db)
-            return ComfyUILocalAdapterService(base_url=cfg.endpoint)
+            endpoint = str(target or "").strip()
+            if not endpoint:
+                raise AppException("Docker Local is selected for this module, but no ComfyUI endpoint is configured.")
+            return ComfyUILocalAdapterService(base_url=endpoint)
         return comfyui_local_adapter_service
 
     @staticmethod
@@ -1025,16 +1030,28 @@ class GenerationModuleRuntimeService:
 
 
     @staticmethod
+    def _modal_config_for_target(config, target: str | None):
+        """Return an execution-only Modal config with the module-selected App.
+
+        Provider credentials/environment/timeouts remain global. The persisted
+        provider configuration is never mutated.
+        """
+        app_name = str(target or "").strip()
+        if not app_name:
+            raise AppException("Modal is selected for this module, but no Modal runtime/App is selected.")
+        return config.model_copy(update={"app_name": app_name})
+
+    @staticmethod
     def _modal_health(db: Session) -> dict[str, Any]:
         config = infrastructure_provider_service.get_modal(db)
         return {
-            "available": bool(config.enabled and config.app_name and config.token_id and config.token_secret),
+            "available": bool(config.enabled and config.token_id and config.token_secret),
             "enabled": config.enabled,
             "runtime_url": None,
             "mode": "modal_function_call",
             "supports_cancel": True,
             "supports_progress": True,
-            "error": None if (config.enabled and config.app_name and config.token_id and config.token_secret) else "Modal provider is disabled or its App name/credentials are not configured.",
+            "error": None if (config.enabled and config.token_id and config.token_secret) else "Modal provider is disabled or its credentials are not configured.",
         }
 
     def _modal_submitted(self, execution_id: UUID, call_id: str) -> None:
@@ -1095,10 +1112,11 @@ class GenerationModuleRuntimeService:
                 raise AppException(
                     "Modal is selected for this module, but the Modal provider is disabled."
                 )
-            if not config.app_name or not config.token_id or not config.token_secret:
+            if not config.token_id or not config.token_secret:
                 raise AppException(
-                    "Modal is selected for this module, but its App name or credentials are not configured."
+                    "Modal is selected for this module, but its credentials are not configured."
                 )
+            config = self._modal_config_for_target(config, module.get("endpoint"))
 
             with self._lock:
                 current = self._items[execution_id].model_copy(deep=True)
@@ -1224,6 +1242,7 @@ class GenerationModuleRuntimeService:
         db = SessionLocal()
         try:
             config = infrastructure_provider_service.get_modal(db)
+            config = self._modal_config_for_target(config, item.provider_endpoint_id)
             if configured_timeout <= 0:
                 configured_timeout = max(
                     1,
@@ -1530,10 +1549,11 @@ class GenerationModuleRuntimeService:
         config = infrastructure_provider_service.get_modal(db)
         if not config.enabled:
             raise AppException("Modal is selected for this module, but the Modal provider is disabled.")
-        if not config.app_name or not config.token_id or not config.token_secret:
+        if not config.token_id or not config.token_secret:
             raise AppException(
-                "Modal is selected for this module, but its App name or credentials are not configured."
+                "Modal is selected for this module, but its credentials are not configured."
             )
+        config = self._modal_config_for_target(config, module.get("endpoint"))
 
         with self._lock:
             current = self._items[execution_id].model_copy(deep=True)
@@ -1925,7 +1945,8 @@ class GenerationModuleRuntimeService:
             return self._map_workflow_outputs(configuration, files, result)
         timeout = int(configuration.get("timeout_seconds") or 900)
         if engine in {GenerationExecutionEngine.LOCAL_DOCKER, GenerationExecutionEngine.OWNER_LOCAL}:
-            local_adapter = self._local_adapter_for_engine(db, engine)
+            local_target = self.get(execution_id).provider_endpoint_id
+            local_adapter = self._local_adapter_for_engine(db, engine, local_target)
             queued = local_adapter.queue_prompt(workflow=workflow, extra_data={"generation_execution_id": str(execution_id), "materialized_inputs": engine_files})
             with self._lock:
                 self._provider_refs[execution_id] = {"engine": engine.value, "prompt_id": queued["prompt_id"], "client_id": queued["client_id"]}
@@ -2015,7 +2036,9 @@ class GenerationModuleRuntimeService:
                             execution_id=execution_id,
                             module_input_key=str(source_key),
                             reference=value,
-                            adapter=self._local_adapter_for_engine(db, engine),
+                            adapter=self._local_adapter_for_engine(
+                                db, engine, self.get(execution_id).provider_endpoint_id
+                            ),
                             engine=engine.value,
                         )
                     elif engine == GenerationExecutionEngine.RUNPOD_SERVERLESS:

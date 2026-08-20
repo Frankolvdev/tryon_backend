@@ -34,6 +34,15 @@ from app.services.generation_module_authoring_service import (
 router = APIRouter()
 
 
+@router.get("/generation-module-execution-targets")
+def list_generation_module_execution_targets(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    from app.services.generation_execution_target_service import generation_execution_target_service
+    return {"items": generation_execution_target_service.list_targets(db)}
+
+
 @router.get("/generation-modules", response_model=GenerationModuleListResponse)
 def list_generation_modules(
     key: str | None = Query(default=None),
