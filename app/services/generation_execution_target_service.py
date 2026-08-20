@@ -55,12 +55,21 @@ class GenerationExecutionTargetService:
                     value = dep.get("endpoint")
                     add("beam", value, label=str(dep.get("app_name") or value or "Beam runtime"), build=build, deployment_id=str(dep_id), image_tag=dep.get("image_tag"))
 
-            # Docker Local is a built image, not a deployed HTTP endpoint. Expose
-            # it as a runtime choice only; the module keeps its explicit ComfyUI URL.
+            # Docker Local is selected by Runtime Builder image, but the module
+            # stores an opaque managed target instead of a manually typed URL.
+            # The isolated Docker Local Manager resolves this target to a
+            # healthy container and an automatically assigned free host port.
             if str(build.status or "").lower() in {"succeeded", "published", "active"} and build.image_tag:
                 cfg = configs.get(build.runtime_config_id)
                 runtime_name = getattr(cfg, "runtime_name", None) or build.image_tag
-                add("local_docker", build.image_tag, label=f"{runtime_name}:{build.version}", build=build, image_tag=build.image_tag)
+                managed_target = docker_local_runtime_manager_service.target_for_image(build.image_tag)
+                add(
+                    "local_docker",
+                    managed_target,
+                    label=f"{runtime_name}:{build.version}",
+                    build=build,
+                    image_tag=build.image_tag,
+                )
         return result
 
 

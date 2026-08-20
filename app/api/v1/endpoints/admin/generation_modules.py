@@ -419,6 +419,10 @@ async def test_generation_module(
     data = await generation_module_upload_service.parse_execution_request(
         db, module_id=module_id, request=request, user_id=None
     )
+    # Administrative tests always execute the provider configuration that is
+    # persisted on the module. A browser draft must never override the saved
+    # engine/target.
+    data.engine = None
     result = generation_module_runtime_service.create(
         db,
         module_id=module_id,
@@ -453,6 +457,10 @@ async def execute_generation_module(
     data = await generation_module_upload_service.parse_execution_request(
         db, module_id=module_id, request=request, user_id=None
     )
+    # Administrative tests always execute the provider configuration that is
+    # persisted on the module. A browser draft must never override the saved
+    # engine/target.
+    data.engine = None
     result = generation_module_runtime_service.create(
         db,
         module_id=module_id,
