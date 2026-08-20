@@ -382,10 +382,11 @@ class UserService:
         data = user_data.model_dump()
         password = data.pop("password")
 
-        # Owner accounts are non-commercial by invariant. Never create a
-        # token balance even if a client tampers with the admin request.
-        if str(data.get("role") or "") == UserRole.OWNER.value:
-            data["token_balance"] = 0
+        # User creation must never mint tokens. Token funding belongs to the
+        # dedicated financial/promotional flows where source/fund accounting
+        # can be recorded correctly. Keep the request schema backward
+        # compatible, but ignore any client-supplied initial balance here.
+        data["token_balance"] = 0
 
         data["email"] = (
             str(data["email"])
