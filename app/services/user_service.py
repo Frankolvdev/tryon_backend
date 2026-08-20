@@ -382,6 +382,11 @@ class UserService:
         data = user_data.model_dump()
         password = data.pop("password")
 
+        # Owner accounts are non-commercial by invariant. Never create a
+        # token balance even if a client tampers with the admin request.
+        if str(data.get("role") or "") == UserRole.OWNER.value:
+            data["token_balance"] = 0
+
         data["email"] = (
             str(data["email"])
             .strip()
@@ -594,6 +599,19 @@ class UserService:
             exclude_unset=True
         )
 
+        # Owner is deliberately outside commercial token accounting.
+        # Transitioning an account to owner clears the display balance without
+        # creating a commercial transaction; future owner execution never
+        # consumes this field.
+        target_role = str(update_data.get("role") or user.role)
+        if target_role == UserRole.OWNER.value:
+            update_data["token_balance"] = 0
+        elif user.role == UserRole.OWNER.value and "token_balance" in update_data:
+            # A current owner cannot receive a token balance through PATCH.
+            update_data.pop("token_balance", None)
+
+        requested_verified = update_data.get("is_verified") if "is_verified" in update_data else None
+
         if (
             "email" in update_data
             and update_data["email"]
@@ -622,13 +640,35 @@ class UserService:
                 normalized_email
             )
 
-            update_data["is_verified"] = False
+            if "is_verified" not in update_data:
+                update_data["is_verified"] = False
+                requested_verified = False
 
-        return user_repository.update(
+        updated_user = user_repository.update(
             db,
             db_obj=user,
             data=update_data,
         )
+
+        if requested_verified is not None:
+            security = account_security_service.get_or_create_user_security(
+                db,
+                user_id=updated_user.id,
+            )
+            verified = bool(requested_verified)
+            security.email_verified = verified
+            security.email_verified_at = utc_now() if verified else None
+            security.account_status = (
+                "active"
+                if verified and updated_user.is_active
+                else "pending_verification"
+                if updated_user.is_active
+                else "inactive"
+            )
+            db.add(security)
+            db.commit()
+
+        return updated_user
 
     def admin_reset_password(
         self,
@@ -884,6 +924,11 @@ class UserService:
         if not user:
             raise NotFoundException(
                 "User not found."
+            )
+
+        if user.role == UserRole.OWNER.value:
+            raise ForbiddenException(
+                "Owner accounts do not use or receive tokens."
             )
 
         new_balance = (

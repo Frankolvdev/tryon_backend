@@ -42,6 +42,11 @@ class DefaultRbacService:
             RbacModule.SEARCH,
             RbacModule.API_KEYS,
             RbacModule.WEBHOOKS,
+            RbacModule.GENERATION_MODULES,
+            RbacModule.RUNTIME_BUILDER,
+            RbacModule.INFRASTRUCTURE,
+            RbacModule.FINANCE,
+            RbacModule.MODELS_AI,
             RbacModule.ADMIN,
         ]
 
@@ -179,6 +184,13 @@ class DefaultRbacService:
                 is_active=True,
             ),
             RbacRoleCreate(
+                key="owner",
+                name="Owner",
+                description="Platform owner account for private Owner Local execution; no commercial token/billing permissions.",
+                is_system=True,
+                is_active=True,
+            ),
+            RbacRoleCreate(
                 key="user",
                 name="User",
                 description="Default user role.",
@@ -240,6 +252,14 @@ class DefaultRbacService:
                 "scheduler.read",
                 "scheduler.execute",
                 "search.read",
+                "generation_modules.read",
+                "generation_modules.create",
+                "generation_modules.update",
+                "generation_modules.execute",
+                "runtime_builder.read",
+                "infrastructure.read",
+                "finance.read",
+                "models_ai.read",
             ],
             "support": [
                 "admin.panel",
@@ -294,7 +314,17 @@ class DefaultRbacService:
                 "audit.read",
                 "activity.read",
                 "search.read",
+                "generation_modules.read",
+                "generation_modules.update",
+                "generation_modules.execute",
+                "runtime_builder.read",
+                "runtime_builder.update",
+                "infrastructure.read",
+                "infrastructure.update",
+                "models_ai.read",
+                "models_ai.update",
             ],
+            "owner": [],
             "user": [],
         }
 

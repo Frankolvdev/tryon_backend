@@ -5,6 +5,7 @@ from app.api.v1.guards.admin_guard import admin_guard
 from app.models.user import User
 from app.repositories.user_repository import user_repository
 from app.common.exceptions import ConflictException
+from app.common.enums import UserRole
 from app.schemas.finance_cashbox import *
 from app.schemas.promotional_credit import *
 from app.services.audit_service import audit_service
@@ -114,6 +115,8 @@ def create_promotional_grant(data:PromotionalGrantCreate,request:Request,db:Sess
  elif data.user_email:
   user=user_repository.get_by_email(db,str(data.user_email).strip().lower())
  if not user: raise ConflictException('User not found.')
+ if user.role == UserRole.OWNER.value:
+  raise ConflictException('Owner accounts do not use or receive promotional tokens.')
  result=promotional_credit_service.grant(db,user_id=user.id,tokens=data.tokens,provider=data.provider,grant_type='manual_admin',created_by_user_id=current_admin.id,allow_partial=False)
  audit_service.create_log(db,actor_user_id=current_admin.id,action='promotional_tokens_granted',entity_type='user',entity_id=str(user.id),description=f"{result['granted_tokens']} promotional token(s) granted from {result['provider']} credit.",ip_address=request.client.host if request.client else None,user_agent=request.headers.get('user-agent'))
  db.commit(); return result

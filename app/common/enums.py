@@ -167,6 +167,11 @@ class RbacModule(str, Enum):
     SEARCH = "search"
     API_KEYS = "api_keys"
     WEBHOOKS = "webhooks"
+    GENERATION_MODULES = "generation_modules"
+    RUNTIME_BUILDER = "runtime_builder"
+    INFRASTRUCTURE = "infrastructure"
+    FINANCE = "finance"
+    MODELS_AI = "models_ai"
     ADMIN = "admin"
 
 
