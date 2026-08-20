@@ -12,6 +12,7 @@ import httpx
 from app.core.config import settings
 from copy import deepcopy
 
+from app.services.docker_local_runtime_manager_service import docker_local_runtime_manager_service
 from app.services.comfyui_prompt_preprocessor_service import (
     comfyui_prompt_preprocessor_service,
 )
@@ -22,9 +23,17 @@ logger = logging.getLogger(__name__)
 class ComfyUILocalAdapterService:
     def __init__(self, base_url: str | None = None) -> None:
         self._configured_base_url = str(base_url).rstrip("/") if base_url else None
+        self._resolved_base_url: str | None = None
 
     def _base_url(self) -> str:
+        if self._resolved_base_url:
+            return self._resolved_base_url
         if self._configured_base_url:
+            if docker_local_runtime_manager_service.is_managed_target(self._configured_base_url):
+                self._resolved_base_url = docker_local_runtime_manager_service.ensure_endpoint(
+                    self._configured_base_url
+                ).rstrip("/")
+                return self._resolved_base_url
             return self._configured_base_url
         configured_url = getattr(settings, "COMFYUI_BASE_URL", None)
         if configured_url:

@@ -12,6 +12,7 @@ from app.models.generation_module import GenerationModule
 from app.repositories.pricing_rule_repository import pricing_rule_repository
 from app.repositories.system_setting_repository import system_setting_repository
 from app.services.ai_engine_settings_service import ai_engine_settings_service
+from app.services.docker_local_runtime_manager_service import docker_local_runtime_manager_service
 from app.services.infrastructure_provider_service import infrastructure_provider_service
 from app.services.provider_pricing_service import provider_pricing_service
 from app.services.pricing_service import TOKEN_VALUE_KEY, pricing_service
@@ -107,8 +108,16 @@ class GenerationConfigurationReadinessService:
             gpu_key = str(cfg.gpu or "").strip()
             if not cfg.enabled:
                 missing.append("local_docker.enabled")
-            if not str(module.endpoint or "").strip():
-                missing.append("generation_module.endpoint")
+            target = str(module.endpoint or "").strip()
+            if not target:
+                missing.append("generation_module.local_docker_runtime")
+            elif not docker_local_runtime_manager_service.is_managed_target(target):
+                missing.append("generation_module.local_docker_runtime")
+            else:
+                try:
+                    docker_local_runtime_manager_service.image_from_target(target)
+                except ValueError:
+                    missing.append("generation_module.local_docker_runtime")
             if not gpu_key:
                 missing.append("local_docker.gpu")
 
