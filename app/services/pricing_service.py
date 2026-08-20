@@ -413,20 +413,15 @@ class PricingService:
             if filtered:
                 samples = filtered
 
-        # Store service returns newest first. Give recent runs a progressively
-        # larger weight so workflow/GPU changes are reflected without discarding history.
+        # Preserve the existing window of up to 50 completed commercial
+        # executions and the existing outlier protection, but use the highest
+        # valid historical duration as the conservative estimate.
         count = len(samples)
-        weighted_total = 0.0
-        total_weight = 0
-        for index, (duration, _row) in enumerate(samples):
-            weight = count - index
-            weighted_total += duration * weight
-            total_weight += weight
-        estimate = weighted_total / total_weight
+        estimate = max(duration for duration, _row in samples)
         confidence = "high" if count >= 10 else "medium" if count >= 2 else "low"
         latest = samples[0][1]
         latest_at = latest.finished_at or latest.updated_at or latest.created_at
-        return round(estimate, 3), "historical_weighted_average", count, confidence, latest_at.isoformat() if latest_at else None
+        return round(estimate, 3), "historical_max", count, confidence, latest_at.isoformat() if latest_at else None
 
     def get_applied_rule_for_module(self, db: Session, module_id: int) -> AppliedPricingRuleResponse | None:
         return next((item for item in self.list_applied_rules(db) if item.generation_module_id == module_id), None)

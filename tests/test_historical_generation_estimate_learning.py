@@ -1,15 +1,20 @@
 from pathlib import Path
 
 
-def test_estimate_learns_from_first_completed_generation():
+def test_estimate_uses_maximum_valid_completed_generation():
     source = Path("app/services/pricing_service.py").read_text(encoding="utf-8")
     assert 'status="completed"' in source
     assert 'limit=50' in source
     assert 'if not samples:' in source
-    assert '"historical_weighted_average"' in source
+    assert 'return float(fallback), "initial", 0, "low", None' in source
+    assert 'if len(durations) >= 4:' in source
+    assert 'filtered = [item for item in samples if lower <= item[0] <= upper]' in source
+    assert 'estimate = max(duration for duration, _row in samples)' in source
+    assert '"historical_max"' in source
     assert 'count >= 10' in source
     assert 'count >= 2' in source
-    assert 'weight = count - index' in source
+    assert '"historical_weighted_average"' not in source
+    assert 'weight = count - index' not in source
 
 
 def test_module_contract_exposes_estimate_explanation():
