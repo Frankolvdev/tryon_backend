@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
@@ -46,6 +47,10 @@ class AiModelProfileDraftUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     draft: dict[str, Any] = Field(default_factory=dict)
 
+class AiModelProfileFinalizeRequest(BaseModel):
+    execution_id: UUID
+    storage_file_id: int = Field(gt=0)
+
 class AiModelProfileResponse(BaseModel):
     id: int
     name: str
@@ -54,6 +59,8 @@ class AiModelProfileResponse(BaseModel):
     bubble_butt_preset_id: int | None = None
     bubble_butt_variant_index: int | None = None
     body_image_url: str | None = None
+    generated_image_url: str | None = None
+    selected_generation_file_id: int | None = None
     stage: str
     draft_json: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime

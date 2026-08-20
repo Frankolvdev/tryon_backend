@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
 from app.api.v1.guards.auth_guard import auth_guard
 from app.models.user import User
-from app.schemas.ai_model_profile import AiModelProfileBodyUpdate, AiModelProfileCreate, AiModelProfileDraftUpdate, AiModelProfileResponse, BodyVariantCatalogResponse, BubbleButtVariantCatalogResponse
+from app.schemas.ai_model_profile import AiModelProfileBodyUpdate, AiModelProfileCreate, AiModelProfileDraftUpdate, AiModelProfileFinalizeRequest, AiModelProfileResponse, BodyVariantCatalogResponse, BubbleButtVariantCatalogResponse
 from app.services.ai_model_profile_service import ai_model_profile_service
 
 router = APIRouter()
@@ -70,3 +70,37 @@ def set_body(model_id: int, data: AiModelProfileBodyUpdate, db: Session = Depend
         )
     except Exception as error:
         _fail(error)
+
+@router.put("/{model_id}/finalize", response_model=AiModelProfileResponse)
+def finalize_model(
+    model_id: int,
+    data: AiModelProfileFinalizeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(auth_guard),
+):
+    try:
+        return ai_model_profile_service.response(
+            db,
+            ai_model_profile_service.finalize(
+                db,
+                current_user.id,
+                model_id,
+                data.execution_id,
+                data.storage_file_id,
+            ),
+        )
+    except Exception as error:
+        _fail(error)
+
+
+@router.delete("/{model_id}", status_code=204)
+def delete_model(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(auth_guard),
+):
+    try:
+        ai_model_profile_service.delete(db, current_user.id, model_id)
+    except Exception as error:
+        _fail(error)
+

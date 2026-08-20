@@ -9,6 +9,7 @@ from app.models.storage_file import StorageFile
 from app.services.storage_service import storage_service
 from app.services.body_proportion_tool_service import body_proportion_tool_service
 from app.services.bubble_butt_tool_service import bubble_butt_tool_service
+from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 
 
 class AiModelProfileService:
@@ -134,15 +135,86 @@ class AiModelProfileService:
         row.draft_json = safe_draft
         db.add(row); db.commit(); db.refresh(row); return row
 
+    def finalize(
+        self,
+        db: Session,
+        user_id: int,
+        model_id: int,
+        execution_id,
+        storage_file_id: int,
+    ) -> AiModelProfile:
+        row = self.get(db, user_id, model_id)
+
+        execution = generation_module_execution_store_service.get(execution_id)
+        if (
+            execution is None
+            or execution.user_id != user_id
+            or execution.module_key != "create_model_woman"
+            or execution.status != "completed"
+        ):
+            raise ValueError("The selected generation is not a completed Create Model Woman execution.")
+        if execution.result_locked or execution.billing_access_status != "unlocked":
+            raise ValueError("The selected generation result is not unlocked.")
+
+        output_file_ids: set[int] = set()
+        def collect_output_file_ids(value) -> None:
+            if isinstance(value, dict):
+                file_id = value.get("storage_file_id")
+                if isinstance(file_id, int):
+                    output_file_ids.add(file_id)
+                for nested in value.values():
+                    collect_output_file_ids(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    collect_output_file_ids(nested)
+
+        collect_output_file_ids(execution.outputs)
+        if storage_file_id not in output_file_ids:
+            raise ValueError("The selected image does not belong to this generation execution.")
+
+        stored = db.get(StorageFile, storage_file_id)
+        if not stored or stored.user_id != user_id:
+            raise LookupError("Generated image not found.")
+        if not str(stored.content_type or "").startswith("image/"):
+            raise ValueError("The selected generation result is not an image.")
+
+        draft = dict(row.draft_json or {})
+        draft["selected_generation"] = {
+            "execution_id": str(execution.id),
+            "storage_file_id": stored.id,
+        }
+        row.draft_json = draft
+        row.stage = "studio"
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return row
+
+    def delete(self, db: Session, user_id: int, model_id: int) -> None:
+        row = self.get(db, user_id, model_id)
+        db.delete(row)
+        db.commit()
+
     def response(self, db: Session, row: AiModelProfile) -> dict:
         preset = db.get(BodyProportionPreset, row.body_proportion_preset_id) if row.body_proportion_preset_id else None
         bubble = db.get(BubbleButtPreset, row.bubble_butt_preset_id) if row.bubble_butt_preset_id else None
+        selected_generation = dict(row.draft_json or {}).get("selected_generation") or {}
+        selected_generation_file_id = selected_generation.get("storage_file_id")
+        generated_image_url = None
+        if selected_generation_file_id:
+            stored = db.get(StorageFile, int(selected_generation_file_id))
+            if stored and stored.user_id == row.user_id:
+                generated_image_url = storage_service.create_presigned_url(db, storage_file=stored)
+
         return {
             "id": row.id, "name": row.name, "sex": row.sex,
             "body_proportion_preset_id": row.body_proportion_preset_id,
             "bubble_butt_preset_id": row.bubble_butt_preset_id,
             "bubble_butt_variant_index": bubble.variant_index if bubble else None,
-            "body_image_url": self._image_url(db, preset), "stage": row.stage,
+            "body_image_url": self._image_url(db, preset),
+            "generated_image_url": generated_image_url,
+            "selected_generation_file_id": int(selected_generation_file_id) if selected_generation_file_id else None,
+            "stage": row.stage,
             "draft_json": row.draft_json or {},
             "created_at": row.created_at, "updated_at": row.updated_at,
         }

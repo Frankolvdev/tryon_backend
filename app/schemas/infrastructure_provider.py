@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -13,6 +15,7 @@ class LocalComfyProviderConfig(BaseModel):
     enabled: bool = False
     endpoint: str = Field(default="http://127.0.0.1:8188", min_length=1, max_length=1000)
     gpu: str = Field(default="NVIDIA GeForce RTX 5090", min_length=1, max_length=120)
+    operating_system: Literal["linux", "windows"] = "linux"
     timeout_seconds: int = Field(default=900, ge=30, le=86400)
 
 

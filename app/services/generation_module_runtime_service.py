@@ -1947,7 +1947,15 @@ class GenerationModuleRuntimeService:
         if engine in {GenerationExecutionEngine.LOCAL_DOCKER, GenerationExecutionEngine.OWNER_LOCAL}:
             local_target = self.get(execution_id).provider_endpoint_id
             local_adapter = self._local_adapter_for_engine(db, engine, local_target)
-            queued = local_adapter.queue_prompt(workflow=workflow, extra_data={"generation_execution_id": str(execution_id), "materialized_inputs": engine_files})
+            preserve_owner_windows_paths = (
+                engine == GenerationExecutionEngine.OWNER_LOCAL
+                and infrastructure_provider_service.get_owner_local(db).operating_system == "windows"
+            )
+            queued = local_adapter.queue_prompt(
+                workflow=workflow,
+                extra_data={"generation_execution_id": str(execution_id), "materialized_inputs": engine_files},
+                preserve_workflow_paths=preserve_owner_windows_paths,
+            )
             with self._lock:
                 self._provider_refs[execution_id] = {"engine": engine.value, "prompt_id": queued["prompt_id"], "client_id": queued["client_id"]}
                 item = self._items[execution_id]
@@ -2055,7 +2063,12 @@ class GenerationModuleRuntimeService:
                     materialized.append(cached)
                 value = cached.get("relative_name") or cached.get("target_name") or cached.get("filename")
             node.setdefault("inputs", {})[binding["input_field"]] = value
-        workflow = comfyui_prompt_preprocessor_service.preprocess(workflow)
+        preserve_owner_windows_paths = (
+            engine == GenerationExecutionEngine.OWNER_LOCAL
+            and infrastructure_provider_service.get_owner_local(db).operating_system == "windows"
+        )
+        if not preserve_owner_windows_paths:
+            workflow = comfyui_prompt_preprocessor_service.preprocess(workflow)
         return workflow, configuration, materialized
 
 
