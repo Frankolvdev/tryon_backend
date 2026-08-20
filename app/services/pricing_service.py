@@ -389,7 +389,7 @@ class PricingService:
             module_id=module_id,
             status="completed",
             skip=0,
-            limit=50,
+            limit=5,
         )
         samples: list[tuple[float, object]] = []
         for row in rows:
@@ -413,12 +413,12 @@ class PricingService:
             if filtered:
                 samples = filtered
 
-        # Preserve the existing window of up to 50 completed commercial
-        # executions and the existing outlier protection, but use the highest
+        # Use the five most recent completed commercial executions for this
+        # module, preserving the existing outlier protection and the highest
         # valid historical duration as the conservative estimate.
         count = len(samples)
         estimate = max(duration for duration, _row in samples)
-        confidence = "high" if count >= 10 else "medium" if count >= 2 else "low"
+        confidence = "high" if count >= 5 else "medium" if count >= 2 else "low"
         latest = samples[0][1]
         latest_at = latest.finished_at or latest.updated_at or latest.created_at
         return round(estimate, 3), "historical_max", count, confidence, latest_at.isoformat() if latest_at else None
