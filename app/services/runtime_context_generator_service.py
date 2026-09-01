@@ -695,12 +695,60 @@ fi
             + base_lines[insert_at:]
         )
 
+        # Modal Modern only: ComfyUI's built-in GLSL nodes need the Linux EGL/GLES
+        # userspace libraries in the headless Modal image. Keep this modification
+        # strictly inside Dockerfile.modal so Docker Desktop, RunPod, Beam and the
+        # already-working Modal Legacy profile remain byte-for-byte on their prior
+        # package set. Recognize either the persisted validated Modern profile or
+        # the exact Modern runtime stack, matching RuntimeBuilderService's guard.
+        profile = RuntimeBuilderService.validated_profile_for_config(config)
+        modern_profile_selected = bool(
+            profile and profile.get("id") == "universal-modern-2026-08"
+        )
+        modern_stack_selected = bool(
+            str(getattr(config, "comfyui_commit", "") or "").strip().lower()
+            in {"v0.31.0", "0.31.0"}
+            and RuntimeBuilderService.cuda_major_minor(config.cuda_version) == "13.0"
+            and RuntimeBuilderService.python_minor_tuple(config.python_version) == (3, 10)
+        )
+        if modern_profile_selected or modern_stack_selected:
+            apt_prefix = "RUN apt-get update && apt-get install -y --no-install-recommends "
+            apt_at = next(
+                (index for index, line in enumerate(lines) if line.startswith(apt_prefix)),
+                None,
+            )
+            if apt_at is None:
+                raise RuntimeError(
+                    "No se encontró el punto seguro para agregar EGL a Dockerfile.modal Modern."
+                )
+            headless_gl_packages = (
+                "libegl1 libegl-mesa0 libgles2 libglu1-mesa libglvnd0"
+            )
+            apt_line = lines[apt_at]
+            if " libegl1 " not in f" {apt_line} ":
+                marker = " && rm -rf /var/lib/apt/lists/*"
+                if marker not in apt_line:
+                    raise RuntimeError(
+                        "La línea apt de Dockerfile.modal cambió; no se agregó EGL de forma insegura."
+                    )
+                apt_line = apt_line.replace(
+                    marker,
+                    f" {headless_gl_packages}{marker}",
+                    1,
+                )
+                lines[apt_at] = apt_line
+            lines.insert(
+                apt_at + 1,
+                "RUN ldconfig -p | grep -F libEGL.so.1 && "
+                "ldconfig -p | grep -F libGLESv2.so.2 && "
+                "ldconfig -p | grep -F libGLU.so.1",
+            )
+
         # Modal Modern only: repair binary Python extensions after every custom-node
         # requirement has finished installing. This intentionally leaves the generic
         # Docker/RunPod image untouched. Rebuilding pycocotools against the final
         # NumPy ABI fixes TBG-SAM3; reinstalling opencv-contrib-python last restores
         # cv2.ximgproc.guidedFilter when another OpenCV wheel overwrote cv2.
-        profile = RuntimeBuilderService.validated_profile_for_config(config)
         if profile and profile.get("id") == "universal-modern-2026-08":
             compatibility_repair = (
                 "RUN set -eux; "
