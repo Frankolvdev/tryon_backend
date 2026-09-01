@@ -125,29 +125,57 @@ class ModalFileManagerService:
         return {"success": True, "volume": config.volume_name, "path": path}
 
     @classmethod
-    def upload_bytes(cls, db: Session, volume: str, path: str, filename: str, content: bytes, overwrite: bool = True):
+    def _upload_destination(cls, path: str, filename: str) -> str:
+        clean_path = (path or "").strip("/\\")
+        safe_filename = Path(filename).name or "upload.bin"
+        # The shared BackOffice file-manager can send the selected filename in
+        # both `path` and X-Upload-Filename. Treat `path` as the final file path
+        # when it already ends in that filename; otherwise treat it as a folder.
+        if clean_path and Path(clean_path).name == safe_filename:
+            return clean_path.replace("\\", "/")
+        return "/".join(part for part in [clean_path, safe_filename] if part)
+
+    @classmethod
+    def upload_file_path(
+        cls,
+        db: Session,
+        volume: str,
+        path: str,
+        filename: str,
+        local_path: Path,
+        size: int,
+        overwrite: bool = True,
+    ):
         config, _ = cls._config(db)
         resolved_volume = config.volume_name
-        clean_path = (path or "").strip("/\\")
-        safe_filename = Path(filename).name
-        # The shared BackOffice file-manager sends the selected file name in
-        # both `path` and X-Upload-Filename. Modal's service historically
-        # appended the filename again, turning `models/foo.safetensors` into
-        # a directory that contained the uploaded file. Accept both parent-dir
-        # and full-file path conventions without changing any other provider.
-        if clean_path and Path(clean_path).name == safe_filename:
-            destination = clean_path.replace("\\", "/")
-        else:
-            destination = "/".join(part for part in [clean_path, safe_filename] if part)
+        destination = cls._upload_destination(path, filename)
+        args = ["volume", "put"]
+        if overwrite:
+            args.append("--force")
+        args += [resolved_volume, str(local_path), destination]
+        cls._run(db, args, timeout=86400)
+        return {
+            "success": True,
+            "volume": resolved_volume,
+            "path": destination,
+            "size": int(size),
+        }
+
+    @classmethod
+    def upload_bytes(cls, db: Session, volume: str, path: str, filename: str, content: bytes, overwrite: bool = True):
+        destination = cls._upload_destination(path, filename)
         with tempfile.TemporaryDirectory(prefix="tryon-modal-upload-") as tmp:
-            local = Path(tmp) / Path(filename).name
+            local = Path(tmp) / (Path(filename).name or "upload.bin")
             local.write_bytes(content)
-            args = ["volume", "put"]
-            if overwrite:
-                args.append("--force")
-            args += [resolved_volume, str(local), destination]
-            cls._run(db, args, timeout=3600)
-        return {"success": True, "volume": resolved_volume, "path": destination, "size": len(content)}
+            return cls.upload_file_path(
+                db,
+                volume,
+                destination,
+                filename,
+                local,
+                len(content),
+                overwrite,
+            )
 
     @classmethod
     def download_bytes(cls, db: Session, volume: str, path: str) -> bytes:

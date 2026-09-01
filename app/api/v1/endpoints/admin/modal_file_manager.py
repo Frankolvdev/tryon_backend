@@ -1,3 +1,7 @@
+import os
+import tempfile
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
 
@@ -37,10 +41,38 @@ def delete(volume: str, path: str, db: Session = Depends(get_db)):
 
 @router.post("/upload-stream")
 async def upload_stream(request: Request, volume: str = Query(...), path: str = Query(""), overwrite: bool = Query(True), db: Session = Depends(get_db)):
-    filename = request.headers.get("x-upload-filename") or "upload.bin"
+    # Modal model files can be several GB. Never buffer the complete request in
+    # RAM (`await request.body()`): stream it to a temporary file first, then
+    # let the Modal CLI upload that file. This route is intentionally isolated
+    # from Docker/RunPod/Beam file managers.
     from urllib.parse import unquote
-    content = await request.body()
-    return call(S.upload_bytes, db, volume, path, unquote(filename), content, overwrite)
+
+    filename = unquote(request.headers.get("x-upload-filename") or "upload.bin")
+    safe_filename = Path(filename).name or "upload.bin"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix="tryon-modal-upload-",
+        suffix="-" + safe_filename,
+    )
+    os.close(fd)
+    size = 0
+    try:
+        with open(tmp_name, "wb") as out:
+            async for chunk in request.stream():
+                if chunk:
+                    out.write(chunk)
+                    size += len(chunk)
+        return call(
+            S.upload_file_path,
+            db,
+            volume,
+            path,
+            filename,
+            Path(tmp_name),
+            size,
+            overwrite,
+        )
+    finally:
+        Path(tmp_name).unlink(missing_ok=True)
 
 
 @router.get("/download")
