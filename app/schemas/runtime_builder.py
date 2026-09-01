@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 class RuntimeCustomNode(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    runtime_name: str = Field(default="generation-runtime", min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
     repository: str = Field(min_length=1, max_length=1000)
     commit: str | None = Field(default=None, max_length=128)
     enabled: bool = True
@@ -45,6 +44,7 @@ class RuntimeVolume(BaseModel):
 class RuntimeBuilderConfigUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     provider: Literal["modal", "runpod", "beam", "local"] = "modal"
+    runtime_name: str = Field(default="generation-runtime", min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
     runtime_version: str = Field(min_length=1, max_length=64)
     python_version: str = Field(min_length=1, max_length=32)
     cuda_version: str = Field(min_length=1, max_length=32)
@@ -78,6 +78,7 @@ class RuntimeBuilderConfigUpdate(BaseModel):
 
 class RuntimeBuilderConfigResponse(RuntimeBuilderConfigUpdate):
     id: int
+    validated_profile_id: str
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)

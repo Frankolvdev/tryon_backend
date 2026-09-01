@@ -15,6 +15,9 @@ class RuntimeBuilderConfig(Base):
     provider: Mapped[str] = mapped_column(String(50), default="modal", nullable=False, index=True)
     runtime_name: Mapped[str] = mapped_column(String(120), default="generation-runtime", nullable=False, index=True)
     runtime_version: Mapped[str] = mapped_column(String(64), default="1.0.0", nullable=False)
+    validated_profile_id: Mapped[str] = mapped_column(
+        String(64), default="universal-legacy-2026-02", nullable=False
+    )
     python_version: Mapped[str] = mapped_column(String(32), default="3.11", nullable=False)
     cuda_version: Mapped[str] = mapped_column(String(32), default="12.8.0", nullable=False)
     pytorch_index_url: Mapped[str] = mapped_column(

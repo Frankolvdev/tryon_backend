@@ -105,6 +105,18 @@ class RuntimeBuilderService:
     def validated_profile_for_config(
         cls, config: RuntimeBuilderConfig
     ) -> dict[str, Any] | None:
+        # The selected compatibility profile is persistent state. Do not infer it
+        # from mutable runtime fields on every request: imports can legitimately
+        # inspect a different local stack and that used to make the next save/read
+        # silently fall back to Legacy. Keep exact-field matching only as a safe
+        # backward-compatible fallback for rows created before the persisted id.
+        persisted_id = str(getattr(config, "validated_profile_id", "") or "").strip()
+        if persisted_id:
+            try:
+                return cls.validated_profile(persisted_id)
+            except ValueError:
+                pass
+
         for profile in cls.VALIDATED_PROFILES:
             if all(
                 str(getattr(config, field, "") or "") == str(profile[field] or "")
@@ -119,6 +131,7 @@ class RuntimeBuilderService:
         config: RuntimeBuilderConfig,
         profile: dict[str, Any],
     ) -> None:
+        config.validated_profile_id = str(profile["id"])
         for field in cls._VALIDATED_PROFILE_FIELDS:
             setattr(config, field, profile[field])
         config.include_comfyui_manager = True

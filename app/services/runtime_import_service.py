@@ -962,10 +962,12 @@ class RuntimeImportService:
     @staticmethod
     def apply_report(db, config: RuntimeBuilderConfig, report: dict[str, Any], selection: dict[str, bool]):
         if selection.get('base',True):
+            # The compatibility profile is selected independently from the local
+            # workflow scan. Applying a resolved runtime must never overwrite the
+            # protected Python/CUDA/ComfyUI commit fields, otherwise the next
+            # request can appear to switch profiles and the user loses a stable
+            # notion of what was saved. Only the repository itself is imported.
             config.comfyui_repository=report.get('comfyui_repository') or config.comfyui_repository
-            config.comfyui_commit=report.get('comfyui_commit') or config.comfyui_commit
-            if report.get('python_version'): config.python_version=report['python_version']
-            if report.get('torch_cuda_version'): config.cuda_version=report['torch_cuda_version']
         if selection.get('custom_nodes',True):
             config.custom_nodes=[{k:v for k,v in item.items() if k in {'name','repository','commit','enabled','install_requirements'}} for item in report.get('custom_nodes',[]) if item.get('repository')]
         if selection.get('models',True):

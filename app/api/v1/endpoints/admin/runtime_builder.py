@@ -70,6 +70,7 @@ def get_or_create(db: Session) -> RuntimeBuilderConfig:
         RuntimeBuilderService.validated_profile_for_config(config)
         or RuntimeBuilderService.default_validated_profile()
     )
+    before_profile_id = str(getattr(config, "validated_profile_id", "") or "")
     before_profile = tuple(
         getattr(config, field)
         for field in RuntimeBuilderService._VALIDATED_PROFILE_FIELDS
@@ -79,7 +80,10 @@ def get_or_create(db: Session) -> RuntimeBuilderConfig:
         getattr(config, field)
         for field in RuntimeBuilderService._VALIDATED_PROFILE_FIELDS
     )
-    if before_profile != after_profile:
+    if (
+        before_profile != after_profile
+        or before_profile_id != config.validated_profile_id
+    ):
         changed = True
     if not config.include_comfyui_manager or config.target_platform != "linux/amd64":
         config.include_comfyui_manager = True
@@ -166,7 +170,8 @@ def create_profile(payload: RuntimeBuilderProfileCreate, db: Session = Depends(g
     for row in db.query(RuntimeBuilderConfig).all(): row.is_active = False
     config = RuntimeBuilderConfig(
         name=payload.name, provider=payload.provider, is_active=True, runtime_name=slug,
-        runtime_version="1.0.0", python_version=base.python_version, cuda_version=base.cuda_version,
+        runtime_version="1.0.0", validated_profile_id=base.validated_profile_id,
+        python_version=base.python_version, cuda_version=base.cuda_version,
         pytorch_index_url=base.pytorch_index_url, comfyui_repository=base.comfyui_repository,
         comfyui_commit=base.comfyui_commit, target_platform=base.target_platform,
         registry_image=f"ghcr.io/your-org/{slug}", include_comfyui_manager=True,
