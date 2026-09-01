@@ -198,7 +198,14 @@ class ModalFileManagerService:
             cached = directory_cache.get(clean_parent)
             if cached is not None:
                 return cached
-            listing = cls.list_directory(db, resolved_volume, clean_parent)
+            try:
+                listing = cls.list_directory(db, resolved_volume, clean_parent)
+            except ModalFileManagerError as exc:
+                # A missing remote directory is equivalent to an empty one for
+                # skip-identical purposes. Keep every other Modal error fatal.
+                if "no such file or directory" not in str(exc).lower():
+                    raise
+                listing = {"items": []}
             mapped = {
                 str(item.get("name") or ""): item
                 for item in listing.get("items", [])
