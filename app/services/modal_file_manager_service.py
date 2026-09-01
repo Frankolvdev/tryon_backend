@@ -129,7 +129,16 @@ class ModalFileManagerService:
         config, _ = cls._config(db)
         resolved_volume = config.volume_name
         clean_path = (path or "").strip("/\\")
-        destination = "/".join(part for part in [clean_path, Path(filename).name] if part)
+        safe_filename = Path(filename).name
+        # The shared BackOffice file-manager sends the selected file name in
+        # both `path` and X-Upload-Filename. Modal's service historically
+        # appended the filename again, turning `models/foo.safetensors` into
+        # a directory that contained the uploaded file. Accept both parent-dir
+        # and full-file path conventions without changing any other provider.
+        if clean_path and Path(clean_path).name == safe_filename:
+            destination = clean_path.replace("\\", "/")
+        else:
+            destination = "/".join(part for part in [clean_path, safe_filename] if part)
         with tempfile.TemporaryDirectory(prefix="tryon-modal-upload-") as tmp:
             local = Path(tmp) / Path(filename).name
             local.write_bytes(content)
