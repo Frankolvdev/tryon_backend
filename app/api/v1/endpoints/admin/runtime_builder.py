@@ -563,12 +563,15 @@ def import_apply(
     payload: RuntimeImportApplyRequest,
     db: Session = Depends(get_db),
 ):
-    return RuntimeImportService.apply_report(
-        db,
-        get_or_create(db),
-        payload.report,
-        payload.selection,
-    )
+    try:
+        return RuntimeImportService.apply_report(
+            db,
+            get_or_create(db),
+            payload.report,
+            payload.selection,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.post("/import/resolve-workflow")

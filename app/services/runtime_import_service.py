@@ -44,6 +44,15 @@ MODEL_INPUT_RULES = {
 # Assets consumed by preprocessors/custom nodes but not managed as normal
 # ComfyUI model-volume artifacts. These are reported separately and never
 # counted as blocking missing models. Classification is exact by class+field.
+
+# Exact Comfy Registry ids whose canonical Git repository is public and stable.
+# This is only a fallback when a locally installed provider has no usable .git
+# metadata/README URL. Never fuzzy-match these ids: a wrong repository would
+# make the generated runtime non-reproducible.
+REGISTRY_REPOSITORY_HINTS = {
+    'comfyui_controlnet_aux': 'https://github.com/Fannovel16/comfyui_controlnet_aux',
+}
+
 AUXILIARY_ASSET_RULES = {
     'DepthAnythingPreprocessor': {
         'ckpt_name': 'Depth Anything checkpoint',
@@ -686,6 +695,7 @@ class RuntimeImportService:
                 folders_by_provider_key.setdefault(key, []).append(folder)
 
         workflow_provider_fallbacks: dict[str, Path] = {}
+        workflow_provider_ids: dict[str, str] = {}
         for node in workflow_nodes:
             cls = str(node.get('class_type') or '').strip()
             properties = node.get('properties') if isinstance(node.get('properties'), dict) else {}
@@ -695,6 +705,7 @@ class RuntimeImportService:
             candidates = folders_by_provider_key.get(provider_key(cnr_id), [])
             if len(candidates) == 1:
                 workflow_provider_fallbacks.setdefault(cls, candidates[0])
+                workflow_provider_ids.setdefault(cls, cnr_id)
 
         # Consult the Intelligence Index directly. The previous MegaZIP exposed an
         # index endpoint, but the workflow resolver did not consume its result.
@@ -800,7 +811,15 @@ class RuntimeImportService:
             name=folder.name
             node_repo,node_commit=RuntimeImportService._git_info(folder); inferred=node_repo or RuntimeImportService._infer_repo(folder)
             matched=sorted(cls for cls in class_types if class_to_folder.get(cls)==folder)
-            if not inferred: node_warnings.append(f'{name}: se detectó localmente, pero no se encontró repositorio.')
+            if not inferred:
+                registry_ids = {
+                    workflow_provider_ids.get(cls)
+                    for cls in matched
+                    if workflow_provider_ids.get(cls)
+                }
+                if len(registry_ids) == 1:
+                    inferred = REGISTRY_REPOSITORY_HINTS.get(next(iter(registry_ids)))
+            if not inferred: node_warnings.append(f'{name}: se detectó localmente, pero no se encontró repositorio reproducible.')
             required_nodes.append({'name':name,'repository':inferred or '','commit':node_commit,'enabled':True,'install_requirements':(folder/'requirements.txt').exists() or (folder/'pyproject.toml').exists(),'source_path':str(folder),'confidence':'exact-git' if node_repo else ('inferred-readme' if inferred else 'local-only'),'matched_classes':matched})
             for dep in RuntimeImportService._requirements_for_node(folder): dependencies_by_name.setdefault(dep['package'].lower(),dep)
         auxiliary_asset_records=[]
@@ -969,7 +988,19 @@ class RuntimeImportService:
             # notion of what was saved. Only the repository itself is imported.
             config.comfyui_repository=report.get('comfyui_repository') or config.comfyui_repository
         if selection.get('custom_nodes',True):
-            config.custom_nodes=[{k:v for k,v in item.items() if k in {'name','repository','commit','enabled','install_requirements'}} for item in report.get('custom_nodes',[]) if item.get('repository')]
+            report_nodes = [item for item in report.get('custom_nodes',[]) if isinstance(item, dict)]
+            missing_repositories = [
+                str(item.get('name') or 'Custom Node')
+                for item in report_nodes
+                if not str(item.get('repository') or '').strip()
+            ]
+            if missing_repositories:
+                raise ValueError(
+                    'No se puede aplicar el runtime porque estos Custom Nodes fueron detectados '
+                    'pero no tienen un repositorio Git reproducible: '
+                    + ', '.join(sorted(set(missing_repositories)))
+                )
+            config.custom_nodes=[{k:v for k,v in item.items() if k in {'name','repository','commit','enabled','install_requirements'}} for item in report_nodes]
         if selection.get('models',True):
             config.models=[{k:v for k,v in item.items() if k in {'name','model_type','source_url','target_path','sha256','strategy','enabled'}} for item in report.get('models',[])]
         if selection.get('dependencies',True):
