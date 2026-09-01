@@ -1777,10 +1777,23 @@ class ComfyUIServer:
         external_models = RuntimeBuilderService._models_are_external(config)
         volume_path = RuntimeBuilderService._modal_volume_path(config)
         validated_profile = RuntimeBuilderService.validated_profile_for_config(config)
-        modal_modern_headless_gl = bool(
-            modal_enabled
-            and validated_profile
+        # Headless GL is required by ComfyUI's built-in GLSL nodes on the
+        # Modal Modern runtime. Prefer the persisted validated-profile id, but
+        # also recognize the exact Modern runtime stack itself. Exported rows
+        # can preserve the correct stack while carrying legacy/normalized
+        # profile metadata, which must not silently omit these system libs.
+        modern_profile_selected = bool(
+            validated_profile
             and validated_profile.get("id") == "universal-modern-2026-08"
+        )
+        modern_stack_selected = bool(
+            str(getattr(config, "comfyui_commit", "") or "").strip().lower()
+            in {"v0.31.0", "0.31.0"}
+            and RuntimeBuilderService.cuda_major_minor(config.cuda_version) == "13.0"
+            and RuntimeBuilderService.python_minor_tuple(config.python_version) == (3, 10)
+        )
+        modal_modern_headless_gl = bool(
+            modal_enabled and (modern_profile_selected or modern_stack_selected)
         )
         modal_headless_gl_packages = (
             " libegl1 libegl-mesa0 libgles2 libglu1-mesa libglvnd0"
