@@ -76,7 +76,7 @@ NON_MODEL_WORKFLOW_VALUES = {
     'euler', 'euler_ancestral', 'euler_cfg_pp', 'heun', 'ddim',
     'uni_pc', 'uni_pc_bh2', 'dpm_fast', 'dpm_adaptive', 'dpmpp_2m',
     'dpmpp_2m_sde', 'dpmpp_sde', 'normal', 'simple', 'karras',
-    'exponential', 'sgm_uniform', 'beta', 'linear', 'lcm',
+    'exponential', 'sgm_uniform', 'beta', 'linear', 'lcm', 'u2net',
 }
 
 # Fields whose text values describe processing behavior rather than model files.
