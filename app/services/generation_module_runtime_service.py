@@ -1409,6 +1409,7 @@ class GenerationModuleRuntimeService:
                         user_id=item.user_id,
                         outputs=normalized_outputs,
                     )
+                    self._assert_required_image_outputs(db, item=item)
                     remote_context = output.get("context")
                     if isinstance(remote_context, dict):
                         item.context = self._materialize_modal_files(
@@ -1658,6 +1659,7 @@ class GenerationModuleRuntimeService:
             item.outputs = self._persist_final_outputs(
                 db, execution_id=execution_id, user_id=item.user_id, outputs=normalized_outputs
             )
+            self._assert_required_image_outputs(db, item=item)
             remote_context = output.get("context")
             if isinstance(remote_context, dict):
                 item.context = self._materialize_modal_files(remote_context, execution_id)
@@ -2091,6 +2093,57 @@ class GenerationModuleRuntimeService:
                     enriched["temporary"] = True
             marked.append(enriched)
         return marked
+
+    @staticmethod
+    def _value_contains_image_output(value: Any) -> bool:
+        if isinstance(value, list):
+            return any(GenerationModuleRuntimeService._value_contains_image_output(item) for item in value)
+        if not isinstance(value, dict):
+            return False
+
+        content_type = str(value.get("content_type") or "").lower()
+        if content_type.startswith("image/") and (
+            value.get("storage_file_id")
+            or value.get("local_path")
+            or value.get("public_url")
+            or value.get("download_url")
+            or value.get("url")
+            or value.get("__generation_file__")
+        ):
+            return True
+
+        return any(
+            GenerationModuleRuntimeService._value_contains_image_output(item)
+            for item in value.values()
+        )
+
+    def _assert_required_image_outputs(
+        self,
+        db: Session,
+        *,
+        item: GenerationModuleExecutionResponse,
+    ) -> None:
+        """Fail only when the module contract requires an image and none exists.
+
+        This is deliberately a terminal-result validation, not a new provider/status
+        model. It leaves all existing execution/error handling intact and only prevents
+        Modal from being marked completed when a required image output is missing.
+        """
+        module = generation_module_service.get_response(db, module_id=item.module_id)
+        missing: list[str] = []
+        for definition in module.outputs:
+            output_type = getattr(definition.output_type, "value", definition.output_type)
+            if not definition.is_required or str(output_type) not in {"image", "images"}:
+                continue
+            if not self._value_contains_image_output(item.outputs.get(definition.key)):
+                missing.append(definition.key)
+
+        if missing:
+            raise RuntimeError(
+                "Generation Runtime completed without the required image output(s): "
+                + ", ".join(missing)
+                + "."
+            )
 
     def _persist_final_outputs(
         self,
