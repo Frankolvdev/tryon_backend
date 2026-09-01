@@ -22,6 +22,9 @@ MODEL_TYPE_BY_FOLDER = {
     'text_encoders': 'clip', 'animatediff_models': 'video_model',
 }
 IGNORED_DIRS = {'models', 'output', 'input', '.git', 'node_modules', '__pycache__', '.cache', 'temp'}
+# Internal package/directory names that must never be emitted as standalone
+# reproducible Custom Nodes. They may exist inside a real custom-node repo.
+NON_CUSTOM_NODE_PROVIDER_NAMES = {'nodes', 'py', 'videohelpersuite'}
 UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$')
 MODEL_INPUT_RULES = {
     'UNETLoader': (('unet_name','diffusion_model',('diffusion_models','unet','unets')),),
@@ -779,6 +782,23 @@ class RuntimeImportService:
                 source_file = Path(str(intel['source_file'])).resolve()
                 candidate = Path(str(intel.get('source_path') or source_file.parent)).resolve()
                 folder = candidate
+            if folder:
+                # Intelligence/source-hint fallbacks can occasionally point at an
+                # internal Python package (for example nodes/, py/ or
+                # videohelpersuite/) instead of the actual repository directory.
+                # Never emit those internal names as standalone Custom Nodes.
+                # Promote them to the direct child of custom_nodes when possible;
+                # otherwise leave the class unresolved rather than persisting a
+                # fake, non-reproducible provider.
+                if folder.name.casefold() in NON_CUSTOM_NODE_PROVIDER_NAMES:
+                    try:
+                        rel_provider = folder.resolve().relative_to(custom_root.resolve())
+                        if len(rel_provider.parts) > 1:
+                            folder = custom_root / rel_provider.parts[0]
+                        else:
+                            folder = None
+                    except (OSError, ValueError):
+                        folder = None
             if folder:
                 class_to_folder[cls] = folder
                 required_folders[str(folder).casefold()]=folder
