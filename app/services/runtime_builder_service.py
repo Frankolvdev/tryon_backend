@@ -1545,7 +1545,7 @@ class ComfyUIServer:
         _emit_model_diagnostics(payload, phase="after_pipeline", execution_id=execution_id)
         return result
 
-    @modal.asgi_app(requires_proxy_auth=True)
+    @modal.asgi_app(requires_proxy_auth=False)
     def comfyui(self):
         return _proxy_app()
 
