@@ -660,30 +660,34 @@ fi
                 "No se encontró el punto seguro para insertar Runtime Engine en Dockerfile.modal."
             )
 
-        modal_runtime_lines = [
-            (
-                "ARG COMFY_RUNTIME_ENGINE_GIT_URL="
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REPOSITORY
-            ),
-            (
-                "ARG COMFY_RUNTIME_ENGINE_GIT_REF="
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
-            ),
-            (
-                "RUN git clone --filter=blob:none "
-                "${COMFY_RUNTIME_ENGINE_GIT_URL} "
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                + " && git -C "
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
-            ),
-            (
-                "RUN python -m pip install --no-cache-dir "
-                + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-            ),
+        modal_runtime_lines = []
+        if RuntimeBuilderService.modal_runtime_engine_enabled(config):
+            modal_runtime_lines.extend([
+                (
+                    "ARG COMFY_RUNTIME_ENGINE_GIT_URL="
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REPOSITORY
+                ),
+                (
+                    "ARG COMFY_RUNTIME_ENGINE_GIT_REF="
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
+                ),
+                (
+                    "RUN git clone --filter=blob:none "
+                    "${COMFY_RUNTIME_ENGINE_GIT_URL} "
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                    + " && git -C "
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                    + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
+                ),
+                (
+                    "RUN python -m pip install --no-cache-dir "
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                ),
+            ])
+        modal_runtime_lines.extend([
             "COPY runtime-engine.toml /app/runtime/runtime-engine.toml",
             "COPY modal-snapshot-warmup.json /app/runtime/modal-snapshot-warmup.json",
-        ]
+        ])
 
         lines = (
             base_lines[:insert_at]

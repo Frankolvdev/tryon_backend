@@ -344,6 +344,18 @@ class RuntimeBuilderService:
         return rendered
 
     @staticmethod
+    def modal_runtime_engine_enabled(config: RuntimeBuilderConfig | None) -> bool:
+        if config is None:
+            return False
+        for item in getattr(config, "environment_variables", None) or []:
+            if str(item.get("key") or "").strip() != "TRYON_MODAL_RUNTIME_ENGINE_ENABLED":
+                continue
+            return str(item.get("value") or "").strip().lower() in {
+                "1", "true", "yes", "on"
+            }
+        return False
+
+    @staticmethod
     def _is_modal(config: RuntimeBuilderConfig) -> bool:
         # Los perfiles nuevos declaran el proveedor explícitamente. Esta es la
         # fuente de verdad y permite múltiples runtimes Modal independientes.
@@ -1775,11 +1787,11 @@ class ComfyUIServer:
                     (
                         "ARG COMFY_RUNTIME_ENGINE_GIT_URL="
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REPOSITORY
-                    ) if modal_enabled else "",
+                    ) if modal_enabled and RuntimeBuilderService.modal_runtime_engine_enabled(config) else "",
                     (
                         "ARG COMFY_RUNTIME_ENGINE_GIT_REF="
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
-                    ) if modal_enabled else "",
+                    ) if modal_enabled and RuntimeBuilderService.modal_runtime_engine_enabled(config) else "",
                     (
                         "RUN git clone --filter=blob:none "
                         "${COMFY_RUNTIME_ENGINE_GIT_URL} "
@@ -1787,11 +1799,11 @@ class ComfyUIServer:
                         + " && git -C "
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
                         + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
-                    ) if modal_enabled else "",
+                    ) if modal_enabled and RuntimeBuilderService.modal_runtime_engine_enabled(config) else "",
                     (
                         "RUN python -m pip install --no-cache-dir "
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                    ) if modal_enabled else "",
+                    ) if modal_enabled and RuntimeBuilderService.modal_runtime_engine_enabled(config) else "",
                     f"RUN python -m pip install --index-url {config.pytorch_index_url} {RuntimeBuilderService.torch_install_packages(config)}",
                     "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r /app/ComfyUI/requirements.txt",
                     *node_lines,
