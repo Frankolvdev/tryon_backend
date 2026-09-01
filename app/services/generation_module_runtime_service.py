@@ -2102,15 +2102,27 @@ class GenerationModuleRuntimeService:
             return False
 
         content_type = str(value.get("content_type") or "").lower()
-        if content_type.startswith("image/") and (
+        has_file_reference = bool(
             value.get("storage_file_id")
             or value.get("local_path")
             or value.get("public_url")
             or value.get("download_url")
             or value.get("url")
             or value.get("__generation_file__")
-        ):
+        )
+        if has_file_reference and content_type.startswith("image/"):
             return True
+
+        # Some valid generation outputs are persisted as application/octet-stream
+        # even though their filename/path is an image (for example ComfyUI PNGs).
+        # Preserve the existing contract while accepting those already-supported
+        # binary image files instead of producing a false missing-image failure.
+        if has_file_reference and content_type in {"", "application/octet-stream", "binary/octet-stream"}:
+            image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
+            for key in ("filename", "local_path", "object_key", "public_url", "download_url", "url"):
+                candidate = str(value.get(key) or "").split("?", 1)[0].split("#", 1)[0]
+                if Path(candidate).suffix.lower() in image_extensions:
+                    return True
 
         return any(
             GenerationModuleRuntimeService._value_contains_image_output(item)
