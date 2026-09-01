@@ -1776,6 +1776,17 @@ class ComfyUIServer:
 
         external_models = RuntimeBuilderService._models_are_external(config)
         volume_path = RuntimeBuilderService._modal_volume_path(config)
+        validated_profile = RuntimeBuilderService.validated_profile_for_config(config)
+        modal_modern_headless_gl = bool(
+            modal_enabled
+            and validated_profile
+            and validated_profile.get("id") == "universal-modern-2026-08"
+        )
+        modal_headless_gl_packages = (
+            " libegl1 libegl-mesa0 libgles2 libglu1-mesa libglvnd0"
+            if modal_modern_headless_gl
+            else ""
+        )
         extra_paths_copy = ""
         if modal_enabled and external_models:
             extra_paths_copy = "COPY runtime-builder/extra_model_paths.yaml /app/ComfyUI/extra_model_paths.yaml"
@@ -1791,8 +1802,13 @@ class ComfyUIServer:
                 [
                     f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
                     'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PATH="/opt/conda/bin:$PATH" TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',
-                    "RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git curl bzip2 ffmpeg libgl1 libopengl0 libglib2.0-0 build-essential pkg-config libgeos-dev libgdal-dev libcairo2-dev libjpeg-dev libpng-dev libtiff-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev && rm -rf /var/lib/apt/lists/*",
+                    "RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git curl bzip2 ffmpeg libgl1 libopengl0 libglib2.0-0 build-essential pkg-config libgeos-dev libgdal-dev libcairo2-dev libjpeg-dev libpng-dev libtiff-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev" + modal_headless_gl_packages + " && rm -rf /var/lib/apt/lists/*",
                     "RUN geos-config --version && ldconfig -p | grep -F libgeos_c.so",
+                    (
+                        "RUN ldconfig -p | grep -F libEGL.so.1 && "
+                        "ldconfig -p | grep -F libGLESv2.so.2 && "
+                        "ldconfig -p | grep -F libGLU.so.1"
+                    ) if modal_modern_headless_gl else "",
                     f"RUN curl -fL https://github.com/conda-forge/miniforge/releases/download/26.3.2-3/Miniforge3-26.3.2-3-Linux-x86_64.sh -o /tmp/miniforge.sh && echo '848194851a98903134187fbb4ab50efe87b003e0c0f808f97644b7524a62bf2c  /tmp/miniforge.sh' | sha256sum -c - && bash /tmp/miniforge.sh -b -p /opt/conda && rm /tmp/miniforge.sh && conda install -y python={config.python_version} pip && conda clean -afy",
                     "RUN python --version && python -m pip install --upgrade 'pip>=25,<26' setuptools wheel",
                     f"RUN git clone {config.comfyui_repository} /app/ComfyUI",
