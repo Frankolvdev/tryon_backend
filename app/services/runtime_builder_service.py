@@ -558,7 +558,13 @@ event_log = "/tmp/comfy-runtime-events.jsonl"
         return json.dumps(workflow, indent=2, ensure_ascii=False)
 
     @staticmethod
-    def _modal_app(volume_name: str, volume_path: str, runtime_name: str) -> str:
+    def _modal_app(
+        volume_name: str,
+        volume_path: str,
+        runtime_name: str,
+        *,
+        modern_runtime: bool = False,
+    ) -> str:
         # Docker Desktop and RunPod keep using scripts/startup.sh unchanged.
         # Modal starts ComfyUI directly after snapshot restoration and exposes
         # it through a small ASGI reverse proxy so long-lived WebSockets remain
@@ -571,6 +577,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -583,6 +590,15 @@ VOLUME_PATH = {json.dumps(volume_path)}
 COMFYUI_PORT = 8188
 TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"
 STARTUP_TIMEOUT = int(os.getenv("TRYON_MODAL_STARTUP_TIMEOUT", "600"))
+MODERN_RUNTIME = {modern_runtime!r}
+DEEP_PROFILING_ENABLED = MODERN_RUNTIME and os.getenv(
+    "TRYON_MODAL_DEEP_PROFILING",
+    "true",
+).strip().lower() in {{"1", "true", "yes", "on"}}
+MANAGER_OFFLINE_ENABLED = MODERN_RUNTIME and os.getenv(
+    "TRYON_MODAL_MANAGER_OFFLINE",
+    "true",
+).strip().lower() in {{"1", "true", "yes", "on"}}
 
 MODAL_GPU_ALIASES = {{"A10G": "A10"}}
 MODAL_GPU_ALLOWED = {{
@@ -671,6 +687,160 @@ def _modal_trace(event: str, *, role: str, **fields) -> None:
         **fields,
     }}
     print("[tryon-modal-trace] " + json.dumps(payload, ensure_ascii=False, default=str), flush=True)
+
+
+def _read_proc_kv(path: Path) -> dict[str, str]:
+    values = {{}}
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            key, sep, value = line.partition(":")
+            if sep:
+                values[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return values
+
+
+def _parse_kib(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return round(float(value.split()[0]) / 1024.0, 3)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _diagnostic_process_state(pid: int | None) -> dict:
+    if not pid:
+        return {{}}
+    status = _read_proc_kv(Path(f"/proc/{{pid}}/status"))
+    io_values = _read_proc_kv(Path(f"/proc/{{pid}}/io"))
+    result = {{"pid": pid}}
+    rss_mb = _parse_kib(status.get("VmRSS"))
+    if rss_mb is not None:
+        result["rss_mb"] = rss_mb
+    for source_key, output_key in (("rchar", "rchar_mb"), ("read_bytes", "read_bytes_mb")):
+        raw = io_values.get(source_key)
+        if raw is None:
+            continue
+        try:
+            result[output_key] = round(int(raw) / (1024 * 1024), 3)
+        except (TypeError, ValueError):
+            pass
+    return result
+
+
+def _diagnostic_memory_state() -> dict:
+    result = {{}}
+    meminfo = _read_proc_kv(Path("/proc/meminfo"))
+    available_mb = _parse_kib(meminfo.get("MemAvailable"))
+    if available_mb is not None:
+        result["system_available_mb"] = available_mb
+    try:
+        raw = Path("/sys/fs/cgroup/memory.current").read_text(encoding="utf-8").strip()
+        result["cgroup_current_mb"] = round(int(raw) / (1024 * 1024), 3)
+    except (OSError, TypeError, ValueError):
+        pass
+    return result
+
+
+def _start_pipeline_profiler(execution_id: str, comfy_pid: int | None):
+    if not DEEP_PROFILING_ENABLED:
+        return None, None
+    stop_event = threading.Event()
+    started = time.monotonic()
+
+    def sample_loop() -> None:
+        sequence = 0
+        while not stop_event.wait(1.0):
+            sequence += 1
+            _modal_trace(
+                "pipeline_profile_sample",
+                role="pipeline_server",
+                execution_id=execution_id,
+                sequence=sequence,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                comfyui=_diagnostic_process_state(comfy_pid),
+                memory=_diagnostic_memory_state(),
+            )
+
+    thread = threading.Thread(
+        target=sample_loop,
+        name=f"tryon-profiler-{{execution_id[:8] or 'pipeline'}}",
+        daemon=True,
+    )
+    thread.start()
+    _modal_trace(
+        "pipeline_profile_start",
+        role="pipeline_server",
+        execution_id=execution_id,
+        comfyui=_diagnostic_process_state(comfy_pid),
+        memory=_diagnostic_memory_state(),
+        sample_interval_s=1.0,
+    )
+    return stop_event, thread
+
+
+def _stop_pipeline_profiler(execution_id: str, profiler, comfy_pid: int | None) -> None:
+    if not profiler or not profiler[0]:
+        return
+    stop_event, thread = profiler
+    stop_event.set()
+    if thread is not None:
+        thread.join(timeout=2)
+    _modal_trace(
+        "pipeline_profile_end",
+        role="pipeline_server",
+        execution_id=execution_id,
+        comfyui=_diagnostic_process_state(comfy_pid),
+        memory=_diagnostic_memory_state(),
+    )
+
+
+def _set_manager_network_mode_offline() -> None:
+    if not MANAGER_OFFLINE_ENABLED:
+        return
+    # Manager >=3.38 uses __manager with modern ComfyUI System User API.
+    # The legacy path is also updated defensively; both live under /tmp in Modal.
+    candidates = [
+        COMFY_USER_ROOT / "__manager" / "config.ini",
+        COMFY_USER_ROOT / "default" / "ComfyUI-Manager" / "config.ini",
+    ]
+    for config_path in candidates:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        try:
+            lines = config_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            pass
+        output = []
+        in_default = False
+        wrote_mode = False
+        saw_default = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                if in_default and not wrote_mode:
+                    output.append("network_mode = offline")
+                    wrote_mode = True
+                in_default = stripped.casefold() == "[default]"
+                saw_default = saw_default or in_default
+                output.append(line)
+                continue
+            if in_default and stripped.casefold().startswith("network_mode") and "=" in stripped:
+                output.append("network_mode = offline")
+                wrote_mode = True
+            else:
+                output.append(line)
+        if in_default and not wrote_mode:
+            output.append("network_mode = offline")
+            wrote_mode = True
+        if not saw_default:
+            if output and output[-1].strip():
+                output.append("")
+            output.extend(["[default]", "network_mode = offline"])
+        config_path.write_text("\\n".join(output).rstrip() + "\\n", encoding="utf-8")
+    print("[runtime] ComfyUI-Manager network_mode=offline aplicado solo a Modal Modern.", flush=True)
 
 
 MODEL_DIAGNOSTICS_ENABLED = os.getenv("TRYON_MODAL_MODEL_DIAGNOSTICS", "true").strip().lower() in {{"1", "true", "yes", "on"}}
@@ -941,6 +1111,7 @@ def _prepare_runtime_directories() -> None:
     (COMFY_USER_ROOT / "default" / "workflows").mkdir(parents=True, exist_ok=True)
     _ensure_linux_machine_id()
     _ensure_sam3_volume_link()
+    _set_manager_network_mode_offline()
     print(f"[runtime] Modelos externos registrados desde: {{MODELS_ROOT}}", flush=True)
     print(f"[runtime] Directorio temporal de usuario: {{COMFY_USER_ROOT}}", flush=True)
 
@@ -1305,6 +1476,65 @@ def _run_snapshot_model_warmup() -> None:
         )
 
 
+def _benchmark_one_storage_file(relative_path: str, passes: int = 2) -> dict:
+    normalized = str(relative_path or "").strip().replace("\\", "/").lstrip("/")
+    if not normalized or ".." in Path(normalized).parts:
+        return {{"path": normalized, "error": "invalid_relative_path"}}
+    target = MODELS_ROOT / normalized
+    if not target.is_file():
+        return {{"path": normalized, "error": "not_found", "resolved_path": str(target)}}
+    size_bytes = target.stat().st_size
+    measurements = []
+    for pass_index in range(max(1, min(int(passes), 3))):
+        started = time.monotonic()
+        total = 0
+        with target.open("rb", buffering=0) as handle:
+            while True:
+                chunk = handle.read(64 * 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+        elapsed = max(time.monotonic() - started, 1e-9)
+        measurements.append({{
+            "pass": pass_index + 1,
+            "bytes": total,
+            "duration_s": round(elapsed, 4),
+            "throughput_mb_s": round((total / (1024 * 1024)) / elapsed, 2),
+        }})
+    return {{
+        "path": normalized,
+        "resolved_path": str(target),
+        "size_mb": round(size_bytes / (1024 * 1024), 2),
+        "passes": measurements,
+    }}
+
+
+@app.function(
+    image=image,
+    volumes={{VOLUME_PATH: models_volume}},
+    timeout=900,
+    memory=4096,
+)
+def benchmark_model_storage(paths: list[str] | None = None, passes: int = 2):
+    if not MODERN_RUNTIME:
+        return {{"status": "disabled", "reason": "modern_runtime_only"}}
+    selected = paths or [
+        "checkpoints/cyberrealisticPony_v170.safetensors",
+        "controlnet/union_pro_max_sdxl.safetensors",
+        "loras/Pony/Realism Lora By Stable Yogi_V3_Pro.safetensors",
+    ]
+    _modal_trace(
+        "storage_benchmark_start",
+        role="storage_benchmark",
+        paths=selected,
+        passes=passes,
+    )
+    results = [_benchmark_one_storage_file(path, passes=passes) for path in selected]
+    payload = {{"status": "completed", "volume_root": str(MODELS_ROOT), "results": results}}
+    _modal_trace("storage_benchmark_end", role="storage_benchmark", **payload)
+    return payload
+
+
 MODAL_CLASS_OPTIONS = {{
     "image": image,
     "gpu": GPU,
@@ -1525,6 +1755,9 @@ class ComfyUIServer:
             sys.path.insert(0, str(runtime_worker))
         from generation_runtime import GenerationRuntime
         runtime = GenerationRuntime(comfy_url=f"http://127.0.0.1:{{COMFYUI_PORT}}")
+        process = getattr(self, "comfyui_process", None)
+        comfy_pid = process.pid if process is not None and process.poll() is None else None
+        profiler = _start_pipeline_profiler(execution_id, comfy_pid)
         started = time.monotonic()
         try:
             result = runtime.execute(payload)
@@ -1539,6 +1772,8 @@ class ComfyUIServer:
                 error=str(exc),
             )
             raise
+        finally:
+            _stop_pipeline_profiler(execution_id, profiler, comfy_pid)
         duration_ms = int((time.monotonic() - started) * 1000)
         if isinstance(result, dict):
             metrics = result.get("metrics")
@@ -1978,7 +2213,12 @@ wait $COMFY_PID
                     if volume.get("name"):
                         volume_name = str(volume["name"])
                         break
-            result["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path, RuntimeBuilderService.sanitize_runtime_name(config.runtime_name))
+            result["modal_app"] = RuntimeBuilderService._modal_app(
+                volume_name,
+                volume_path,
+                RuntimeBuilderService.sanitize_runtime_name(config.runtime_name),
+                modern_runtime=modal_modern_headless_gl,
+            )
             if external_models:
                 result["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(
                     volume_path
