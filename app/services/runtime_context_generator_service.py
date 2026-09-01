@@ -694,6 +694,35 @@ fi
             + modal_runtime_lines
             + base_lines[insert_at:]
         )
+
+        # Modal Modern only: repair binary Python extensions after every custom-node
+        # requirement has finished installing. This intentionally leaves the generic
+        # Docker/RunPod image untouched. Rebuilding pycocotools against the final
+        # NumPy ABI fixes TBG-SAM3; reinstalling opencv-contrib-python last restores
+        # cv2.ximgproc.guidedFilter when another OpenCV wheel overwrote cv2.
+        profile = RuntimeBuilderService.validated_profile_for_config(config)
+        if profile and profile.get("id") == "universal-modern-2026-08":
+            compatibility_repair = (
+                "RUN set -eux; "
+                "python -m pip install --no-cache-dir 'Cython>=3,<4'; "
+                "python -m pip install --no-cache-dir --force-reinstall --no-build-isolation --no-binary=pycocotools --no-deps pycocotools; "
+                "python -m pip install --no-cache-dir --force-reinstall --no-deps opencv-contrib-python; "
+                "python -c \"import numpy, pycocotools.mask, cv2; "
+                "assert hasattr(cv2, 'ximgproc') and hasattr(cv2.ximgproc, 'guidedFilter'), "
+                "'opencv-contrib-python did not expose cv2.ximgproc.guidedFilter'; "
+                "print('[runtime] Modal Modern binary compatibility OK:', numpy.__version__, cv2.__version__)\""
+            )
+            pip_check_prefix = 'RUN set -eu; check_output="$(python -m pip check 2>&1)"'
+            repair_at = next(
+                (index for index, line in enumerate(lines) if line.startswith(pip_check_prefix)),
+                None,
+            )
+            if repair_at is None:
+                raise RuntimeError(
+                    "No se encontró el punto seguro para reparar dependencias binarias de Modal Modern."
+                )
+            lines.insert(repair_at, compatibility_repair)
+
         return "\n".join(lines) + "\n"
 
     @staticmethod
