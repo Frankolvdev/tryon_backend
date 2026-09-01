@@ -260,6 +260,7 @@ class RuntimeImportService:
                             'inputs': value.get('inputs') or {},
                             'widgets_values': value.get('widgets_values') or [],
                             'title': (value.get('_meta') or {}).get('title') if isinstance(value.get('_meta'), dict) else None,
+                            'properties': value.get('properties') if isinstance(value.get('properties'), dict) else {},
                             '_graph_scope': graph_scope,
                             '_subgraph_id': graph_scope[9:] if graph_scope.startswith('subgraph:') else None,
                         })
@@ -272,6 +273,7 @@ class RuntimeImportService:
                             'inputs': value.get('inputs') or {},
                             'widgets_values': value.get('widgets_values') or [],
                             'title': value.get('title'),
+                            'properties': value.get('properties') if isinstance(value.get('properties'), dict) else {},
                             '_graph_scope': graph_scope,
                             '_subgraph_id': graph_scope[9:] if graph_scope.startswith('subgraph:') else None,
                         })
@@ -668,6 +670,32 @@ class RuntimeImportService:
         for folder in folders:
             for cls in RuntimeImportService._read_node_classes(folder): class_to_folder.setdefault(cls,folder)
 
+        # Normal ComfyUI workflows preserve the Registry provider id in
+        # properties.cnr_id. Some extensions (notably comfyui_controlnet_aux)
+        # assemble NODE_CLASS_MAPPINGS dynamically, so static/runtime class
+        # discovery can miss an otherwise installed provider. Use the workflow's
+        # own exact provider id only as a fallback and only when it matches one
+        # installed custom-node folder unambiguously.
+        def provider_key(value: Any) -> str:
+            return re.sub(r'[^a-z0-9]+', '', str(value or '').casefold())
+
+        folders_by_provider_key: dict[str, list[Path]] = {}
+        for folder in folders:
+            key = provider_key(folder.name)
+            if key:
+                folders_by_provider_key.setdefault(key, []).append(folder)
+
+        workflow_provider_fallbacks: dict[str, Path] = {}
+        for node in workflow_nodes:
+            cls = str(node.get('class_type') or '').strip()
+            properties = node.get('properties') if isinstance(node.get('properties'), dict) else {}
+            cnr_id = str(properties.get('cnr_id') or '').strip()
+            if not cls or not cnr_id:
+                continue
+            candidates = folders_by_provider_key.get(provider_key(cnr_id), [])
+            if len(candidates) == 1:
+                workflow_provider_fallbacks.setdefault(cls, candidates[0])
+
         # Consult the Intelligence Index directly. The previous MegaZIP exposed an
         # index endpoint, but the workflow resolver did not consume its result.
         # Building the static index here keeps resolution deterministic and also
@@ -718,7 +746,7 @@ class RuntimeImportService:
         required_folders={}; unresolved_classes=[]; resolved_classes=[]
         virtual_workflow_nodes = {'getnode', 'setnode', 'reroute', 'note'}
         for cls in class_types:
-            folder=class_to_folder.get(cls)
+            folder=class_to_folder.get(cls) or workflow_provider_fallbacks.get(cls)
             intel = intelligence_by_name.get(cls.casefold())
             alias_match: dict[str, Any] | None = None
             if intel is None and alias_resolver is not None:
