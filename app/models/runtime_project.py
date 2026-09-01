@@ -18,6 +18,7 @@ class RuntimeProject(Base):
     workflow_filename: Mapped[str | None] = mapped_column(String(500), nullable=True)
     workflow_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     container_workdir: Mapped[str] = mapped_column(String(1000), default="/app", nullable=False)
+    deployment_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     export_root_directory: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     export_directory: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     last_index_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)

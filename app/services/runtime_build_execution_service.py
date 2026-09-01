@@ -14,6 +14,22 @@ ROOT.mkdir(parents=True, exist_ok=True)
 
 class RuntimeBuildExecutionService:
     @staticmethod
+    def _runtime_deployment_name(db, build, default_name):
+        """Return the per-runtime deployment name, falling back to the provider default.
+
+        The override is stored on RuntimeProject so provider credentials/configuration stay
+        global while each exported runtime can choose its own deploy target name.
+        """
+        project = (
+            db.query(RuntimeProject)
+            .filter(RuntimeProject.runtime_config_id == build.runtime_config_id)
+            .order_by(RuntimeProject.updated_at.desc(), RuntimeProject.id.desc())
+            .first()
+        )
+        override = str(getattr(project, "deployment_name", None) or "").strip()
+        return override or str(default_name or "").strip()
+
+    @staticmethod
     def image_tag(config):
         base=config.registry_image.rstrip(":")
         safe_name = RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)
@@ -428,6 +444,11 @@ class RuntimeBuildExecutionService:
         cfg = InfrastructureProviderService.get_runpod(db)
         if not cfg.enabled or not cfg.api_key:
             raise ValueError("Activa RunPod y configura su API key en Proveedores de infraestructura.")
+        deployment_name = RuntimeBuildExecutionService._runtime_deployment_name(
+            db, build, cfg.endpoint_name
+        )
+        if not deployment_name:
+            raise ValueError("Configura un nombre de despliegue para RunPod.")
         image_tag = RuntimeBuildExecutionService._prepare_runpod_registry_image(build, cfg)
         login_message = RuntimeBuildExecutionService._login_runpod_registry(image_tag, cfg)
         db.add(build)
@@ -442,7 +463,7 @@ class RuntimeBuildExecutionService:
                 + f"[runpod:2/6] Publicando {image_tag} en el registro."
             ),
             image_tag=image_tag,
-            app_name=cfg.endpoint_name,
+            app_name=deployment_name,
             volume_name=cfg.network_volume_name,
         )
         if not build.published:
@@ -515,7 +536,7 @@ class RuntimeBuildExecutionService:
             "gpuCount": 1,
             "gpuTypeIds": [str(value).strip() for value in cfg.gpu_type_ids if str(value).strip()],
             "idleTimeout": int(cfg.idle_timeout_seconds),
-            "name": str(cfg.endpoint_name).strip(),
+            "name": deployment_name,
             "scalerType": str(cfg.scaler_type).strip(),
             "scalerValue": int(cfg.scaler_value),
             "workersMax": int(cfg.workers_max),
@@ -553,7 +574,9 @@ class RuntimeBuildExecutionService:
 
         timeout_seconds = min(cfg.timeout_seconds, 120)
         endpoint = None
-        endpoint_id = str(cfg.endpoint_id or "").strip()
+        provider_default_name = str(cfg.endpoint_name or "").strip()
+        uses_provider_default = deployment_name == provider_default_name
+        endpoint_id = str(cfg.endpoint_id or "").strip() if uses_provider_default else ""
 
         # Recover an endpoint created by a previous attempt before creating another one.
         if not endpoint_id:
@@ -563,7 +586,7 @@ class RuntimeBuildExecutionService:
                 timeout_seconds=min(cfg.timeout_seconds, 90),
             )
             endpoint_id = str((existing or {}).get("id") or "").strip()
-            if endpoint_id:
+            if endpoint_id and uses_provider_default:
                 cfg.endpoint_id = endpoint_id
                 InfrastructureProviderService.save_runpod(db, cfg)
 
@@ -607,8 +630,9 @@ class RuntimeBuildExecutionService:
                 endpoint_id = str(endpoint.get("id") or "").strip()
                 if not endpoint_id:
                     raise RuntimeError("RunPod creó una respuesta sin ID de endpoint.")
-                cfg.endpoint_id = endpoint_id
-                InfrastructureProviderService.save_runpod(db, cfg)
+                if uses_provider_default:
+                    cfg.endpoint_id = endpoint_id
+                    InfrastructureProviderService.save_runpod(db, cfg)
                 endpoint = runpod_control_plane_service.update_endpoint(
                     endpoint_id,
                     api_key=cfg.api_key,
@@ -616,10 +640,11 @@ class RuntimeBuildExecutionService:
                     timeout_seconds=timeout_seconds,
                 )
 
-            cfg.endpoint_id = str(endpoint.get("id") or "").strip()
-            InfrastructureProviderService.save_runpod(db, cfg)
+            if uses_provider_default:
+                cfg.endpoint_id = str(endpoint.get("id") or "").strip()
+                InfrastructureProviderService.save_runpod(db, cfg)
 
-        endpoint_id = str(endpoint.get("id") or cfg.endpoint_id or "")
+        endpoint_id = str(endpoint.get("id") or (cfg.endpoint_id if uses_provider_default else "") or "")
         if not endpoint_id:
             raise RuntimeError("RunPod no devolvió el ID del endpoint.")
         RuntimeBuildExecutionService._update_deployment(
@@ -1345,9 +1370,9 @@ class RuntimeBuildExecutionService:
                     ),
                 )
 
-            deployment_name = str(
-                cfg.deployment_name or "tryon-generation-runtime"
-            ).strip()
+            deployment_name = RuntimeBuildExecutionService._runtime_deployment_name(
+                db, build, cfg.deployment_name or "tryon-generation-runtime"
+            )
             volume_name = str(cfg.volume_name or "tryon-models").strip()
             volume_mount_path = str(getattr(cfg, "volume_mount_path", None) or "/models").strip()
 
@@ -1616,7 +1641,10 @@ class RuntimeBuildExecutionService:
             if not cfg.token_id: missing.append("Token ID")
             if not cfg.token_secret: missing.append("Token Secret")
             if not cfg.environment: missing.append("Environment")
-            if not cfg.app_name: missing.append("App Name")
+            deployment_name = RuntimeBuildExecutionService._runtime_deployment_name(
+                db, build, cfg.app_name
+            )
+            if not deployment_name: missing.append("App Name")
             if not cfg.volume_name: missing.append("Volume Name")
             if not selected_gpu: missing.append("GPU")
             if engine.modal_max_containers < engine.modal_min_containers: missing.append("rango de contenedores")
@@ -1627,7 +1655,7 @@ class RuntimeBuildExecutionService:
             RuntimeBuildExecutionService._update_deployment(
                 db, build, deployment, phase="validating-credentials", progress=20,
                 message="Validando credenciales.", log="[deploy:2/6] Credenciales y configuración de Modal validadas.",
-                app_name=cfg.app_name, volume_name=cfg.volume_name,
+                app_name=deployment_name, volume_name=cfg.volume_name,
             )
             executable = shutil.which("modal")
             if not executable:
@@ -1642,10 +1670,10 @@ class RuntimeBuildExecutionService:
             )
             RuntimeBuildExecutionService._update_deployment(
                 db, build, deployment, phase="publishing-image", progress=48,
-                message="Publicando imagen y aplicación en Modal.", log=f"[deploy:4/6] Ejecutando modal deploy para {cfg.app_name} con GPU {selected_gpu}.",
+                message="Publicando imagen y aplicación en Modal.", log=f"[deploy:4/6] Ejecutando modal deploy para {deployment_name} con GPU {selected_gpu}.",
             )
             proc = subprocess.Popen(
-                [executable, "deploy", "--name", cfg.app_name, "--env", cfg.environment, str(app_file)], cwd=str(context),
+                [executable, "deploy", "--name", deployment_name, "--env", cfg.environment, str(app_file)], cwd=str(context),
                 env={**InfrastructureProviderService._modal_env(cfg),
                     "TRYON_MODAL_GPU": selected_gpu,
                     "TRYON_MODAL_REGION_MODE": str(getattr(cfg, "region_mode", "automatic") or "automatic"),
@@ -1701,6 +1729,7 @@ class RuntimeBuildExecutionService:
                 raise ValueError('El build debe finalizar correctamente antes de subirlo a Modal.')
             cfg=InfrastructureProviderService.get_modal(db)
             engine=ai_engine_settings_service.get(db)
+            deployment_name=RuntimeBuildExecutionService._runtime_deployment_name(db, build, cfg.app_name)
             selected_gpu=str(engine.modal_gpu or getattr(cfg, "gpu", "") or "L40S").strip()
             if not cfg.enabled or not cfg.token_id or not cfg.token_secret:
                 raise ValueError('Activa y configura Modal en Proveedores de infraestructura.')
@@ -1726,7 +1755,7 @@ class RuntimeBuildExecutionService:
                 "TRYON_MODAL_EXECUTION_TIMEOUT": str(engine.modal_execution_timeout_seconds),
             }
             proc=subprocess.Popen(
-                [executable,'deploy','--name',cfg.app_name,'--env',cfg.environment,str(app_file)],
+                [executable,'deploy','--name',deployment_name,'--env',cfg.environment,str(app_file)],
                 cwd=str(context),
                 env=modal_env,
                 stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,
@@ -1739,7 +1768,7 @@ class RuntimeBuildExecutionService:
             build.status='published'
             build.phase='modal-published'
             build.progress=100
-            RuntimeBuildExecutionService._append(db,build,f'[modal] Compilación publicada en la app {cfg.app_name}.')
+            RuntimeBuildExecutionService._append(db,build,f'[modal] Compilación publicada en la app {deployment_name}.')
         except Exception as exc:
             build=db.get(RuntimeBuilderBuild,build_id)
             if build:

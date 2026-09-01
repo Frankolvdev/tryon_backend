@@ -89,6 +89,7 @@ class RuntimeWorkspaceUpdate(BaseModel):
     workflow_filename: str | None = Field(default=None, max_length=500)
     workflow_json: dict | None = None
     container_workdir: str | None = Field(default=None, min_length=1, max_length=1000)
+    deployment_name: str | None = Field(default=None, max_length=120)
     export_root_directory: str | None = Field(default=None, max_length=2000)
     export_directory: str | None = Field(default=None, max_length=2000)
     project_key: str | None = Field(default=None, min_length=1, max_length=120)
