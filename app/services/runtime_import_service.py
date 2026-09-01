@@ -233,28 +233,208 @@ class RuntimeImportService:
 
     @staticmethod
     def _workflow_nodes(workflow: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return executable node records from API and normal UI workflows.
+
+        Normal ComfyUI workflows can embed reusable subgraph definitions whose
+        node ids are local to each definition.  Keep the graph scope on every
+        normalized node so equal local ids from different subgraphs are never
+        collapsed together.  UUID node types are subgraph *instances* and are
+        intentionally not treated as ComfyUI classes.
+        """
         result: list[dict[str, Any]] = []
         seen_objects: set[int] = set()
-        def visit(value: Any) -> None:
+
+        def visit(value: Any, graph_scope: str = 'root') -> None:
             if isinstance(value, dict):
-                marker=id(value)
-                if marker in seen_objects: return
+                marker = id(value)
+                if marker in seen_objects:
+                    return
                 seen_objects.add(marker)
+
                 if 'class_type' in value and isinstance(value.get('class_type'), str):
-                    cls=str(value.get('class_type') or '')
+                    cls = str(value.get('class_type') or '')
                     if cls and not UUID_RE.match(cls):
-                        result.append({'id':str(value.get('id','')),'class_type':cls,'inputs':value.get('inputs') or {},'widgets_values':value.get('widgets_values') or [],'title':(value.get('_meta') or {}).get('title') if isinstance(value.get('_meta'),dict) else None})
+                        result.append({
+                            'id': str(value.get('id', '')),
+                            'class_type': cls,
+                            'inputs': value.get('inputs') or {},
+                            'widgets_values': value.get('widgets_values') or [],
+                            'title': (value.get('_meta') or {}).get('title') if isinstance(value.get('_meta'), dict) else None,
+                            '_graph_scope': graph_scope,
+                            '_subgraph_id': graph_scope[9:] if graph_scope.startswith('subgraph:') else None,
+                        })
                 elif 'type' in value and ('widgets_values' in value or 'inputs' in value or 'outputs' in value):
-                    cls=str(value.get('type') or '')
+                    cls = str(value.get('type') or '')
                     if cls and not UUID_RE.match(cls):
-                        result.append({'id':str(value.get('id','')),'class_type':cls,'inputs':value.get('inputs') or {},'widgets_values':value.get('widgets_values') or [],'title':value.get('title')})
-                for child in value.values(): visit(child)
-            elif isinstance(value,list):
-                for child in value: visit(child)
+                        result.append({
+                            'id': str(value.get('id', '')),
+                            'class_type': cls,
+                            'inputs': value.get('inputs') or {},
+                            'widgets_values': value.get('widgets_values') or [],
+                            'title': value.get('title'),
+                            '_graph_scope': graph_scope,
+                            '_subgraph_id': graph_scope[9:] if graph_scope.startswith('subgraph:') else None,
+                        })
+
+                for child_key, child in value.items():
+                    if child_key == 'subgraphs' and isinstance(child, list):
+                        for subgraph in child:
+                            if isinstance(subgraph, dict):
+                                subgraph_id = str(subgraph.get('id') or '')
+                                visit(subgraph, f'subgraph:{subgraph_id}' if subgraph_id else graph_scope)
+                    else:
+                        visit(child, graph_scope)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child, graph_scope)
+
         visit(workflow)
-        dedup={}
-        for node in result: dedup[(node['id'],node['class_type'])]=node
+        dedup: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for node in result:
+            dedup[(str(node.get('_graph_scope') or 'root'), node['id'], node['class_type'])] = node
         return list(dedup.values())
+
+    @staticmethod
+    def _subgraph_model_reference_plan(
+        workflow: dict[str, Any],
+    ) -> tuple[list[dict[str, str]], dict[tuple[str, str, str], set[str]]]:
+        """Resolve model overrides exposed by normal-workflow subgraphs.
+
+        ComfyUI stores the original/default widget values inside every subgraph
+        definition, even when a concrete subgraph instance overrides those
+        values.  Treating both as active dependencies produces false missing
+        models and bloated runtimes.
+
+        This planner follows the definition input links to model-loader fields,
+        reads the active values from each subgraph instance, emits those active
+        references, and suppresses only the corresponding internal defaults.
+        Model loaders that are *not* exposed by a subgraph input remain normal
+        dependencies and are still discovered by the generic resolver.
+        """
+        definitions = workflow.get('definitions') if isinstance(workflow, dict) else None
+        subgraphs = definitions.get('subgraphs') if isinstance(definitions, dict) else None
+        if not isinstance(subgraphs, list):
+            return [], {}
+
+        definitions_by_id = {
+            str(item.get('id')): item
+            for item in subgraphs
+            if isinstance(item, dict) and item.get('id')
+        }
+        if not definitions_by_id:
+            return [], {}
+
+        instances_by_id: dict[str, list[dict[str, Any]]] = {key: [] for key in definitions_by_id}
+        seen: set[int] = set()
+
+        def collect_instances(value: Any) -> None:
+            if isinstance(value, dict):
+                marker = id(value)
+                if marker in seen:
+                    return
+                seen.add(marker)
+                node_type = str(value.get('type') or '')
+                if node_type in definitions_by_id:
+                    instances_by_id[node_type].append(value)
+                for child in value.values():
+                    collect_instances(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect_instances(child)
+
+        collect_instances(workflow)
+
+        active_refs: list[dict[str, str]] = []
+        suppressed_defaults: dict[tuple[str, str, str], set[str]] = {}
+        primitive_widget_types = {'COMBO', 'STRING', 'INT', 'FLOAT', 'BOOLEAN', 'NUMBER'}
+
+        for subgraph_id, definition in definitions_by_id.items():
+            definition_inputs = definition.get('inputs') if isinstance(definition.get('inputs'), list) else []
+            internal_nodes = definition.get('nodes') if isinstance(definition.get('nodes'), list) else []
+
+            # Map each definition input link id back to the public input name.
+            link_to_input: dict[Any, dict[str, Any]] = {}
+            for item in definition_inputs:
+                if not isinstance(item, dict):
+                    continue
+                for link_id in item.get('linkIds') or []:
+                    link_to_input[link_id] = item
+
+            bindings: list[dict[str, Any]] = []
+            for internal in internal_nodes:
+                if not isinstance(internal, dict):
+                    continue
+                cls = str(internal.get('type') or internal.get('class_type') or '')
+                if not cls or UUID_RE.match(cls):
+                    continue
+                inputs = internal.get('inputs') if isinstance(internal.get('inputs'), list) else []
+                explicit_rules = {
+                    field: (model_type, folders)
+                    for field, model_type, folders in MODEL_INPUT_RULES.get(cls, ())
+                }
+                for input_item in inputs:
+                    if not isinstance(input_item, dict):
+                        continue
+                    field = str(input_item.get('name') or '')
+                    linked_public = link_to_input.get(input_item.get('link'))
+                    if not field or not linked_public:
+                        continue
+                    if field in explicit_rules:
+                        model_type, folders = explicit_rules[field]
+                    else:
+                        field_lower = field.casefold()
+                        if not any(hint in field_lower for hint in MODEL_FIELD_HINTS):
+                            continue
+                        model_type, folders = 'other', ()
+
+                    default_value = None
+                    for widget_value in RuntimeImportService._string_values(internal.get('widgets_values')):
+                        if RuntimeImportService._looks_like_model(widget_value):
+                            default_value = widget_value
+                            break
+                    bindings.append({
+                        'public_name': str(linked_public.get('name') or ''),
+                        'internal_node_id': str(internal.get('id') or ''),
+                        'class_type': cls,
+                        'field': field,
+                        'model_type': model_type,
+                        'folders': ','.join(folders),
+                        'default_value': default_value,
+                    })
+
+            if not bindings:
+                continue
+
+            widget_inputs = [
+                item for item in definition_inputs
+                if isinstance(item, dict) and str(item.get('type') or '').upper() in primitive_widget_types
+            ]
+            for instance in instances_by_id.get(subgraph_id, []):
+                widget_values = instance.get('widgets_values') if isinstance(instance.get('widgets_values'), list) else []
+                public_values = {
+                    str(item.get('name') or ''): widget_values[index]
+                    for index, item in enumerate(widget_inputs)
+                    if index < len(widget_values)
+                }
+                for binding in bindings:
+                    value = public_values.get(binding['public_name'])
+                    if not isinstance(value, str) or not value.strip() or not RuntimeImportService._looks_like_model(value):
+                        continue
+                    if RuntimeImportService._is_non_model_workflow_value(value, binding['field']):
+                        continue
+                    active_refs.append({
+                        'value': value,
+                        'field': binding['field'],
+                        'model_type': binding['model_type'],
+                        'folders': binding['folders'],
+                        'class_type': binding['class_type'],
+                    })
+                    default_value = binding.get('default_value')
+                    if isinstance(default_value, str) and default_value.strip():
+                        key = (subgraph_id, binding['internal_node_id'], binding['class_type'])
+                        suppressed_defaults.setdefault(key, set()).add(default_value)
+
+        return active_refs, suppressed_defaults
 
     @staticmethod
     def _workflow_graph_stats(workflow: dict[str, Any]) -> dict[str, int]:
@@ -608,7 +788,22 @@ class RuntimeImportService:
         auxiliary_assets=list(unique_auxiliary_assets.values())
 
         reference_records=[]
-        for node in workflow_nodes: reference_records.extend(RuntimeImportService._model_references_for_node(node))
+        subgraph_active_refs, subgraph_suppressed_defaults = RuntimeImportService._subgraph_model_reference_plan(workflow)
+        for node in workflow_nodes:
+            node_refs = RuntimeImportService._model_references_for_node(node)
+            subgraph_id = str(node.get('_subgraph_id') or '')
+            if subgraph_id:
+                suppressed = subgraph_suppressed_defaults.get(
+                    (subgraph_id, str(node.get('id') or ''), str(node.get('class_type') or '')),
+                    set(),
+                )
+                if suppressed:
+                    node_refs = [
+                        ref for ref in node_refs
+                        if not (ref.get('field') == 'widgets_values' and ref.get('value') in suppressed)
+                    ]
+            reference_records.extend(node_refs)
+        reference_records.extend(subgraph_active_refs)
         unique_refs={}
         for ref in reference_records: unique_refs[(ref['value'].replace('\\','/').lower(),ref['class_type'],ref['field'])]=ref
         reference_records=list(unique_refs.values()); referenced=sorted({r['value'] for r in reference_records})
