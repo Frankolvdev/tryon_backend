@@ -588,7 +588,7 @@ CPU_MEMORY_REQUEST_MB = int(os.getenv("TRYON_MODAL_CPU_MEMORY_REQUEST_MB", "3276
 EXECUTION_TIMEOUT = int(os.getenv("TRYON_MODAL_EXECUTION_TIMEOUT", "1800"))
 RUNTIME_ENGINE_ENABLED = os.getenv(
     "TRYON_MODAL_RUNTIME_ENGINE_ENABLED",
-    "true",
+    "false",
 ).strip().lower() in {{"1", "true", "yes", "on"}}
 RUNTIME_ENGINE_CONFIG = Path(
     os.getenv(
