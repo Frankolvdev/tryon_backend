@@ -74,6 +74,7 @@ class RuntimeBuilderService:
                 "mediapipe==0.8.0": "mediapipe==1.0.0",
                 "mediapipe==0.10.0": "mediapipe==1.0.0",
                 "mediapipe==0.10.21": "mediapipe==1.0.0",
+                "numpy==1.21.0": "numpy>=1.22,<2.4",
             },
         },
     )
