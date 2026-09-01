@@ -827,6 +827,7 @@ class RuntimeImportService:
                 resolved_classes.append({'class_type':cls,'provider':'core','provider_name':'ComfyUI Core','confidence':'runtime' if cls in runtime_catalog else 'knowledge-base'})
             else: unresolved_classes.append(cls)
         required_nodes=[]; dependencies_by_name={}; node_warnings=[]
+        emitted_registry_ids: set[str] = set()
         for _folder_key,folder in sorted(required_folders.items(), key=lambda item: str(item[1]).lower()):
             name=folder.name
             node_repo,node_commit=RuntimeImportService._git_info(folder); inferred=node_repo or RuntimeImportService._infer_repo(folder)
@@ -840,8 +841,51 @@ class RuntimeImportService:
                 if len(registry_ids) == 1:
                     inferred = REGISTRY_REPOSITORY_HINTS.get(next(iter(registry_ids)))
             if not inferred: node_warnings.append(f'{name}: se detectó localmente, pero no se encontró repositorio reproducible.')
-            required_nodes.append({'name':name,'repository':inferred or '','commit':node_commit,'enabled':True,'install_requirements':(folder/'requirements.txt').exists() or (folder/'pyproject.toml').exists(),'source_path':str(folder),'confidence':'exact-git' if node_repo else ('inferred-readme' if inferred else 'local-only'),'matched_classes':matched})
+            required_nodes.append({'name':name,'repository':inferred or '','commit':node_commit,'enabled':True,'install_requirements':(folder/'requirements.txt').exists() or (folder/'pyproject.toml').exists(),'source_path':str(folder),'confidence':'exact-git' if node_repo else ('registry-hint' if inferred and registry_ids else ('inferred-readme' if inferred else 'local-only')),'matched_classes':matched})
+            emitted_registry_ids.update(
+                registry_id for registry_id in registry_ids
+                if registry_id and REGISTRY_REPOSITORY_HINTS.get(registry_id)
+            )
             for dep in RuntimeImportService._requirements_for_node(folder): dependencies_by_name.setdefault(dep['package'].lower(),dep)
+
+        # Contract guarantee: a workflow Registry provider with an exact,
+        # reproducible repository hint must be present in Runtime Builder even
+        # when local/static intelligence cannot map its dynamically registered
+        # classes back to the provider folder. This is especially important for
+        # comfyui_controlnet_aux, whose NODE_CLASS_MAPPINGS can be dynamic.
+        registry_classes: dict[str, set[str]] = {}
+        for cls, registry_id in workflow_provider_ids.items():
+            if registry_id in REGISTRY_REPOSITORY_HINTS:
+                registry_classes.setdefault(registry_id, set()).add(cls)
+        for node in workflow_nodes:
+            cls = str(node.get('class_type') or '').strip()
+            properties = node.get('properties') if isinstance(node.get('properties'), dict) else {}
+            registry_id = str(properties.get('cnr_id') or '').strip()
+            if cls and registry_id in REGISTRY_REPOSITORY_HINTS:
+                registry_classes.setdefault(registry_id, set()).add(cls)
+
+        existing_repositories = {
+            str(item.get('repository') or '').rstrip('/').removesuffix('.git').casefold()
+            for item in required_nodes
+            if str(item.get('repository') or '').strip()
+        }
+        for registry_id, matched_classes in sorted(registry_classes.items()):
+            repository = REGISTRY_REPOSITORY_HINTS[registry_id]
+            repository_key = repository.rstrip('/').removesuffix('.git').casefold()
+            if registry_id in emitted_registry_ids or repository_key in existing_repositories:
+                continue
+            required_nodes.append({
+                'name': registry_id,
+                'repository': repository,
+                'commit': None,
+                'enabled': True,
+                'install_requirements': True,
+                'source_path': '',
+                'confidence': 'workflow-registry',
+                'matched_classes': sorted(matched_classes),
+            })
+            existing_repositories.add(repository_key)
+
         auxiliary_asset_records=[]
         for node in workflow_nodes:
             auxiliary_asset_records.extend(
