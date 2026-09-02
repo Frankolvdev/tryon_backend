@@ -1534,6 +1534,12 @@ def benchmark_model_storage(paths=None, passes: int = 2):
     return payload
 
 
+@app.local_entrypoint()
+def benchmark_storage():
+    result = benchmark_model_storage.remote()
+    print(json.dumps(result, indent=2, ensure_ascii=False, default=str), flush=True)
+
+
 MODAL_CLASS_OPTIONS = {{
     "image": image,
     "gpu": GPU,
