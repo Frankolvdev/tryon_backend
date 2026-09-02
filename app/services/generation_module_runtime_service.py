@@ -2034,6 +2034,11 @@ class GenerationModuleRuntimeService:
             value = context
             for part in str(source_key or "").split("."):
                 value = value.get(part) if isinstance(value, dict) else None
+            if value is None:
+                raise AppException(
+                    f"Workflow step '{step.get('key')}' received empty binding source '{source_key}' "
+                    f"for ComfyUI node '{binding.get('node_id')}.{binding.get('input_field')}'."
+                )
             node = workflow.get(str(binding.get("node_id")))
             if not isinstance(node, dict):
                 raise AppException(f"Workflow node '{binding.get('node_id')}' was not found.")

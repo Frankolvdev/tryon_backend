@@ -36,16 +36,42 @@ class GenerationRuntime:
         context = self._materialize(copy.deepcopy(payload.get("context") or {}), self.root / str(payload.get("execution_id") or uuid4()))
         if not isinstance(module, dict):
             raise ValueError("Generation module payload is missing.")
-        steps = [step for step in sorted(module.get("steps") or [], key=lambda row: row.get("position", 0)) if step.get("is_enabled")]
+        ordered_steps = sorted(module.get("steps") or [], key=lambda row: row.get("position", 0))
+        steps = [step for step in ordered_steps if step.get("is_enabled")]
+        # Disabled utility nodes are transparent passthroughs. They do not run
+        # the cleanup action, but their outputs must remain available because
+        # downstream bindings can legally point through them.
+        disabled_utilities = {
+            str(step.get("key") or ""): step
+            for step in ordered_steps
+            if not step.get("is_enabled") and str(step.get("step_type") or "") == "utility"
+        }
         states: list[dict[str, Any]] = []
         metrics = RuntimeMetricsCollector()
-        for index, step in enumerate(steps):
+        processed_enabled = 0
+        for ordered_index, step in enumerate(ordered_steps):
+            key = str(step.get("key") or f"step-{ordered_index + 1}")
+            step_type = str(step.get("step_type") or "")
+            if not step.get("is_enabled"):
+                if step_type == "utility":
+                    raw_inputs = GenerationRuntimeContext.step_inputs(context, step.get("input_mapping") or {})
+                    required_ports = [
+                        str(port.get("id") or "")
+                        for port in ((step.get("configuration") or {}).get("input_ports") or [])
+                        if isinstance(port, dict) and port.get("is_required", True)
+                    ]
+                    missing = [port_id for port_id in required_ports if raw_inputs.get(port_id) is None]
+                    if missing:
+                        return {"runtime_contract": self.CONTRACT, "status": "failed", "error": f"Disabled utility passthrough '{key}' has empty required input(s): {', '.join(missing)}", "steps": states, "metrics": metrics.snapshot(status="failed", error=f"Disabled utility passthrough '{key}' has empty required input(s): {', '.join(missing)}")}
+                    GenerationRuntimeContext.merge_step_outputs(context, key, copy.deepcopy(raw_inputs))
+                    print(f"[generation-runtime] disabled utility passthrough preserved: {key}", flush=True)
+                continue
+            index = processed_enabled
+            processed_enabled += 1
             started = time.monotonic()
-            key = str(step.get("key") or f"step-{index + 1}")
             try:
                 if progress:
                     progress((index / max(len(steps), 1)) * 100, f"Step '{key}' started.")
-                step_type = str(step.get("step_type") or "")
                 if step_type == "workflow":
                     outputs = self._workflow(step, context, payload.get("execution_id"))
                 elif step_type == "python":
@@ -211,6 +237,11 @@ class GenerationRuntime:
         for binding in config.get("input_bindings") or []:
             source = binding.get("source_path") or binding.get("module_input_key")
             value = GenerationRuntimeContext.resolve(context, str(source or ""))
+            if value is None:
+                raise ValueError(
+                    f"Workflow step '{step.get('key')}' received empty binding source '{source}' "
+                    f"for ComfyUI node '{binding.get('node_id')}.{binding.get('input_field')}'."
+                )
             node = workflow.get(str(binding.get("node_id")))
             if not isinstance(node, dict):
                 raise ValueError(f"Workflow node '{binding.get('node_id')}' was not found.")
