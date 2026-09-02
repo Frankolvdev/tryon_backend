@@ -396,14 +396,18 @@ class GenerationRuntime:
     @staticmethod
     def _utility_cleanup_workflow() -> dict[str, Any]:
         return {
+            "tryon_stage_boundary_sentinel": {
+                "class_type": "TryOn: StageBoundarySentinel",
+                "inputs": {},
+            },
             "tryon_full_vram_cleanup": {
                 "class_type": "LayerUtility: PurgeVRAM V2",
                 "inputs": {
-                    "anything": "__TRYON_STAGE_BOUNDARY_FULL_PURGE__",
+                    "anything": ["tryon_stage_boundary_sentinel", 0],
                     "purge_cache": True,
                     "purge_models": True,
                 },
-            }
+            },
         }
 
     @staticmethod
@@ -463,14 +467,18 @@ class GenerationRuntime:
     @staticmethod
     def _vram_purge_workflow() -> dict[str, Any]:
         return {
+            "tryon_stage_boundary_sentinel": {
+                "class_type": "TryOn: StageBoundarySentinel",
+                "inputs": {},
+            },
             "tryon_full_vram_cleanup": {
                 "class_type": "LayerUtility: PurgeVRAM V2",
                 "inputs": {
-                    "anything": "__TRYON_STAGE_BOUNDARY_FULL_PURGE__",
+                    "anything": ["tryon_stage_boundary_sentinel", 0],
                     "purge_cache": True,
                     "purge_models": True,
                 },
-            }
+            },
         }
 
     def _python(self, step: dict[str, Any], context: dict[str, Any], execution_id: Any) -> dict[str, Any]:
