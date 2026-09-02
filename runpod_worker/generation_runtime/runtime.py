@@ -90,6 +90,64 @@ class GenerationRuntime:
         if not isinstance(module, dict):
             raise ValueError("Generation module payload is missing.")
         steps = _ordered_enabled_steps(module)
+
+        # Diagnostic-only trace. This intentionally does not participate in
+        # ordering, filtering, input resolution, execution, or context merge.
+        # It reports what the remote runtime actually received and what the
+        # already-existing dependency sorter selected.
+        raw_steps = module.get("steps") or []
+        ordered_keys = [str(item.get("key") or "") for item in steps]
+        diagnostic_steps: list[dict[str, Any]] = []
+        for raw_index, item in enumerate(raw_steps):
+            if not isinstance(item, dict):
+                diagnostic_steps.append({"raw_index": raw_index, "invalid_step": True})
+                continue
+            configuration = item.get("configuration") or {}
+            source = str(configuration.get("source_code") or "")
+            input_mapping = item.get("input_mapping") or {}
+            workflow_bindings = configuration.get("input_bindings") or []
+            dependency_sources: set[str] = set()
+            for raw_path in input_mapping.values() if isinstance(input_mapping, dict) else []:
+                if isinstance(raw_path, str) and "." in raw_path:
+                    dependency_sources.add(raw_path.split(".", 1)[0])
+            for binding in workflow_bindings if isinstance(workflow_bindings, list) else []:
+                if not isinstance(binding, dict):
+                    continue
+                raw_path = binding.get("source_path") or binding.get("module_input_key")
+                if isinstance(raw_path, str) and "." in raw_path:
+                    dependency_sources.add(raw_path.split(".", 1)[0])
+            key = str(item.get("key") or "")
+            diagnostic_steps.append(
+                {
+                    "raw_index": raw_index,
+                    "key": key,
+                    "position": item.get("position"),
+                    "step_type": item.get("step_type"),
+                    "is_enabled": item.get("is_enabled"),
+                    "selected_for_execution": key in ordered_keys,
+                    "execution_index": ordered_keys.index(key) if key in ordered_keys else None,
+                    "vram_purge_marker": VRAM_PURGE_SOURCE_MARKER in source,
+                    "dependencies": sorted(dependency_sources),
+                    "input_mapping": input_mapping if isinstance(input_mapping, dict) else {},
+                    "workflow_input_bindings": workflow_bindings if isinstance(workflow_bindings, list) else [],
+                }
+            )
+        print(
+            "[runtime-diagnostic] "
+            + json.dumps(
+                {
+                    "event": "generation_step_plan",
+                    "execution_id": payload.get("execution_id"),
+                    "raw_step_count": len(raw_steps),
+                    "ordered_enabled_keys": ordered_keys,
+                    "steps": diagnostic_steps,
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+            flush=True,
+        )
+
         states: list[dict[str, Any]] = []
         metrics = RuntimeMetricsCollector()
         for index, step in enumerate(steps):
