@@ -84,38 +84,22 @@ class RunPodGenerationRuntime(GenerationRuntime):
         if not isinstance(module, dict):
             raise ValueError("Generation module payload is missing.")
 
-        ordered_steps = sorted(
-            module.get("steps") or [],
-            key=lambda row: row.get("position", 0),
-        )
-        steps = [step for step in ordered_steps if step.get("is_enabled")]
+        steps = [
+            step
+            for step in sorted(
+                module.get("steps") or [],
+                key=lambda row: row.get("position", 0),
+            )
+            if step.get("is_enabled")
+        ]
         states: list[dict[str, Any]] = []
         metrics = RuntimeMetricsCollector()
 
-        processed_enabled = 0
-        for ordered_index, step in enumerate(ordered_steps):
+        for index, step in enumerate(steps):
             self._raise_if_cancelled()
-            key = str(step.get("key") or f"step-{ordered_index + 1}")
-            step_type = str(step.get("step_type") or "")
-            if not step.get("is_enabled"):
-                if step_type == "utility":
-                    raw_inputs = GenerationRuntimeContext.step_inputs(context, step.get("input_mapping") or {})
-                    required_ports = [
-                        str(port.get("id") or "")
-                        for port in ((step.get("configuration") or {}).get("input_ports") or [])
-                        if isinstance(port, dict) and port.get("is_required", True)
-                    ]
-                    missing = [port_id for port_id in required_ports if raw_inputs.get(port_id) is None]
-                    if missing:
-                        raise ValueError(
-                            f"Disabled utility passthrough '{key}' has empty required input(s): {', '.join(missing)}"
-                        )
-                    GenerationRuntimeContext.merge_step_outputs(context, key, copy.deepcopy(raw_inputs))
-                    print(f"[generation-runtime] disabled utility passthrough preserved: {key}", flush=True)
-                continue
-            index = processed_enabled
-            processed_enabled += 1
             started = time.monotonic()
+            key = str(step.get("key") or f"step-{index + 1}")
+            step_type = str(step.get("step_type") or "")
             try:
                 if progress:
                     progress(

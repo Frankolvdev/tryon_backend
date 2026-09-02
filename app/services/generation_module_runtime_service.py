@@ -58,6 +58,7 @@ from app.services.generation_runtime import (
 
 
 class GenerationModuleRuntimeService:
+    _VRAM_PURGE_SOURCE_MARKER = "TRYON_BUILTIN_COMFYUI_VRAM_PURGE_PASSTHROUGH_V1"
     def __init__(self) -> None:
         self._items: dict[UUID, GenerationModuleExecutionResponse] = {}
         self._provider_refs: dict[UUID, dict[str, str]] = {}
@@ -2034,11 +2035,6 @@ class GenerationModuleRuntimeService:
             value = context
             for part in str(source_key or "").split("."):
                 value = value.get(part) if isinstance(value, dict) else None
-            if value is None:
-                raise AppException(
-                    f"Workflow step '{step.get('key')}' received empty binding source '{source_key}' "
-                    f"for ComfyUI node '{binding.get('node_id')}.{binding.get('input_field')}'."
-                )
             node = workflow.get(str(binding.get("node_id")))
             if not isinstance(node, dict):
                 raise AppException(f"Workflow node '{binding.get('node_id')}' was not found.")
@@ -2324,6 +2320,49 @@ class GenerationModuleRuntimeService:
         timeout = int(configuration.get("timeout_seconds") or 300)
 
         raw_inputs = GenerationRuntimeContext.step_inputs(context, step.get("input_mapping"))
+
+        # Pipeline Utility is intentionally transported as a normal Python step.
+        # This keeps the exact proven input/output/context plumbing and only
+        # swaps the operation performed in the middle for the ComfyUI purge.
+        if self._VRAM_PURGE_SOURCE_MARKER in source:
+            current = self.get(execution_id)
+            engine = GenerationExecutionEngine(current.engine)
+            if engine == GenerationExecutionEngine.SIMULATED:
+                time.sleep(0.05)
+                return copy.deepcopy(raw_inputs)
+            if engine not in {GenerationExecutionEngine.LOCAL_DOCKER, GenerationExecutionEngine.OWNER_LOCAL}:
+                raise AppException(
+                    "Built-in VRAM purge Python step must execute inside the remote provider runtime for this engine."
+                )
+            local_target = current.provider_endpoint_id
+            local_adapter = self._local_adapter_for_engine(db, engine, local_target)
+            queued = local_adapter.queue_prompt(
+                workflow={
+                    "tryon_full_vram_cleanup": {
+                        "class_type": "LayerUtility: PurgeVRAM V2",
+                        "inputs": {
+                            "anything": "__TRYON_STAGE_BOUNDARY_FULL_PURGE__",
+                            "purge_cache": True,
+                            "purge_models": True,
+                        },
+                    }
+                },
+                extra_data={
+                    "generation_execution_id": str(execution_id),
+                    "python_step_key": step["key"],
+                },
+            )
+            local_adapter.execute_queued_prompt(
+                prompt_id=queued["prompt_id"],
+                client_id=queued["client_id"],
+                job_public_id=str(execution_id),
+                timeout_seconds=timeout,
+                download_outputs=False,
+                progress_callback=lambda progress, message, meta=None: self._provider_progress(
+                    execution_id, step["key"], progress, message
+                ),
+            )
+            return copy.deepcopy(raw_inputs)
 
         # Python image ports receive real Pillow images instead of the internal
         # persisted-file reference used by the API and workflow runtime.

@@ -20,6 +20,9 @@ from .context import GenerationRuntimeContext
 from .metrics import RuntimeMetricsCollector
 
 
+VRAM_PURGE_SOURCE_MARKER = "TRYON_BUILTIN_COMFYUI_VRAM_PURGE_PASSTHROUGH_V1"
+
+
 class GenerationRuntime:
     CONTRACT = "tryon.generation-runtime/v1"
 
@@ -36,42 +39,16 @@ class GenerationRuntime:
         context = self._materialize(copy.deepcopy(payload.get("context") or {}), self.root / str(payload.get("execution_id") or uuid4()))
         if not isinstance(module, dict):
             raise ValueError("Generation module payload is missing.")
-        ordered_steps = sorted(module.get("steps") or [], key=lambda row: row.get("position", 0))
-        steps = [step for step in ordered_steps if step.get("is_enabled")]
-        # Disabled utility nodes are transparent passthroughs. They do not run
-        # the cleanup action, but their outputs must remain available because
-        # downstream bindings can legally point through them.
-        disabled_utilities = {
-            str(step.get("key") or ""): step
-            for step in ordered_steps
-            if not step.get("is_enabled") and str(step.get("step_type") or "") == "utility"
-        }
+        steps = [step for step in sorted(module.get("steps") or [], key=lambda row: row.get("position", 0)) if step.get("is_enabled")]
         states: list[dict[str, Any]] = []
         metrics = RuntimeMetricsCollector()
-        processed_enabled = 0
-        for ordered_index, step in enumerate(ordered_steps):
-            key = str(step.get("key") or f"step-{ordered_index + 1}")
-            step_type = str(step.get("step_type") or "")
-            if not step.get("is_enabled"):
-                if step_type == "utility":
-                    raw_inputs = GenerationRuntimeContext.step_inputs(context, step.get("input_mapping") or {})
-                    required_ports = [
-                        str(port.get("id") or "")
-                        for port in ((step.get("configuration") or {}).get("input_ports") or [])
-                        if isinstance(port, dict) and port.get("is_required", True)
-                    ]
-                    missing = [port_id for port_id in required_ports if raw_inputs.get(port_id) is None]
-                    if missing:
-                        return {"runtime_contract": self.CONTRACT, "status": "failed", "error": f"Disabled utility passthrough '{key}' has empty required input(s): {', '.join(missing)}", "steps": states, "metrics": metrics.snapshot(status="failed", error=f"Disabled utility passthrough '{key}' has empty required input(s): {', '.join(missing)}")}
-                    GenerationRuntimeContext.merge_step_outputs(context, key, copy.deepcopy(raw_inputs))
-                    print(f"[generation-runtime] disabled utility passthrough preserved: {key}", flush=True)
-                continue
-            index = processed_enabled
-            processed_enabled += 1
+        for index, step in enumerate(steps):
             started = time.monotonic()
+            key = str(step.get("key") or f"step-{index + 1}")
             try:
                 if progress:
                     progress((index / max(len(steps), 1)) * 100, f"Step '{key}' started.")
+                step_type = str(step.get("step_type") or "")
                 if step_type == "workflow":
                     outputs = self._workflow(step, context, payload.get("execution_id"))
                 elif step_type == "python":
@@ -237,11 +214,6 @@ class GenerationRuntime:
         for binding in config.get("input_bindings") or []:
             source = binding.get("source_path") or binding.get("module_input_key")
             value = GenerationRuntimeContext.resolve(context, str(source or ""))
-            if value is None:
-                raise ValueError(
-                    f"Workflow step '{step.get('key')}' received empty binding source '{source}' "
-                    f"for ComfyUI node '{binding.get('node_id')}.{binding.get('input_field')}'."
-                )
             node = workflow.get(str(binding.get("node_id")))
             if not isinstance(node, dict):
                 raise ValueError(f"Workflow node '{binding.get('node_id')}' was not found.")
@@ -380,12 +352,36 @@ class GenerationRuntime:
 
         return copy.deepcopy(raw_inputs)
 
+    @staticmethod
+    def _vram_purge_workflow() -> dict[str, Any]:
+        return {
+            "tryon_full_vram_cleanup": {
+                "class_type": "LayerUtility: PurgeVRAM V2",
+                "inputs": {
+                    "anything": "__TRYON_STAGE_BOUNDARY_FULL_PURGE__",
+                    "purge_cache": True,
+                    "purge_models": True,
+                },
+            }
+        }
+
     def _python(self, step: dict[str, Any], context: dict[str, Any], execution_id: Any) -> dict[str, Any]:
         config = step.get("configuration") or {}
         source = config.get("source_code") or ""
         entrypoint = config.get("entrypoint") or "run"
         timeout = int(config.get("timeout_seconds") or 300)
-        inputs = self._to_images(GenerationRuntimeContext.step_inputs(context, step.get("input_mapping")))
+        raw_inputs = GenerationRuntimeContext.step_inputs(context, step.get("input_mapping"))
+
+        # Pipeline Utility deliberately reuses the proven Python step transport:
+        # same input_mapping, ordering, enabled flag and context merge. The only
+        # special behavior is the operation executed between input and output.
+        if VRAM_PURGE_SOURCE_MARKER in source:
+            print(f"[runtime] Pipeline Utility '{step.get('key')}' FULL VRAM purge started.", flush=True)
+            self._execute_comfy(self._vram_purge_workflow(), timeout)
+            print(f"[runtime] Pipeline Utility '{step.get('key')}' FULL VRAM purge completed.", flush=True)
+            return copy.deepcopy(raw_inputs)
+
+        inputs = self._to_images(raw_inputs)
         allowed = {"PIL", "math", "json", "io", "base64"}
         real_import = __import__
 
