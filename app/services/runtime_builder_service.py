@@ -591,10 +591,6 @@ COMFYUI_PORT = 8188
 TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"
 STARTUP_TIMEOUT = int(os.getenv("TRYON_MODAL_STARTUP_TIMEOUT", "600"))
 MODERN_RUNTIME = {modern_runtime!r}
-DEEP_PROFILING_ENABLED = MODERN_RUNTIME and os.getenv(
-    "TRYON_MODAL_DEEP_PROFILING",
-    "true",
-).strip().lower() in {{"1", "true", "yes", "on"}}
 MANAGER_OFFLINE_ENABLED = MODERN_RUNTIME and os.getenv(
     "TRYON_MODAL_MANAGER_OFFLINE",
     "true",
@@ -762,14 +758,14 @@ def _read_cpu_counters(pid: int | None) -> dict:
     return counters
 
 
-def _diagnostic_cpu_state(
-    pid: int | None,
-    previous: dict | None = None,
-    elapsed_s: float | None = None,
-) -> dict:
+def _cpu_runtime_state(pid: int | None) -> dict:
     result = {{"os_cpu_count": os.cpu_count()}}
     try:
-        result["affinity_cpu_count"] = len(os.sched_getaffinity(0))
+        result["process_affinity_cpu_count"] = len(os.sched_getaffinity(pid or 0))
+    except (AttributeError, OSError, ProcessLookupError):
+        pass
+    try:
+        result["container_affinity_cpu_count"] = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         pass
     try:
@@ -784,102 +780,73 @@ def _diagnostic_cpu_state(
         result["cgroup_cpu_max"] = quota_text
         if quota != "max":
             result["cgroup_cpu_limit_cores"] = round(int(quota) / int(period), 3)
+        else:
+            result["cgroup_cpu_limit_cores"] = None
     except (OSError, ValueError, IndexError, ZeroDivisionError):
         pass
-
-    current = _read_cpu_counters(pid)
-    result.update(current)
-    if previous and elapsed_s and elapsed_s > 0:
-        current_ticks = current.get("process_ticks")
-        previous_ticks = previous.get("process_ticks")
-        if current_ticks is not None and previous_ticks is not None:
-            try:
-                clock_ticks = os.sysconf("SC_CLK_TCK")
-                result["comfyui_cpu_percent_one_core_100"] = round(
-                    ((current_ticks - previous_ticks) / clock_ticks) / elapsed_s * 100.0,
-                    2,
-                )
-            except (OSError, ValueError, ZeroDivisionError):
-                pass
-        current_usage = current.get("cgroup_usage_usec")
-        previous_usage = previous.get("cgroup_usage_usec")
-        if current_usage is not None and previous_usage is not None:
-            result["container_cpu_percent_one_core_100"] = round(
-                ((current_usage - previous_usage) / 1_000_000.0) / elapsed_s * 100.0,
-                2,
-            )
     return result
 
 
-def _start_pipeline_profiler(execution_id: str, comfy_pid: int | None):
-    if not DEEP_PROFILING_ENABLED:
-        return None, None
+def _start_passive_cpu_monitor(pid: int | None):
+    if not MODERN_RUNTIME or not pid:
+        return None
     stop_event = threading.Event()
-    started = time.monotonic()
+    static_state = _cpu_runtime_state(pid)
+    _modal_trace(
+        "cpu_runtime_limits",
+        role="pipeline_server",
+        comfyui_pid=pid,
+        **static_state,
+    )
 
     def sample_loop() -> None:
-        sequence = 0
-        previous_cpu = _read_cpu_counters(comfy_pid)
+        previous = _read_cpu_counters(pid)
         previous_time = time.monotonic()
-        while not stop_event.wait(1.0):
-            sequence += 1
+        sequence = 0
+        while not stop_event.wait(2.0):
+            if not Path(f"/proc/{{pid}}/stat").exists():
+                break
             current_time = time.monotonic()
-            elapsed_sample = max(current_time - previous_time, 1e-9)
-            cpu_state = _diagnostic_cpu_state(
-                comfy_pid,
-                previous=previous_cpu,
-                elapsed_s=elapsed_sample,
-            )
-            previous_cpu = {{
-                key: cpu_state[key]
-                for key in ("process_ticks", "cgroup_usage_usec")
-                if key in cpu_state
+            elapsed_s = max(current_time - previous_time, 1e-9)
+            current = _read_cpu_counters(pid)
+            sequence += 1
+            payload = {{
+                "event": "cpu_runtime_sample",
+                "role": "pipeline_server",
+                "sequence": sequence,
+                "elapsed_s": round(elapsed_s, 3),
+                "comfyui_pid": pid,
             }}
+            current_ticks = current.get("process_ticks")
+            previous_ticks = previous.get("process_ticks")
+            if current_ticks is not None and previous_ticks is not None:
+                try:
+                    clock_ticks = os.sysconf("SC_CLK_TCK")
+                    payload["comfyui_cpu_percent_one_core_100"] = round(
+                        ((current_ticks - previous_ticks) / clock_ticks) / elapsed_s * 100.0,
+                        2,
+                    )
+                except (OSError, ValueError, ZeroDivisionError):
+                    pass
+            current_usage = current.get("cgroup_usage_usec")
+            previous_usage = previous.get("cgroup_usage_usec")
+            if current_usage is not None and previous_usage is not None:
+                payload["container_cpu_percent_one_core_100"] = round(
+                    ((current_usage - previous_usage) / 1_000_000.0) / elapsed_s * 100.0,
+                    2,
+                )
+            payload.update(_cpu_runtime_state(pid))
+            print("[tryon-cpu-monitor] " + json.dumps(payload, ensure_ascii=False, default=str), flush=True)
+            previous = current
             previous_time = current_time
-            _modal_trace(
-                "pipeline_profile_sample",
-                role="pipeline_server",
-                execution_id=execution_id,
-                sequence=sequence,
-                elapsed_ms=int((current_time - started) * 1000),
-                comfyui=_diagnostic_process_state(comfy_pid),
-                memory=_diagnostic_memory_state(),
-                cpu=cpu_state,
-            )
 
     thread = threading.Thread(
         target=sample_loop,
-        name=f"tryon-profiler-{{execution_id[:8] or 'pipeline'}}",
+        name="tryon-cpu-monitor",
         daemon=True,
     )
     thread.start()
-    _modal_trace(
-        "pipeline_profile_start",
-        role="pipeline_server",
-        execution_id=execution_id,
-        comfyui=_diagnostic_process_state(comfy_pid),
-        memory=_diagnostic_memory_state(),
-        cpu=_diagnostic_cpu_state(comfy_pid),
-        sample_interval_s=1.0,
-    )
     return stop_event, thread
-
-
-def _stop_pipeline_profiler(execution_id: str, profiler, comfy_pid: int | None) -> None:
-    if not profiler or not profiler[0]:
-        return
-    stop_event, thread = profiler
-    stop_event.set()
-    if thread is not None:
-        thread.join(timeout=2)
-    _modal_trace(
-        "pipeline_profile_end",
-        role="pipeline_server",
-        execution_id=execution_id,
-        comfyui=_diagnostic_process_state(comfy_pid),
-        memory=_diagnostic_memory_state(),
-        cpu=_diagnostic_cpu_state(comfy_pid),
-    )
 
 
 def _set_manager_network_mode_offline() -> None:
@@ -1754,6 +1721,15 @@ class ComfyUIServer:
             flush=True,
         )
 
+    def _start_cpu_monitor_after_restore(self) -> None:
+        process = getattr(self, "comfyui_process", None)
+        if process is None or process.poll() is not None:
+            return
+        existing = getattr(self, "cpu_monitor", None)
+        if existing and existing[0] and not existing[0].is_set():
+            return
+        self.cpu_monitor = _start_passive_cpu_monitor(process.pid)
+
     @modal.enter(snap=False)
     def restore_after_snapshot(self) -> None:
         _modal_trace(
@@ -1789,6 +1765,7 @@ class ComfyUIServer:
                 "[modal] Runtime engine restaurado y validado.",
                 flush=True,
             )
+            self._start_cpu_monitor_after_restore()
             return
 
         # Fallback exacto al restore anterior.
@@ -1816,6 +1793,7 @@ class ComfyUIServer:
                 startup_mode="restored_comfyui_gpu_snapshot",
                 gpu=_diagnostic_gpu_state(),
             )
+            self._start_cpu_monitor_after_restore()
             return
 
         print(
@@ -1833,6 +1811,7 @@ class ComfyUIServer:
             startup_mode="restored_comfyui_gpu_snapshot",
             gpu=_diagnostic_gpu_state(),
         )
+        self._start_cpu_monitor_after_restore()
 
     @modal.method()
     def run_pipeline(self, payload):
@@ -1848,9 +1827,6 @@ class ComfyUIServer:
             sys.path.insert(0, str(runtime_worker))
         from generation_runtime import GenerationRuntime
         runtime = GenerationRuntime(comfy_url=f"http://127.0.0.1:{{COMFYUI_PORT}}")
-        process = getattr(self, "comfyui_process", None)
-        comfy_pid = process.pid if process is not None and process.poll() is None else None
-        profiler = _start_pipeline_profiler(execution_id, comfy_pid)
         started = time.monotonic()
         try:
             result = runtime.execute(payload)
@@ -1865,8 +1841,6 @@ class ComfyUIServer:
                 error=str(exc),
             )
             raise
-        finally:
-            _stop_pipeline_profiler(execution_id, profiler, comfy_pid)
         duration_ms = int((time.monotonic() - started) * 1000)
         if isinstance(result, dict):
             metrics = result.get("metrics")
@@ -1894,6 +1868,9 @@ class ComfyUIServer:
     @modal.exit()
     def shutdown(self) -> None:
         _modal_trace("container_exit", role="pipeline_server")
+        monitor = getattr(self, "cpu_monitor", None)
+        if monitor and monitor[0]:
+            monitor[0].set()
         process = getattr(self, "comfyui_process", None)
         if process is None or process.poll() is not None:
             return
