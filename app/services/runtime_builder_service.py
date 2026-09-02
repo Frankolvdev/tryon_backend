@@ -743,6 +743,74 @@ def _diagnostic_memory_state() -> dict:
     return result
 
 
+def _read_cpu_counters(pid: int | None) -> dict:
+    counters = {{}}
+    if pid:
+        try:
+            fields = Path(f"/proc/{{pid}}/stat").read_text(encoding="utf-8").split()
+            counters["process_ticks"] = int(fields[13]) + int(fields[14])
+        except (OSError, ValueError, IndexError):
+            pass
+    try:
+        for line in Path("/sys/fs/cgroup/cpu.stat").read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition(" ")
+            if key == "usage_usec":
+                counters["cgroup_usage_usec"] = int(value.strip())
+                break
+    except (OSError, ValueError):
+        pass
+    return counters
+
+
+def _diagnostic_cpu_state(
+    pid: int | None,
+    previous: dict | None = None,
+    elapsed_s: float | None = None,
+) -> dict:
+    result = {{"os_cpu_count": os.cpu_count()}}
+    try:
+        result["affinity_cpu_count"] = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        pass
+    try:
+        cpuset = Path("/sys/fs/cgroup/cpuset.cpus.effective").read_text(encoding="utf-8").strip()
+        if cpuset:
+            result["cpuset_effective"] = cpuset
+    except OSError:
+        pass
+    try:
+        quota_text = Path("/sys/fs/cgroup/cpu.max").read_text(encoding="utf-8").strip()
+        quota, period = quota_text.split()[:2]
+        result["cgroup_cpu_max"] = quota_text
+        if quota != "max":
+            result["cgroup_cpu_limit_cores"] = round(int(quota) / int(period), 3)
+    except (OSError, ValueError, IndexError, ZeroDivisionError):
+        pass
+
+    current = _read_cpu_counters(pid)
+    result.update(current)
+    if previous and elapsed_s and elapsed_s > 0:
+        current_ticks = current.get("process_ticks")
+        previous_ticks = previous.get("process_ticks")
+        if current_ticks is not None and previous_ticks is not None:
+            try:
+                clock_ticks = os.sysconf("SC_CLK_TCK")
+                result["comfyui_cpu_percent_one_core_100"] = round(
+                    ((current_ticks - previous_ticks) / clock_ticks) / elapsed_s * 100.0,
+                    2,
+                )
+            except (OSError, ValueError, ZeroDivisionError):
+                pass
+        current_usage = current.get("cgroup_usage_usec")
+        previous_usage = previous.get("cgroup_usage_usec")
+        if current_usage is not None and previous_usage is not None:
+            result["container_cpu_percent_one_core_100"] = round(
+                ((current_usage - previous_usage) / 1_000_000.0) / elapsed_s * 100.0,
+                2,
+            )
+    return result
+
+
 def _start_pipeline_profiler(execution_id: str, comfy_pid: int | None):
     if not DEEP_PROFILING_ENABLED:
         return None, None
@@ -751,16 +819,32 @@ def _start_pipeline_profiler(execution_id: str, comfy_pid: int | None):
 
     def sample_loop() -> None:
         sequence = 0
+        previous_cpu = _read_cpu_counters(comfy_pid)
+        previous_time = time.monotonic()
         while not stop_event.wait(1.0):
             sequence += 1
+            current_time = time.monotonic()
+            elapsed_sample = max(current_time - previous_time, 1e-9)
+            cpu_state = _diagnostic_cpu_state(
+                comfy_pid,
+                previous=previous_cpu,
+                elapsed_s=elapsed_sample,
+            )
+            previous_cpu = {{
+                key: cpu_state[key]
+                for key in ("process_ticks", "cgroup_usage_usec")
+                if key in cpu_state
+            }}
+            previous_time = current_time
             _modal_trace(
                 "pipeline_profile_sample",
                 role="pipeline_server",
                 execution_id=execution_id,
                 sequence=sequence,
-                elapsed_ms=int((time.monotonic() - started) * 1000),
+                elapsed_ms=int((current_time - started) * 1000),
                 comfyui=_diagnostic_process_state(comfy_pid),
                 memory=_diagnostic_memory_state(),
+                cpu=cpu_state,
             )
 
     thread = threading.Thread(
@@ -775,6 +859,7 @@ def _start_pipeline_profiler(execution_id: str, comfy_pid: int | None):
         execution_id=execution_id,
         comfyui=_diagnostic_process_state(comfy_pid),
         memory=_diagnostic_memory_state(),
+        cpu=_diagnostic_cpu_state(comfy_pid),
         sample_interval_s=1.0,
     )
     return stop_event, thread
@@ -793,6 +878,7 @@ def _stop_pipeline_profiler(execution_id: str, profiler, comfy_pid: int | None) 
         execution_id=execution_id,
         comfyui=_diagnostic_process_state(comfy_pid),
         memory=_diagnostic_memory_state(),
+        cpu=_diagnostic_cpu_state(comfy_pid),
     )
 
 
@@ -1508,34 +1594,37 @@ def _benchmark_one_storage_file(relative_path: str, passes: int = 2) -> dict:
     }}
 
 
-@app.function(
-    image=image,
-    volumes={{VOLUME_PATH: models_volume}},
-    timeout=900,
-    memory=4096,
-)
-def benchmark_model_storage(paths=None, passes: int = 2):
-    selected = paths or [
-        "checkpoints/cyberrealisticPony_v170.safetensors",
-        "controlnet/union_pro_max_sdxl.safetensors",
-        "loras/Pony/Realism Lora By Stable Yogi_V3_Pro.safetensors",
-    ]
-    _modal_trace(
-        "storage_benchmark_start",
-        role="storage_benchmark",
-        paths=selected,
-        passes=passes,
+# Diagnóstico temporal de storage desactivado. El helper se conserva para poder
+# reactivarlo sin alterar la generación ni el pipeline.
+STORAGE_BENCHMARK_ENABLED = False
+if STORAGE_BENCHMARK_ENABLED:
+    @app.function(
+        image=image,
+        volumes={{VOLUME_PATH: models_volume}},
+        timeout=900,
+        memory=4096,
     )
-    results = [_benchmark_one_storage_file(path, passes=passes) for path in selected]
-    payload = {{"status": "completed", "volume_root": str(MODELS_ROOT), "results": results}}
-    _modal_trace("storage_benchmark_end", role="storage_benchmark", **payload)
-    return payload
+    def benchmark_model_storage(paths=None, passes: int = 2):
+        selected = paths or [
+            "checkpoints/cyberrealisticPony_v170.safetensors",
+            "controlnet/union_pro_max_sdxl.safetensors",
+            "loras/Pony/Realism Lora By Stable Yogi_V3_Pro.safetensors",
+        ]
+        _modal_trace(
+            "storage_benchmark_start",
+            role="storage_benchmark",
+            paths=selected,
+            passes=passes,
+        )
+        results = [_benchmark_one_storage_file(path, passes=passes) for path in selected]
+        payload = {{"status": "completed", "volume_root": str(MODELS_ROOT), "results": results}}
+        _modal_trace("storage_benchmark_end", role="storage_benchmark", **payload)
+        return payload
 
-
-@app.local_entrypoint()
-def benchmark_storage():
-    result = benchmark_model_storage.remote()
-    print(json.dumps(result, indent=2, ensure_ascii=False, default=str), flush=True)
+    @app.local_entrypoint()
+    def benchmark_storage():
+        result = benchmark_model_storage.remote()
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str), flush=True)
 
 
 MODAL_CLASS_OPTIONS = {{
@@ -1549,6 +1638,8 @@ MODAL_CLASS_OPTIONS = {{
     "enable_memory_snapshot": True,
     "experimental_options": {{"enable_gpu_snapshot": True}},
 }}
+if MODERN_RUNTIME:
+    MODAL_CLASS_OPTIONS["cpu"] = 12.0
 if REGION is not None:
     MODAL_CLASS_OPTIONS["region"] = REGION
 
