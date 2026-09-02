@@ -57,6 +57,49 @@ from app.services.generation_runtime import (
 )
 
 
+def _ordered_enabled_module_steps(module: dict[str, Any]) -> list[dict[str, Any]]:
+    """Dependency-safe execution order; position only breaks independent ties."""
+    steps = [step for step in (module.get("steps") or []) if step.get("is_enabled")]
+    by_key = {str(step.get("key") or ""): step for step in steps}
+    sort_key = lambda step: (int(step.get("position") or 0), str(step.get("key") or ""))
+    dependencies: dict[str, set[str]] = {key: set() for key in by_key}
+
+    def add_source(target_key: str, raw_path: Any) -> None:
+        if not isinstance(raw_path, str) or "." not in raw_path:
+            return
+        source_key = raw_path.split(".", 1)[0]
+        if source_key in by_key and source_key != target_key:
+            dependencies[target_key].add(source_key)
+
+    for key, step in by_key.items():
+        for raw_path in (step.get("input_mapping") or {}).values():
+            add_source(key, raw_path)
+        for binding in ((step.get("configuration") or {}).get("input_bindings") or []):
+            if isinstance(binding, dict):
+                add_source(key, binding.get("source_path") or binding.get("module_input_key"))
+
+    dependents: dict[str, set[str]] = {key: set() for key in by_key}
+    indegree = {key: len(value) for key, value in dependencies.items()}
+    for target_key, sources in dependencies.items():
+        for source_key in sources:
+            dependents[source_key].add(target_key)
+
+    ready = sorted((key for key, degree in indegree.items() if degree == 0), key=lambda key: sort_key(by_key[key]))
+    ordered: list[dict[str, Any]] = []
+    while ready:
+        key = ready.pop(0)
+        ordered.append(by_key[key])
+        for target_key in sorted(dependents[key], key=lambda item: sort_key(by_key[item])):
+            indegree[target_key] -= 1
+            if indegree[target_key] == 0:
+                ready.append(target_key)
+                ready.sort(key=lambda item: sort_key(by_key[item]))
+    if len(ordered) != len(steps):
+        blocked = sorted(key for key, degree in indegree.items() if degree > 0)
+        raise AppException(f"Generation module contains a cyclic step dependency: {', '.join(blocked)}")
+    return ordered
+
+
 class GenerationModuleRuntimeService:
     _VRAM_PURGE_SOURCE_MARKER = "TRYON_BUILTIN_COMFYUI_VRAM_PURGE_PASSTHROUGH_V1"
     def __init__(self) -> None:
@@ -567,7 +610,7 @@ class GenerationModuleRuntimeService:
             if running_snapshot.engine == GenerationExecutionEngine.BEAM:
                 self._run_beam_module(db, execution_id, module)
                 return
-            steps = [s for s in sorted(module["steps"], key=lambda row: row["position"]) if s["is_enabled"]]
+            steps = _ordered_enabled_module_steps(module)
             for index, step in enumerate(steps):
                 with self._lock:
                     item = self._items[execution_id]
@@ -575,7 +618,7 @@ class GenerationModuleRuntimeService:
                         item.status = "cancelled"
                         item.logs.append(GenerationModuleExecutionLog(timestamp=utc_now(), level="warning", message="Execution cancelled."))
                         break
-                    state = item.steps[index]
+                    state = next(s for s in item.steps if s.step_key == step["key"])
                     state.status = "running"; state.started_at = utc_now()
                     item.logs.append(GenerationModuleExecutionLog(timestamp=state.started_at, step_key=step["key"], message=f"Step '{step['name']}' started."))
                     context = copy.deepcopy(item.context)
@@ -583,7 +626,7 @@ class GenerationModuleRuntimeService:
                 outputs = self._execute_step(db, execution_id, step, context, engine)
                 finished = utc_now()
                 with self._lock:
-                    item = self._items[execution_id]; state = item.steps[index]
+                    item = self._items[execution_id]; state = next(s for s in item.steps if s.step_key == step["key"])
                     state.status = "completed"; state.finished_at = finished
                     state.duration_ms = int((finished - state.started_at).total_seconds() * 1000) if state.started_at else 0
                     state.outputs = outputs

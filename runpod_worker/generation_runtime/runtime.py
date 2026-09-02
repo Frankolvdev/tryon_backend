@@ -23,6 +23,56 @@ from .metrics import RuntimeMetricsCollector
 VRAM_PURGE_SOURCE_MARKER = "TRYON_BUILTIN_COMFYUI_VRAM_PURGE_PASSTHROUGH_V1"
 
 
+def _ordered_enabled_steps(module: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return enabled steps in dependency-safe order.
+
+    Connections are authoritative. Persisted ``position`` is only a stable
+    tie-breaker for independent branches, so stale DB positions can never run
+    a consumer before the step that produces its input.
+    """
+    steps = [step for step in (module.get("steps") or []) if step.get("is_enabled")]
+    by_key = {str(step.get("key") or ""): step for step in steps}
+    order_key = lambda step: (int(step.get("position") or 0), str(step.get("key") or ""))
+    dependencies: dict[str, set[str]] = {key: set() for key in by_key}
+
+    def add_source(target_key: str, raw_path: Any) -> None:
+        if not isinstance(raw_path, str) or "." not in raw_path:
+            return
+        source_key = raw_path.split(".", 1)[0]
+        if source_key in by_key and source_key != target_key:
+            dependencies[target_key].add(source_key)
+
+    for key, step in by_key.items():
+        for raw_path in (step.get("input_mapping") or {}).values():
+            add_source(key, raw_path)
+        configuration = step.get("configuration") or {}
+        for binding in configuration.get("input_bindings") or []:
+            if isinstance(binding, dict):
+                add_source(key, binding.get("source_path") or binding.get("module_input_key"))
+
+    dependents: dict[str, set[str]] = {key: set() for key in by_key}
+    indegree = {key: len(value) for key, value in dependencies.items()}
+    for target_key, source_keys in dependencies.items():
+        for source_key in source_keys:
+            dependents[source_key].add(target_key)
+
+    ready = sorted((key for key, degree in indegree.items() if degree == 0), key=lambda key: order_key(by_key[key]))
+    ordered: list[dict[str, Any]] = []
+    while ready:
+        key = ready.pop(0)
+        ordered.append(by_key[key])
+        for target_key in sorted(dependents[key], key=lambda item: order_key(by_key[item])):
+            indegree[target_key] -= 1
+            if indegree[target_key] == 0:
+                ready.append(target_key)
+                ready.sort(key=lambda item: order_key(by_key[item]))
+
+    if len(ordered) != len(steps):
+        blocked = sorted(key for key, degree in indegree.items() if degree > 0)
+        raise ValueError(f"Generation module contains a cyclic step dependency: {', '.join(blocked)}")
+    return ordered
+
+
 class GenerationRuntime:
     CONTRACT = "tryon.generation-runtime/v1"
 
@@ -39,7 +89,7 @@ class GenerationRuntime:
         context = self._materialize(copy.deepcopy(payload.get("context") or {}), self.root / str(payload.get("execution_id") or uuid4()))
         if not isinstance(module, dict):
             raise ValueError("Generation module payload is missing.")
-        steps = [step for step in sorted(module.get("steps") or [], key=lambda row: row.get("position", 0)) if step.get("is_enabled")]
+        steps = _ordered_enabled_steps(module)
         states: list[dict[str, Any]] = []
         metrics = RuntimeMetricsCollector()
         for index, step in enumerate(steps):
