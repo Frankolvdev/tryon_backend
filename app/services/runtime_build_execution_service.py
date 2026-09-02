@@ -1664,9 +1664,29 @@ class RuntimeBuildExecutionService:
             app_file = context / "modal_app.py"
             if not app_file.is_file():
                 raise ValueError("La compilación no contiene modal_app.py. Regenera el runtime antes de desplegar.")
+
+            # El contexto exportado es un snapshot de archivos generado en otro momento.
+            # Antes de cada deploy Modal refrescamos SOLO el runtime remoto canónico
+            # desde este backend para impedir que un redeploy publique runtime.py viejo.
+            # No regeneramos Dockerfile/modal_app, modelos, nodos ni configuración.
+            from app.services.runtime_context_generator_service import (
+                RuntimeContextGeneratorService,
+            )
+
+            synced_runtime_files = RuntimeContextGeneratorService._copy_generation_runtime(context)
+            synced_runtime = context / "runpod_worker" / "generation_runtime" / "runtime.py"
+            if not synced_runtime.is_file():
+                raise RuntimeError(
+                    "No se pudo sincronizar runpod_worker/generation_runtime/runtime.py "
+                    "antes del deploy Modal."
+                )
             RuntimeBuildExecutionService._update_deployment(
                 db, build, deployment, phase="preparing-runtime", progress=35,
-                message="Preparando compilación.", log=f"[deploy:3/6] Contexto validado: {context}",
+                message="Preparando compilación.",
+                log=(
+                    f"[deploy:3/6] Contexto validado: {context}. "
+                    f"Runtime remoto sincronizado ({len(synced_runtime_files)} archivos)."
+                ),
             )
             RuntimeBuildExecutionService._update_deployment(
                 db, build, deployment, phase="publishing-image", progress=48,
