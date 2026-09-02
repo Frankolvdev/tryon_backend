@@ -1784,6 +1784,8 @@ class ComfyUIServer:
         extra_args = shlex.split(env.get("COMFYUI_EXTRA_ARGS", ""))
         if MODERN_RUNTIME and "--disable-mmap" not in extra_args:
             extra_args.append("--disable-mmap")
+        if MODERN_RUNTIME and "--disable-dynamic-vram" not in extra_args:
+            extra_args.append("--disable-dynamic-vram")
         command = [
             sys.executable,
             str(COMFYUI_MAIN),
