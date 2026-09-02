@@ -627,7 +627,6 @@ MAX_CONTAINERS = int(os.getenv("TRYON_MODAL_MAX_CONTAINERS", "3"))
 GENERATION_CONCURRENCY = int(os.getenv("TRYON_MODAL_CONCURRENCY", "1"))
 INPUT_CONCURRENCY = int(os.getenv("TRYON_MODAL_INPUT_CONCURRENCY", "1000"))
 SCALEDOWN_WINDOW = int(os.getenv("TRYON_MODAL_SCALEDOWN_WINDOW", "300"))
-CPU_MEMORY_REQUEST_MB = int(os.getenv("TRYON_MODAL_CPU_MEMORY_REQUEST_MB", "32768"))
 EXECUTION_TIMEOUT = int(os.getenv("TRYON_MODAL_EXECUTION_TIMEOUT", "1800"))
 RUNTIME_ENGINE_ENABLED = os.getenv(
     "TRYON_MODAL_RUNTIME_ENGINE_ENABLED",
@@ -1515,7 +1514,7 @@ def _benchmark_one_storage_file(relative_path: str, passes: int = 2) -> dict:
     timeout=900,
     memory=4096,
 )
-def benchmark_model_storage(paths: list[str] | None = None, passes: int = 2):
+def benchmark_model_storage(paths=None, passes: int = 2):
     if not MODERN_RUNTIME:
         return {{"status": "disabled", "reason": "modern_runtime_only"}}
     selected = paths or [
@@ -1543,7 +1542,6 @@ MODAL_CLASS_OPTIONS = {{
     "volumes": {{VOLUME_PATH: models_volume}},
     "timeout": EXECUTION_TIMEOUT,
     "scaledown_window": SCALEDOWN_WINDOW,
-    "memory": CPU_MEMORY_REQUEST_MB,
     "enable_memory_snapshot": True,
     "experimental_options": {{"enable_gpu_snapshot": True}},
 }}
