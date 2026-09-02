@@ -5,13 +5,16 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import AppException, ConflictException, NotFoundException
-from app.common.generation_module_enums import GenerationModuleStepType
+from app.common.generation_module_enums import GenerationModuleStepType, GenerationModuleUtilityAction
 from app.models.generation_module import GenerationModule, GenerationModuleStep
 from app.schemas.generation_module import GenerationModuleResponse
 from app.schemas.generation_module_authoring import (
     GenerationModuleStepsReorderRequest,
+    GenerationNodePort,
     PythonStepCreateRequest,
     PythonStepUpdateRequest,
+    UtilityStepCreateRequest,
+    UtilityStepUpdateRequest,
     WorkflowInputBinding,
     WorkflowOutputBinding,
     WorkflowStepBindingsUpdate,
@@ -385,6 +388,119 @@ class GenerationModuleAuthoringService:
             step.is_enabled = data.is_enabled
         configuration["source_code"] = source_code
         configuration["entrypoint"] = entrypoint
+        if data.timeout_seconds is not None:
+            configuration["timeout_seconds"] = data.timeout_seconds
+        if data.input_ports is not None:
+            configuration["input_ports"] = [item.model_dump() for item in data.input_ports]
+        if data.output_ports is not None:
+            configuration["output_ports"] = [item.model_dump() for item in data.output_ports]
+        step.configuration_json = self._json(configuration)
+        if data.input_mapping is not None:
+            step.input_mapping_json = self._json(data.input_mapping)
+        if data.output_mapping is not None:
+            step.output_mapping_json = self._json(data.output_mapping)
+        db.add(step)
+        db.commit()
+        return generation_module_service.get_response(db, module_id=module.id)
+
+    @staticmethod
+    def _validate_utility_ports(
+        input_ports: list[Any],
+        output_ports: list[Any],
+        output_mapping: dict[str, Any],
+    ) -> None:
+        input_ids = [str(getattr(port, "id", "") or "") for port in input_ports]
+        output_ids = [str(getattr(port, "id", "") or "") for port in output_ports]
+        if len(input_ids) != len(set(input_ids)):
+            raise AppException("Duplicate utility input port ids are not allowed.")
+        if len(output_ids) != len(set(output_ids)):
+            raise AppException("Duplicate utility output port ids are not allowed.")
+        input_id_set = set(input_ids)
+        for output_id in output_ids:
+            source = str(output_mapping.get(output_id) or "").strip()
+            if not source:
+                raise AppException(
+                    f"Utility output port '{output_id}' must map to an input port."
+                )
+            root = source.split(".", 1)[0]
+            if root not in input_id_set and not source.startswith("inputs."):
+                raise AppException(
+                    f"Utility output mapping '{output_id} -> {source}' must reference a utility input port."
+                )
+
+    def create_utility_step(
+        self,
+        db: Session,
+        *,
+        module_id: int,
+        data: UtilityStepCreateRequest,
+    ) -> GenerationModuleResponse:
+        module = generation_module_service.get(db, module_id=module_id)
+        self._assert_step_identity_available(module, key=data.key, position=data.position)
+        if data.action != GenerationModuleUtilityAction.COMFYUI_VRAM_PURGE:
+            raise AppException("Unsupported utility action.")
+        self._validate_utility_ports(data.input_ports, data.output_ports, data.output_mapping)
+        configuration = {
+            "action": data.action.value,
+            "timeout_seconds": data.timeout_seconds,
+            "input_ports": [item.model_dump() for item in data.input_ports],
+            "output_ports": [item.model_dump() for item in data.output_ports],
+        }
+        db.add(
+            GenerationModuleStep(
+                generation_module_id=module.id,
+                key=data.key,
+                name=data.name,
+                description=data.description,
+                step_type=GenerationModuleStepType.UTILITY.value,
+                position=data.position,
+                is_enabled=data.is_enabled,
+                configuration_json=self._json(configuration),
+                input_mapping_json=self._json(data.input_mapping),
+                output_mapping_json=self._json(data.output_mapping),
+            )
+        )
+        db.commit()
+        return generation_module_service.get_response(db, module_id=module.id)
+
+    def update_utility_step(
+        self,
+        db: Session,
+        *,
+        module_id: int,
+        step_id: int,
+        data: UtilityStepUpdateRequest,
+    ) -> GenerationModuleResponse:
+        module = generation_module_service.get(db, module_id=module_id)
+        step = self._step(module, step_id)
+        if step.step_type != GenerationModuleStepType.UTILITY.value:
+            raise AppException("The selected step is not a utility step.")
+        configuration = self._load(step.configuration_json, {})
+        action = data.action or GenerationModuleUtilityAction(
+            configuration.get("action") or GenerationModuleUtilityAction.COMFYUI_VRAM_PURGE.value
+        )
+        if action != GenerationModuleUtilityAction.COMFYUI_VRAM_PURGE:
+            raise AppException("Unsupported utility action.")
+        input_ports = data.input_ports
+        if input_ports is None:
+            input_ports = [GenerationNodePort(**item) for item in configuration.get("input_ports", [])]
+        output_ports = data.output_ports
+        if output_ports is None:
+            output_ports = [GenerationNodePort(**item) for item in configuration.get("output_ports", [])]
+        output_mapping = (
+            data.output_mapping
+            if data.output_mapping is not None
+            else self._load(step.output_mapping_json, {})
+        )
+        self._validate_utility_ports(input_ports, output_ports, output_mapping)
+
+        if data.name is not None:
+            step.name = data.name
+        if "description" in data.model_fields_set:
+            step.description = data.description
+        if data.is_enabled is not None:
+            step.is_enabled = data.is_enabled
+        configuration["action"] = action.value
         if data.timeout_seconds is not None:
             configuration["timeout_seconds"] = data.timeout_seconds
         if data.input_ports is not None:

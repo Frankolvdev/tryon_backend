@@ -119,6 +119,12 @@ class RunPodGenerationRuntime(GenerationRuntime):
                         context,
                         payload.get("execution_id"),
                     )
+                elif step_type == "utility":
+                    outputs = self._utility(
+                        step,
+                        context,
+                        payload.get("execution_id"),
+                    )
                 else:
                     raise ValueError(
                         "Unsupported generation module step type: "

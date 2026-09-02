@@ -50,6 +50,8 @@ class GenerationRuntime:
                     outputs = self._workflow(step, context, payload.get("execution_id"))
                 elif step_type == "python":
                     outputs = self._python(step, context, payload.get("execution_id"))
+                elif step_type == "utility":
+                    outputs = self._utility(step, context, payload.get("execution_id"))
                 else:
                     raise ValueError(f"Unsupported generation module step type: {step_type}")
                 GenerationRuntimeContext.merge_step_outputs(context, key, outputs)
@@ -267,7 +269,85 @@ class GenerationRuntime:
                     target = self.root / f"{uuid4().hex}{suffix}"
                     target.write_bytes(content)
                     files.append({"__generation_file__": True, "local_path": str(target), "filename": item.get("filename") or target.name, "content_type": item.get("content_type"), "size_bytes": len(content), "node_id": str(node_id)})
-        return {"prompt_id": prompt_id, "files": files}
+        return {"prompt_id": prompt_id, "files": files, "history": history}
+
+    @staticmethod
+    def _resolve_utility_value(values: dict[str, Any], path: str | None) -> Any:
+        if not path:
+            return copy.deepcopy(values)
+        value: Any = values
+        for part in str(path).split("."):
+            if not part:
+                continue
+            value = value.get(part) if isinstance(value, dict) else None
+        return copy.deepcopy(value)
+
+    @staticmethod
+    def _utility_cleanup_workflow() -> dict[str, Any]:
+        return {
+            "tryon_full_vram_cleanup": {
+                "class_type": "LayerUtility: PurgeVRAM V2",
+                "inputs": {
+                    "anything": "__TRYON_STAGE_BOUNDARY_FULL_PURGE__",
+                    "purge_cache": True,
+                    "purge_models": True,
+                },
+            }
+        }
+
+    @staticmethod
+    def _history_error(history: dict[str, Any] | None) -> str | None:
+        if not isinstance(history, dict):
+            return None
+        status = history.get("status") or {}
+        if not isinstance(status, dict):
+            return None
+        messages = status.get("messages") or []
+        if status.get("status_str") == "error":
+            return json.dumps(messages, ensure_ascii=False, default=str)
+        for message in messages:
+            if isinstance(message, list) and message and message[0] in {"execution_error", "execution_interrupted"}:
+                return json.dumps(message, ensure_ascii=False, default=str)
+        return None
+
+    def _utility(self, step: dict[str, Any], context: dict[str, Any], execution_id: Any) -> dict[str, Any]:
+        del execution_id
+        config = step.get("configuration") or {}
+        action = str(config.get("action") or "")
+        if action != "comfyui_vram_purge":
+            raise ValueError(f"Unsupported utility action: {action}")
+        input_mapping = step.get("input_mapping") or {}
+        required_ports = [
+            str(port.get("id") or "")
+            for port in (config.get("input_ports") or [])
+            if isinstance(port, dict) and port.get("is_required", True)
+        ]
+        missing_ports = [port_id for port_id in required_ports if port_id and port_id not in input_mapping]
+        if missing_ports:
+            raise ValueError(
+                f"Utility step '{step.get('key')}' has unconnected required input port(s): "
+                + ", ".join(missing_ports)
+            )
+        raw_inputs = GenerationRuntimeContext.step_inputs(context, input_mapping)
+        result = self._execute_comfy(
+            self._utility_cleanup_workflow(),
+            int(config.get("timeout_seconds") or 120),
+        )
+        error = self._history_error(result.get("history"))
+        if error:
+            raise RuntimeError(f"ComfyUI VRAM cleanup failed: {error}")
+
+        values = copy.deepcopy(raw_inputs)
+        values["inputs"] = copy.deepcopy(raw_inputs)
+        output_mapping = step.get("output_mapping") or {}
+        if not output_mapping:
+            return values
+        return {
+            str(output_key): self._resolve_utility_value(
+                values, str(source_path or output_key)
+            )
+            for output_key, source_path in output_mapping.items()
+        }
 
     def _python(self, step: dict[str, Any], context: dict[str, Any], execution_id: Any) -> dict[str, Any]:
         config = step.get("configuration") or {}

@@ -13,6 +13,11 @@ class GenerationExecutionEngine(str, Enum):
 class GenerationModuleStepType(str, Enum):
     WORKFLOW = "workflow"
     PYTHON = "python"
+    UTILITY = "utility"
+
+
+class GenerationModuleUtilityAction(str, Enum):
+    COMFYUI_VRAM_PURGE = "comfyui_vram_purge"
 
 
 class GenerationModuleInputType(str, Enum):

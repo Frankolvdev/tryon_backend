@@ -18,6 +18,8 @@ from app.schemas.generation_module_authoring import (
     PythonSourceAnalysisResponse,
     PythonStepCreateRequest,
     PythonStepUpdateRequest,
+    UtilityStepCreateRequest,
+    UtilityStepUpdateRequest,
     WorkflowStepBindingsUpdate,
     WorkflowStepUpdateRequest,
     WorkflowStepImportRequest,
@@ -342,6 +344,62 @@ def update_generation_module_python_step(
         entity_type="generation_module_step",
         entity_id=str(step_id),
         description=f"Updated Python generation module step {step_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.post(
+    "/generation-modules/{module_id}/steps/utility",
+    response_model=GenerationModuleResponse,
+    status_code=201,
+)
+def create_generation_module_utility_step(
+    module_id: int,
+    data: UtilityStepCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.create_utility_step(
+        db, module_id=module_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_utility_step_created",
+        entity_type="generation_module",
+        entity_id=str(module_id),
+        description=f"Created utility step {data.key} in generation module {module_id}.",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.patch(
+    "/generation-modules/{module_id}/steps/{step_id}/utility",
+    response_model=GenerationModuleResponse,
+)
+def update_generation_module_utility_step(
+    module_id: int,
+    step_id: int,
+    data: UtilityStepUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    result = generation_module_authoring_service.update_utility_step(
+        db, module_id=module_id, step_id=step_id, data=data
+    )
+    audit_service.create_log(
+        db,
+        actor_user_id=current_admin.id,
+        action="admin_generation_module_utility_step_updated",
+        entity_type="generation_module_step",
+        entity_id=str(step_id),
+        description=f"Updated utility generation module step {step_id}.",
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )

@@ -2196,6 +2196,114 @@ class GenerationModuleRuntimeService:
                 result[key] = matched[0] if len(matched) == 1 else matched
         return result
 
+    @staticmethod
+    def _resolve_utility_value(values: dict[str, Any], path: str | None) -> Any:
+        if not path:
+            return copy.deepcopy(values)
+        value: Any = values
+        for part in str(path).split("."):
+            if not part:
+                continue
+            value = value.get(part) if isinstance(value, dict) else None
+        return copy.deepcopy(value)
+
+    @staticmethod
+    def _utility_cleanup_workflow() -> dict[str, Any]:
+        # The sentinel is intentionally opaque to normal workflows. The runtime
+        # guard recognizes it as a stage boundary and bypasses selective keep-models.
+        return {
+            "tryon_full_vram_cleanup": {
+                "class_type": "LayerUtility: PurgeVRAM V2",
+                "inputs": {
+                    "anything": "__TRYON_STAGE_BOUNDARY_FULL_PURGE__",
+                    "purge_cache": True,
+                    "purge_models": True,
+                },
+            }
+        }
+
+    def execute_utility_step(
+        self,
+        db: Session,
+        execution_id: UUID,
+        step: dict[str, Any],
+        context: dict[str, Any],
+        engine: GenerationExecutionEngine,
+    ) -> dict[str, Any]:
+        configuration = copy.deepcopy(step.get("configuration") or {})
+        action = str(configuration.get("action") or "")
+        if action != "comfyui_vram_purge":
+            raise AppException(f"Unsupported utility action: {action}")
+
+        input_mapping = step.get("input_mapping") or {}
+        required_ports = [
+            str(port.get("id") or "")
+            for port in (configuration.get("input_ports") or [])
+            if isinstance(port, dict) and port.get("is_required", True)
+        ]
+        missing_ports = [port_id for port_id in required_ports if port_id and port_id not in input_mapping]
+        if missing_ports:
+            raise AppException(
+                f"Utility step '{step.get('key')}' has unconnected required input port(s): "
+                + ", ".join(missing_ports)
+            )
+        raw_inputs = GenerationRuntimeContext.step_inputs(context, input_mapping)
+        timeout = int(configuration.get("timeout_seconds") or 120)
+
+        if engine == GenerationExecutionEngine.SIMULATED:
+            time.sleep(0.05)
+        elif engine in {
+            GenerationExecutionEngine.LOCAL_DOCKER,
+            GenerationExecutionEngine.OWNER_LOCAL,
+        }:
+            local_target = self.get(execution_id).provider_endpoint_id
+            local_adapter = self._local_adapter_for_engine(db, engine, local_target)
+            queued = local_adapter.queue_prompt(
+                workflow=self._utility_cleanup_workflow(),
+                extra_data={
+                    "generation_execution_id": str(execution_id),
+                    "utility_step_key": step["key"],
+                },
+            )
+            with self._lock:
+                self._provider_refs[execution_id] = {
+                    "engine": engine.value,
+                    "prompt_id": queued["prompt_id"],
+                    "client_id": queued["client_id"],
+                }
+                item = self._items[execution_id]
+                item.provider_job_id = queued["prompt_id"]
+                item.provider_status = "comfyui_queued"
+                generation_module_execution_store_service.save(item.model_copy(deep=True))
+            local_adapter.execute_queued_prompt(
+                prompt_id=queued["prompt_id"],
+                client_id=queued["client_id"],
+                job_public_id=str(execution_id),
+                timeout_seconds=timeout,
+                download_outputs=False,
+                progress_callback=lambda progress, message, meta=None: self._provider_progress(
+                    execution_id, step["key"], progress, message
+                ),
+            )
+        else:
+            # Modal/RunPod/Beam execute the full module inside the provider runtime,
+            # so this local dispatcher must never be used for those engines.
+            raise AppException(
+                f"Utility step '{step.get('key')}' cannot execute in backend-local mode for engine '{engine.value}'."
+            )
+
+        values = copy.deepcopy(raw_inputs)
+        values["inputs"] = copy.deepcopy(raw_inputs)
+        output_mapping = step.get("output_mapping") or {}
+        if not output_mapping:
+            return values
+        return {
+            str(output_key): self._resolve_utility_value(
+                values, str(source_path or output_key)
+            )
+            for output_key, source_path in output_mapping.items()
+        }
+
     def execute_python_step(
         self,
         db: Session,

@@ -3,6 +3,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.generation_module import KEY_PATTERN
+from app.common.generation_module_enums import GenerationModuleUtilityAction
 
 
 class GenerationNodePort(BaseModel):
@@ -108,6 +109,32 @@ class PythonStepUpdateRequest(BaseModel):
     description: str | None = None
     source_code: str | None = Field(default=None, min_length=1)
     entrypoint: str | None = Field(default=None, min_length=1, max_length=100)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
+    input_mapping: dict[str, Any] | None = None
+    output_mapping: dict[str, Any] | None = None
+    input_ports: list[GenerationNodePort] | None = None
+    output_ports: list[GenerationNodePort] | None = None
+    is_enabled: bool | None = None
+
+
+class UtilityStepCreateRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=150, pattern=KEY_PATTERN)
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    position: int = Field(ge=0)
+    action: GenerationModuleUtilityAction = GenerationModuleUtilityAction.COMFYUI_VRAM_PURGE
+    timeout_seconds: int = Field(default=120, ge=1, le=3600)
+    input_mapping: dict[str, Any] = Field(default_factory=dict)
+    output_mapping: dict[str, Any] = Field(default_factory=dict)
+    input_ports: list[GenerationNodePort] = Field(default_factory=list)
+    output_ports: list[GenerationNodePort] = Field(default_factory=list)
+    is_enabled: bool = True
+
+
+class UtilityStepUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    action: GenerationModuleUtilityAction | None = None
     timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
     input_mapping: dict[str, Any] | None = None
     output_mapping: dict[str, Any] | None = None

@@ -11,7 +11,7 @@ from app.services.generation_runtime.contracts import GenerationRuntimeStepHost
 
 
 class GenerationRuntimeStepRegistry:
-    """Strict dispatcher for the two currently supported runtime step types."""
+    """Strict dispatcher for the supported runtime step types."""
 
     def __init__(self, host: GenerationRuntimeStepHost) -> None:
         self._host = host
@@ -29,4 +29,6 @@ class GenerationRuntimeStepRegistry:
             return self._host.execute_workflow_step(db, execution_id, step, context, engine)
         if step_type == GenerationModuleStepType.PYTHON.value:
             return self._host.execute_python_step(db, execution_id, step, context)
+        if step_type == GenerationModuleStepType.UTILITY.value:
+            return self._host.execute_utility_step(db, execution_id, step, context, engine)
         raise AppException(f"Unsupported generation module step type: {step_type}")

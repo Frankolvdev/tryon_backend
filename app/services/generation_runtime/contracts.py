@@ -27,3 +27,12 @@ class GenerationRuntimeStepHost(Protocol):
         step: dict[str, Any],
         context: dict[str, Any],
     ) -> dict[str, Any]: ...
+
+    def execute_utility_step(
+        self,
+        db: Session,
+        execution_id: UUID,
+        step: dict[str, Any],
+        context: dict[str, Any],
+        engine: GenerationExecutionEngine,
+    ) -> dict[str, Any]: ...
