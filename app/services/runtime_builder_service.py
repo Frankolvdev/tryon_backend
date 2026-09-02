@@ -564,11 +564,15 @@ event_log = "/tmp/comfy-runtime-events.jsonl"
         runtime_name: str,
         *,
         modern_runtime: bool = False,
+        model_source: str = "volume",
     ) -> str:
         # Docker Desktop and RunPod keep using scripts/startup.sh unchanged.
         # Modal starts ComfyUI directly after snapshot restoration and exposes
         # it through a small ASGI reverse proxy so long-lived WebSockets remain
         # stable behind Modal's web ingress.
+        normalized_model_source = str(model_source or "volume").strip().lower()
+        if normalized_model_source not in {"volume", "image"}:
+            raise ValueError(f"Fuente de modelos Modal no válida: {model_source!r}")
         return rf'''import asyncio
 import json
 import os
@@ -587,6 +591,7 @@ import modal
 APP_NAME = {json.dumps(runtime_name)}
 VOLUME_NAME = {json.dumps(volume_name)}
 VOLUME_PATH = {json.dumps(volume_path)}
+MODEL_SOURCE = {json.dumps(normalized_model_source)}
 COMFYUI_PORT = 8188
 TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"
 STARTUP_TIMEOUT = int(os.getenv("TRYON_MODAL_STARTUP_TIMEOUT", "600"))
@@ -656,7 +661,8 @@ RUNTIME_ENGINE_LOG_PATH = Path(
 COMFYUI_ROOT = Path("/app/ComfyUI")
 COMFYUI_MAIN = COMFYUI_ROOT / "main.py"
 RUNTIME_ROOT = Path("/app/runtime")
-MODELS_ROOT = Path(os.getenv("MODELS_ROOT", VOLUME_PATH))
+DEFAULT_MODELS_ROOT = "/app/ComfyUI/models" if MODEL_SOURCE == "image" else VOLUME_PATH
+MODELS_ROOT = Path(os.getenv("MODELS_ROOT", DEFAULT_MODELS_ROOT))
 COMFY_USER_ROOT = Path(os.getenv("COMFY_USER_ROOT", "/tmp/comfyui-user"))
 COMFY_DATABASE_URL = os.getenv(
     "COMFY_DATABASE_URL",
@@ -664,7 +670,12 @@ COMFY_DATABASE_URL = os.getenv(
 )
 
 app = modal.App(APP_NAME)
-models_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+models_volume = (
+    modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+    if MODEL_SOURCE == "volume"
+    else None
+)
+MODEL_VOLUMES = {{VOLUME_PATH: models_volume}} if models_volume is not None else {{}}
 image = modal.Image.from_dockerfile("Dockerfile.modal").pip_install("fastapi")
 
 
@@ -1123,9 +1134,17 @@ def _ensure_linux_machine_id() -> None:
 
 
 def _ensure_sam3_volume_link() -> None:
-    """Expose the external SAM3 tree where TBG-SAM3 scans it directly."""
+    """Expose SAM3 at ComfyUI's native models path for either model source."""
     source = MODELS_ROOT / "sam3"
     target = COMFYUI_ROOT / "models" / "sam3"
+
+    if MODEL_SOURCE == "image":
+        checkpoint = target / "sam3.pt"
+        if checkpoint.is_file():
+            print(f"[runtime] SAM3 interno disponible en: {{checkpoint}}", flush=True)
+        else:
+            print(f"[runtime] Advertencia: no se encontró {{checkpoint}}.", flush=True)
+        return
 
     if not source.is_dir():
         print(f"[runtime] SAM3 no enlazado: no existe el directorio {{source}}.", flush=True)
@@ -1164,7 +1183,7 @@ def _prepare_runtime_directories() -> None:
     _ensure_linux_machine_id()
     _ensure_sam3_volume_link()
     _set_manager_network_mode_offline()
-    print(f"[runtime] Modelos externos registrados desde: {{MODELS_ROOT}}", flush=True)
+    print(f"[runtime] Fuente de modelos: {{MODEL_SOURCE}} ({{MODELS_ROOT}})", flush=True)
     print(f"[runtime] Directorio temporal de usuario: {{COMFY_USER_ROOT}}", flush=True)
 
 
@@ -1567,7 +1586,7 @@ STORAGE_BENCHMARK_ENABLED = False
 if STORAGE_BENCHMARK_ENABLED:
     @app.function(
         image=image,
-        volumes={{VOLUME_PATH: models_volume}},
+        volumes=MODEL_VOLUMES,
         timeout=900,
         memory=4096,
     )
@@ -1599,12 +1618,13 @@ MODAL_CLASS_OPTIONS = {{
     "gpu": GPU,
     "min_containers": MIN_CONTAINERS,
     "max_containers": MAX_CONTAINERS,
-    "volumes": {{VOLUME_PATH: models_volume}},
     "timeout": EXECUTION_TIMEOUT,
     "scaledown_window": SCALEDOWN_WINDOW,
     "enable_memory_snapshot": True,
     "experimental_options": {{"enable_gpu_snapshot": True}},
 }}
+if MODEL_VOLUMES:
+    MODAL_CLASS_OPTIONS["volumes"] = MODEL_VOLUMES
 if MODERN_RUNTIME:
     MODAL_CLASS_OPTIONS["cpu"] = 12.0
 if REGION is not None:
@@ -2263,6 +2283,7 @@ wait $COMFY_PID
             "models_manifest": models_manifest,
             "env_example": env_example,
             "tryon_runtime_guard": RuntimeBuilderService._tryon_runtime_guard_source(),
+            "modal_modern_runtime": modal_modern_headless_gl,
         }
 
         if modal_enabled:
@@ -2288,6 +2309,7 @@ wait $COMFY_PID
                 volume_path,
                 RuntimeBuilderService.sanitize_runtime_name(config.runtime_name),
                 modern_runtime=modal_modern_headless_gl,
+                model_source="volume" if external_models else "image",
             )
             if external_models:
                 result["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(

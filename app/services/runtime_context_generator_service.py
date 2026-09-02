@@ -322,17 +322,27 @@ class RuntimeContextGeneratorService:
         # estrategia anterior. Así siempre se generan modal_app.py y
         # extra_model_paths.yaml para el directorio exportado.
         external_volume_models = not payload.copy_models and bool(config.volumes)
+        volume_path = RuntimeBuilderService._modal_volume_path(config)
         if external_volume_models:
-            volume_path = RuntimeBuilderService._modal_volume_path(config)
             generated["extra_model_paths"] = RuntimeBuilderService._extra_model_paths_yaml(volume_path)
             generated["runtime_manifest"]["model_storage"] = "external-volume"
-            if RuntimeBuilderService._is_modal(config):
-                volume_name = str(modal_volume_name or "").strip() or next(
-                    (str(volume.get("name")) for volume in (config.volumes or []) if volume.get("name")),
-                    f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models",
-                )
-                generated["modal_app"] = RuntimeBuilderService._modal_app(volume_name, volume_path, RuntimeBuilderService.sanitize_runtime_name(config.runtime_name))
-                generated["runtime_manifest"]["provider"] = "modal"
+        else:
+            generated.pop("extra_model_paths", None)
+            generated["runtime_manifest"]["model_storage"] = "bundled"
+
+        if RuntimeBuilderService._is_modal(config):
+            volume_name = str(modal_volume_name or "").strip() or next(
+                (str(volume.get("name")) for volume in (config.volumes or []) if volume.get("name")),
+                f"{RuntimeBuilderService.sanitize_runtime_name(config.runtime_name)}-models",
+            )
+            generated["modal_app"] = RuntimeBuilderService._modal_app(
+                volume_name,
+                volume_path,
+                RuntimeBuilderService.sanitize_runtime_name(config.runtime_name),
+                modern_runtime=bool(generated.get("modal_modern_runtime")),
+                model_source="volume" if external_volume_models else "image",
+            )
+            generated["runtime_manifest"]["provider"] = "modal"
 
         warnings: list[str] = []
         model_manifest: list[dict[str, Any]] = []
