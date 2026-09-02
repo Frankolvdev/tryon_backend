@@ -2248,6 +2248,16 @@ class GenerationModuleRuntimeService:
                 + ", ".join(missing_ports)
             )
         raw_inputs = GenerationRuntimeContext.step_inputs(context, input_mapping)
+        empty_required = [
+            port_id
+            for port_id in required_ports
+            if raw_inputs.get(port_id) is None
+        ]
+        if empty_required:
+            raise AppException(
+                f"Utility step '{step.get('key')}' received empty required input value(s): "
+                + ", ".join(empty_required)
+            )
         timeout = int(configuration.get("timeout_seconds") or 120)
 
         if engine == GenerationExecutionEngine.SIMULATED:
@@ -2292,17 +2302,9 @@ class GenerationModuleRuntimeService:
                 f"Utility step '{step.get('key')}' cannot execute in backend-local mode for engine '{engine.value}'."
             )
 
-        values = copy.deepcopy(raw_inputs)
-        values["inputs"] = copy.deepcopy(raw_inputs)
-        output_mapping = step.get("output_mapping") or {}
-        if not output_mapping:
-            return values
-        return {
-            str(output_key): self._resolve_utility_value(
-                values, str(source_path or output_key)
-            )
-            for output_key, source_path in output_mapping.items()
-        }
+        # A utility node never transforms payload data. Its public outputs are
+        # always an exact mirror of its resolved inputs, keyed by the same port ids.
+        return copy.deepcopy(raw_inputs)
 
     def execute_python_step(
         self,

@@ -329,6 +329,16 @@ class GenerationRuntime:
                 + ", ".join(missing_ports)
             )
         raw_inputs = GenerationRuntimeContext.step_inputs(context, input_mapping)
+        empty_required = [
+            port_id
+            for port_id in required_ports
+            if raw_inputs.get(port_id) is None
+        ]
+        if empty_required:
+            raise ValueError(
+                f"Utility step '{step.get('key')}' received empty required input value(s): "
+                + ", ".join(empty_required)
+            )
         result = self._execute_comfy(
             self._utility_cleanup_workflow(),
             int(config.get("timeout_seconds") or 120),
@@ -337,17 +347,7 @@ class GenerationRuntime:
         if error:
             raise RuntimeError(f"ComfyUI VRAM cleanup failed: {error}")
 
-        values = copy.deepcopy(raw_inputs)
-        values["inputs"] = copy.deepcopy(raw_inputs)
-        output_mapping = step.get("output_mapping") or {}
-        if not output_mapping:
-            return values
-        return {
-            str(output_key): self._resolve_utility_value(
-                values, str(source_path or output_key)
-            )
-            for output_key, source_path in output_mapping.items()
-        }
+        return copy.deepcopy(raw_inputs)
 
     def _python(self, step: dict[str, Any], context: dict[str, Any], execution_id: Any) -> dict[str, Any]:
         config = step.get("configuration") or {}

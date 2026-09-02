@@ -76,6 +76,19 @@ class GenerationModuleService:
         )
 
     def _step_response(self, item: GenerationModuleStep) -> GenerationModuleStepResponse:
+        configuration = self._parse(item.configuration_json, {})
+        output_mapping = self._parse(item.output_mapping_json, {})
+        if item.step_type == "utility":
+            input_ports = configuration.get("input_ports") or []
+            if isinstance(input_ports, list):
+                mirrored_ports = [dict(port) for port in input_ports if isinstance(port, dict)]
+                configuration["output_ports"] = mirrored_ports
+                configuration["passthrough_mode"] = "mirror_inputs"
+                output_mapping = {
+                    str(port.get("id")): str(port.get("id"))
+                    for port in mirrored_ports
+                    if port.get("id")
+                }
         return GenerationModuleStepResponse(
             id=item.id,
             key=item.key,
@@ -84,9 +97,9 @@ class GenerationModuleService:
             step_type=item.step_type,
             position=item.position,
             is_enabled=item.is_enabled,
-            configuration=self._parse(item.configuration_json, {}),
+            configuration=configuration,
             input_mapping=self._parse(item.input_mapping_json, {}),
-            output_mapping=self._parse(item.output_mapping_json, {}),
+            output_mapping=output_mapping,
             created_at=item.created_at,
             updated_at=item.updated_at,
         )

@@ -404,29 +404,15 @@ class GenerationModuleAuthoringService:
         return generation_module_service.get_response(db, module_id=module.id)
 
     @staticmethod
-    def _validate_utility_ports(
-        input_ports: list[Any],
-        output_ports: list[Any],
-        output_mapping: dict[str, Any],
-    ) -> None:
+    def _normalize_utility_ports(input_ports: list[Any]) -> tuple[list[Any], dict[str, str]]:
         input_ids = [str(getattr(port, "id", "") or "") for port in input_ports]
-        output_ids = [str(getattr(port, "id", "") or "") for port in output_ports]
+        if any(not port_id for port_id in input_ids):
+            raise AppException("Every utility input port requires an id.")
         if len(input_ids) != len(set(input_ids)):
             raise AppException("Duplicate utility input port ids are not allowed.")
-        if len(output_ids) != len(set(output_ids)):
-            raise AppException("Duplicate utility output port ids are not allowed.")
-        input_id_set = set(input_ids)
-        for output_id in output_ids:
-            source = str(output_mapping.get(output_id) or "").strip()
-            if not source:
-                raise AppException(
-                    f"Utility output port '{output_id}' must map to an input port."
-                )
-            root = source.split(".", 1)[0]
-            if root not in input_id_set and not source.startswith("inputs."):
-                raise AppException(
-                    f"Utility output mapping '{output_id} -> {source}' must reference a utility input port."
-                )
+        output_ports = [port.model_copy(deep=True) for port in input_ports]
+        output_mapping = {port_id: port_id for port_id in input_ids}
+        return output_ports, output_mapping
 
     def create_utility_step(
         self,
@@ -439,12 +425,15 @@ class GenerationModuleAuthoringService:
         self._assert_step_identity_available(module, key=data.key, position=data.position)
         if data.action != GenerationModuleUtilityAction.COMFYUI_VRAM_PURGE:
             raise AppException("Unsupported utility action.")
-        self._validate_utility_ports(data.input_ports, data.output_ports, data.output_mapping)
+        if not data.input_ports:
+            raise AppException("Utility steps require at least one input port.")
+        output_ports, output_mapping = self._normalize_utility_ports(data.input_ports)
         configuration = {
             "action": data.action.value,
             "timeout_seconds": data.timeout_seconds,
             "input_ports": [item.model_dump() for item in data.input_ports],
-            "output_ports": [item.model_dump() for item in data.output_ports],
+            "output_ports": [item.model_dump() for item in output_ports],
+            "passthrough_mode": "mirror_inputs",
         }
         db.add(
             GenerationModuleStep(
@@ -457,7 +446,7 @@ class GenerationModuleAuthoringService:
                 is_enabled=data.is_enabled,
                 configuration_json=self._json(configuration),
                 input_mapping_json=self._json(data.input_mapping),
-                output_mapping_json=self._json(data.output_mapping),
+                output_mapping_json=self._json(output_mapping),
             )
         )
         db.commit()
@@ -484,15 +473,9 @@ class GenerationModuleAuthoringService:
         input_ports = data.input_ports
         if input_ports is None:
             input_ports = [GenerationNodePort(**item) for item in configuration.get("input_ports", [])]
-        output_ports = data.output_ports
-        if output_ports is None:
-            output_ports = [GenerationNodePort(**item) for item in configuration.get("output_ports", [])]
-        output_mapping = (
-            data.output_mapping
-            if data.output_mapping is not None
-            else self._load(step.output_mapping_json, {})
-        )
-        self._validate_utility_ports(input_ports, output_ports, output_mapping)
+        if not input_ports:
+            raise AppException("Utility steps require at least one input port.")
+        output_ports, output_mapping = self._normalize_utility_ports(input_ports)
 
         if data.name is not None:
             step.name = data.name
@@ -501,17 +484,17 @@ class GenerationModuleAuthoringService:
         if data.is_enabled is not None:
             step.is_enabled = data.is_enabled
         configuration["action"] = action.value
+        configuration["passthrough_mode"] = "mirror_inputs"
         if data.timeout_seconds is not None:
             configuration["timeout_seconds"] = data.timeout_seconds
-        if data.input_ports is not None:
-            configuration["input_ports"] = [item.model_dump() for item in data.input_ports]
-        if data.output_ports is not None:
-            configuration["output_ports"] = [item.model_dump() for item in data.output_ports]
+        configuration["input_ports"] = [item.model_dump() for item in input_ports]
+        configuration["output_ports"] = [item.model_dump() for item in output_ports]
         step.configuration_json = self._json(configuration)
         if data.input_mapping is not None:
             step.input_mapping_json = self._json(data.input_mapping)
-        if data.output_mapping is not None:
-            step.output_mapping_json = self._json(data.output_mapping)
+        # Utility outputs are always generated from inputs. Ignore any manual
+        # output_mapping/output_ports sent by old clients and overwrite them.
+        step.output_mapping_json = self._json(output_mapping)
         db.add(step)
         db.commit()
         return generation_module_service.get_response(db, module_id=module.id)
