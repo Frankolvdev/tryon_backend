@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
-ModalGpu = Literal["L4", "L40S", "A10G", "A100-40GB", "A100-80GB", "H100"]
+ModalGpu = Literal["T4", "L4", "A10G", "L40S", "A100-40GB", "A100-80GB", "RTX-PRO-6000", "H100", "H200", "B200", "B300"]
 
 
 class AiEngineSettingsUpdate(BaseModel):
