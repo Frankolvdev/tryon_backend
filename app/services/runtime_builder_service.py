@@ -577,6 +577,7 @@ event_log = "/tmp/comfy-runtime-events.jsonl"
 import json
 import os
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -599,6 +600,10 @@ MODERN_RUNTIME = {modern_runtime!r}
 MANAGER_OFFLINE_ENABLED = MODERN_RUNTIME and os.getenv(
     "TRYON_MODAL_MANAGER_OFFLINE",
     "true",
+).strip().lower() in {{"1", "true", "yes", "on"}}
+CPU_MONITOR_ENABLED = MODERN_RUNTIME and os.getenv(
+    "TRYON_MODAL_CPU_MONITOR",
+    "false",
 ).strip().lower() in {{"1", "true", "yes", "on"}}
 
 MODAL_GPU_ALIASES = {{"A10G": "A10"}}
@@ -799,7 +804,7 @@ def _cpu_runtime_state(pid: int | None) -> dict:
 
 
 def _start_passive_cpu_monitor(pid: int | None):
-    if not MODERN_RUNTIME or not pid:
+    if not CPU_MONITOR_ENABLED or not pid:
         return None
     stop_event = threading.Event()
     static_state = _cpu_runtime_state(pid)
@@ -863,47 +868,66 @@ def _start_passive_cpu_monitor(pid: int | None):
 def _set_manager_network_mode_offline() -> None:
     if not MANAGER_OFFLINE_ENABLED:
         return
-    # Manager >=3.38 uses __manager with modern ComfyUI System User API.
-    # The legacy path is also updated defensively; both live under /tmp in Modal.
-    candidates = [
-        COMFY_USER_ROOT / "__manager" / "config.ini",
-        COMFY_USER_ROOT / "default" / "ComfyUI-Manager" / "config.ini",
-    ]
-    for config_path in candidates:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        lines = []
-        try:
-            lines = config_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            pass
-        output = []
-        in_default = False
-        wrote_mode = False
-        saw_default = False
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
-                if in_default and not wrote_mode:
-                    output.append("network_mode = offline")
-                    wrote_mode = True
-                in_default = stripped.casefold() == "[default]"
-                saw_default = saw_default or in_default
-                output.append(line)
+
+    legacy_dir = COMFY_USER_ROOT / "default" / "ComfyUI-Manager"
+    modern_dir = COMFY_USER_ROOT / "__manager"
+    if legacy_dir.exists():
+        shutil.rmtree(legacy_dir, ignore_errors=True)
+
+    modern_dir.mkdir(parents=True, exist_ok=True)
+    config_path = modern_dir / "config.ini"
+    lines = []
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        pass
+
+    desired = {{
+        "network_mode": "offline",
+        "default_cache_as_channel_url": "False",
+    }}
+    output = []
+    in_default = False
+    saw_default = False
+    written = set()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_default:
+                for key, value in desired.items():
+                    if key not in written:
+                        output.append(f"{{key}} = {{value}}")
+                        written.add(key)
+            in_default = stripped.casefold() == "[default]"
+            saw_default = saw_default or in_default
+            output.append(line)
+            continue
+        if in_default and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip().casefold()
+            if key in desired:
+                output.append(f"{{key}} = {{desired[key]}}")
+                written.add(key)
                 continue
-            if in_default and stripped.casefold().startswith("network_mode") and "=" in stripped:
-                output.append("network_mode = offline")
-                wrote_mode = True
-            else:
-                output.append(line)
-        if in_default and not wrote_mode:
-            output.append("network_mode = offline")
-            wrote_mode = True
-        if not saw_default:
-            if output and output[-1].strip():
-                output.append("")
-            output.extend(["[default]", "network_mode = offline"])
-        config_path.write_text("\\n".join(output).rstrip() + "\\n", encoding="utf-8")
-    print("[runtime] ComfyUI-Manager network_mode=offline aplicado solo a Modal Modern.", flush=True)
+        output.append(line)
+
+    if in_default:
+        for key, value in desired.items():
+            if key not in written:
+                output.append(f"{{key}} = {{value}}")
+                written.add(key)
+    if not saw_default:
+        if output and output[-1].strip():
+            output.append("")
+        output.append("[default]")
+        for key, value in desired.items():
+            output.append(f"{{key}} = {{value}}")
+
+    config_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    print(
+        f"[runtime] ComfyUI-Manager offline fijado en {{config_path}}; "
+        "ruta legacy temporal eliminada.",
+        flush=True,
+    )
 
 
 MODEL_DIAGNOSTICS_ENABLED = os.getenv("TRYON_MODAL_MODEL_DIAGNOSTICS", "true").strip().lower() in {{"1", "true", "yes", "on"}}
@@ -1177,11 +1201,59 @@ def _ensure_sam3_volume_link() -> None:
         print(f"[runtime] Advertencia: no se encontró {{checkpoint}}.", flush=True)
 
 
+def _ensure_rembg_model_path() -> None:
+    """Expose rembg from Volume only when MODEL_SOURCE=volume."""
+    target = COMFYUI_ROOT / "models" / "rembg"
+    if MODEL_SOURCE == "image":
+        checkpoint = target / "u2net.onnx"
+        if checkpoint.is_file():
+            print(f"[runtime] rembg interno disponible en: {{checkpoint}}", flush=True)
+        else:
+            print(
+                f"[runtime] Advertencia: {{checkpoint}} no está embebido; "
+                "rembg podría descargarlo durante la primera ejecución.",
+                flush=True,
+            )
+        return
+
+    source = MODELS_ROOT / "rembg"
+    source.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        try:
+            if target.resolve() == source.resolve():
+                print(f"[runtime] rembg ya enlazado: {{target}} -> {{source}}", flush=True)
+                return
+        except OSError:
+            pass
+        target.unlink()
+    elif target.exists():
+        if target.is_dir() and not any(target.iterdir()):
+            target.rmdir()
+        else:
+            raise RuntimeError(
+                f"No se puede crear el enlace rembg porque {{target}} ya existe "
+                "y contiene datos. No se eliminó ni sobrescribió nada."
+            )
+    target.symlink_to(source, target_is_directory=True)
+    if not target.is_dir():
+        raise RuntimeError(f"No se pudo crear el enlace rembg: {{target}} -> {{source}}")
+    print(f"[runtime] rembg enlazado desde el Volume: {{target}} -> {{source}}", flush=True)
+    checkpoint = source / "u2net.onnx"
+    if not checkpoint.is_file():
+        print(
+            f"[runtime] Advertencia: falta {{checkpoint}} en el Volume; "
+            "rembg podría descargarlo durante la primera ejecución.",
+            flush=True,
+        )
+
+
 def _prepare_runtime_directories() -> None:
     (COMFYUI_ROOT / "models").mkdir(parents=True, exist_ok=True)
     (COMFY_USER_ROOT / "default" / "workflows").mkdir(parents=True, exist_ok=True)
     _ensure_linux_machine_id()
     _ensure_sam3_volume_link()
+    _ensure_rembg_model_path()
     _set_manager_network_mode_offline()
     print(f"[runtime] Fuente de modelos: {{MODEL_SOURCE}} ({{MODELS_ROOT}})", flush=True)
     print(f"[runtime] Directorio temporal de usuario: {{COMFY_USER_ROOT}}", flush=True)
@@ -1369,45 +1441,101 @@ SNAPSHOT_MODEL_WARMUP_TIMEOUT = int(
     os.getenv("TRYON_MODAL_SNAPSHOT_MODEL_WARMUP_TIMEOUT", "420")
 )
 SNAPSHOT_MODEL_WARMUP_TARGETS = (
-    {{
-        "node_id": "21578",
-        "class_type": "VAELoader",
-        "overrides": {{"vae_name": "flux2-vae.safetensors"}},
-    }},
-    {{
-        "node_id": "21586",
-        "class_type": "CLIPLoader",
-        "overrides": {{
-            "clip_name": "qwen_3_8b.safetensors",
-            "type": "flux2",
-            "device": "default",
-        }},
-    }},
-    {{
-        "node_id": "21584:21530",
-        "class_type": "UNETLoader",
-        "overrides": {{
-            "unet_name": "Flux2-Klein-9B-True-v2-bf16.safetensors",
-            "weight_dtype": "default",
-        }},
-    }},
-    {{
-        "node_id": "21584:21531",
-        "class_type": "TBGSAM3ModelLoaderAdvanced",
-        "overrides": {{
-            "model_source": "sam3.pt",
-            "device": "cuda",
-        }},
-    }},
+    {{"node_id": "tryon-warmup-vae", "class_type": "VAELoader", "overrides": {{"vae_name": "full_encoder_small_decoder.safetensors"}}}},
+    {{"node_id": "tryon-warmup-clip", "class_type": "CLIPLoader", "overrides": {{"clip_name": "mistral_3_small_flux2_fp8.safetensors", "type": "flux2", "device": "default"}}}},
+    {{"node_id": "tryon-warmup-unet", "class_type": "UNETLoader", "overrides": {{"unet_name": "flux2_dev_fp8mixed (1).safetensors", "weight_dtype": "default"}}}},
+    {{"node_id": "tryon-warmup-lora", "class_type": "LoraLoaderModelOnly", "overrides": {{"lora_name": "Flux_2-Turbo-LoRA_comfyui.safetensors", "strength_model": 1.0}}, "links": {{"model": ["tryon-warmup-unet", 0]}}}},
+    {{"node_id": "tryon-warmup-controlnet", "class_type": "JLCFlux2ControlNetLoader", "overrides": {{"controlnet_name": "FLUX.2-dev-Fun-Controlnet-Union-2602-JLC-fp8mixed-e4m3fn.safetensors"}}}},
+    {{"node_id": "tryon-warmup-depth", "class_type": "DepthAnythingPreprocessor", "overrides": {{"ckpt_name": "depth_anything_vitl14.pth"}}, "links": {{"image": ["tryon-warmup-image", 0]}}}},
+    {{"node_id": "tryon-warmup-sam3", "class_type": "TBGSAM3ModelLoaderAdvanced", "overrides": {{"model_source": "sam3.pt", "device": "cuda"}}}},
 )
 
 
 def _write_snapshot_warmup_node() -> None:
-    """Instala un nodo sumidero aislado usado solo durante la captura del snapshot."""
+    """Instala nodos auxiliares aislados usados solo durante el snapshot."""
     try:
         custom_node_path = COMFYUI_ROOT / "custom_nodes" / "tryon_snapshot_warmup.py"
         custom_node_path.write_text(
-            """import threading\n\n_WARM_OBJECTS = []\n_WARM_LOCK = threading.Lock()\n\nclass _AnyType(str):\n    def __ne__(self, other):\n        return False\n\n_ANY = _AnyType("*")\n\nclass TryonSnapshotWarmupSink:\n    @classmethod\n    def INPUT_TYPES(cls):\n        return {{"required": {{"value": (_ANY,)}}}}\n\n    RETURN_TYPES = ()\n    FUNCTION = "hold"\n    OUTPUT_NODE = True\n    CATEGORY = "tryon/internal"\n\n    def hold(self, value):\n        # Mantener una referencia fuerte hace que el objeto y sus pesos formen\n        # parte del snapshot. La promoción a GPU es best-effort y no bloquea\n        # el arranque si una clase concreta no expone un patcher compatible.\n        try:\n            import comfy.model_management as model_management\n            candidate = getattr(value, "patcher", None) or value\n            model_management.load_models_gpu([candidate])\n        except Exception as exc:\n            print(f"[tryon-warmup] GPU promotion skipped: {{exc.__class__.__name__}}: {{exc}}", flush=True)\n        with _WARM_LOCK:\n            _WARM_OBJECTS.append(value)\n        return ()\n\nNODE_CLASS_MAPPINGS = {{\n    "TryonSnapshotWarmupSink": TryonSnapshotWarmupSink,\n}}\nNODE_DISPLAY_NAME_MAPPINGS = {{\n    \"TryonSnapshotWarmupSink\": \"TryOn Snapshot Warmup Sink\",\n}}\n""",
+            """import threading
+
+import torch
+
+_WARM_OBJECTS = []
+_WARM_LOCK = threading.Lock()
+
+class _AnyType(str):
+    def __ne__(self, other):
+        return False
+
+_ANY = _AnyType("*")
+
+def _model_patchers(value):
+    try:
+        from comfy.model_patcher import ModelPatcher
+    except Exception:
+        ModelPatcher = ()
+    seen = set()
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if ModelPatcher and isinstance(current, ModelPatcher):
+            yield current
+            continue
+        patcher = getattr(current, "patcher", None)
+        if patcher is not None and patcher is not current:
+            stack.append(patcher)
+        if isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, (list, tuple, set)):
+            stack.extend(current)
+
+class TryonSnapshotWarmupImage:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {{"required": {{}}}}
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "make"
+    CATEGORY = "tryon/internal"
+
+    def make(self):
+        return (torch.zeros((1, 64, 64, 3), dtype=torch.float32),)
+
+class TryonSnapshotWarmupSink:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {{"required": {{"value": (_ANY,)}}}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "hold"
+    OUTPUT_NODE = True
+    CATEGORY = "tryon/internal"
+
+    def hold(self, value):
+        try:
+            import comfy.model_management as model_management
+            patchers = list(_model_patchers(value))
+            if patchers:
+                model_management.load_models_gpu(patchers)
+        except Exception as exc:
+            print(f"[tryon-warmup] GPU promotion skipped: {{exc.__class__.__name__}}: {{exc}}", flush=True)
+        with _WARM_LOCK:
+            _WARM_OBJECTS.append(value)
+        return ()
+
+NODE_CLASS_MAPPINGS = {{
+    "TryonSnapshotWarmupImage": TryonSnapshotWarmupImage,
+    "TryonSnapshotWarmupSink": TryonSnapshotWarmupSink,
+}}
+NODE_DISPLAY_NAME_MAPPINGS = {{
+    "TryonSnapshotWarmupImage": "TryOn Snapshot Warmup Image",
+    "TryonSnapshotWarmupSink": "TryOn Snapshot Warmup Sink",
+}}
+""",
             encoding="utf-8",
         )
     except Exception as exc:
@@ -1466,7 +1594,12 @@ def _run_snapshot_model_warmup() -> None:
     started = time.monotonic()
     try:
         object_info = _comfy_json_request("/object_info", timeout=60)
-        prompt = {{}}
+        prompt = {{
+            "tryon-warmup-image": {{
+                "class_type": "TryonSnapshotWarmupImage",
+                "inputs": {{}},
+            }}
+        }}
         loaded_targets = []
         for index, target in enumerate(SNAPSHOT_MODEL_WARMUP_TARGETS):
             class_type = target["class_type"]
@@ -1474,10 +1607,12 @@ def _run_snapshot_model_warmup() -> None:
             if not isinstance(info, dict):
                 raise RuntimeError(f"ComfyUI no registró el nodo {{class_type}}.")
             node_id = target["node_id"]
-            prompt[node_id] = {{
-                "class_type": class_type,
-                "inputs": _default_loader_inputs(info, target["overrides"]),
-            }}
+            inputs = _default_loader_inputs(info, target.get("overrides") or {{}})
+            required = ((info or {{}}).get("input") or {{}}).get("required") or {{}}
+            for input_name, link in (target.get("links") or {{}}).items():
+                if input_name in required:
+                    inputs[input_name] = link
+            prompt[node_id] = {{"class_type": class_type, "inputs": inputs}}
             prompt[f"tryon-warmup-sink-{{index}}"] = {{
                 "class_type": "TryonSnapshotWarmupSink",
                 "inputs": {{"value": [node_id, 0]}},
@@ -1485,7 +1620,7 @@ def _run_snapshot_model_warmup() -> None:
             loaded_targets.append({{
                 "node_id": node_id,
                 "class_type": class_type,
-                "inputs": prompt[node_id]["inputs"],
+                "inputs": inputs,
             }})
 
         client_id = f"tryon-snapshot-{{uuid.uuid4().hex}}"
