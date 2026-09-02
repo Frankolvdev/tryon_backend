@@ -1648,6 +1648,8 @@ class ComfyUIServer:
         _run_performance_probe(env)
 
         extra_args = shlex.split(env.get("COMFYUI_EXTRA_ARGS", ""))
+        if MODERN_RUNTIME and "--disable-mmap" not in extra_args:
+            extra_args.append("--disable-mmap")
         command = [
             sys.executable,
             str(COMFYUI_MAIN),
