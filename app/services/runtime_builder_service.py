@@ -1515,8 +1515,6 @@ def _benchmark_one_storage_file(relative_path: str, passes: int = 2) -> dict:
     memory=4096,
 )
 def benchmark_model_storage(paths=None, passes: int = 2):
-    if not MODERN_RUNTIME:
-        return {{"status": "disabled", "reason": "modern_runtime_only"}}
     selected = paths or [
         "checkpoints/cyberrealisticPony_v170.safetensors",
         "controlnet/union_pro_max_sdxl.safetensors",
