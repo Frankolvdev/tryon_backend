@@ -1441,12 +1441,11 @@ SNAPSHOT_MODEL_WARMUP_TIMEOUT = int(
     os.getenv("TRYON_MODAL_SNAPSHOT_MODEL_WARMUP_TIMEOUT", "420")
 )
 SNAPSHOT_MODEL_WARMUP_TARGETS = (
-    {{"node_id": "tryon-warmup-vae", "class_type": "VAELoader", "overrides": {{"vae_name": "full_encoder_small_decoder.safetensors"}}}},
-    {{"node_id": "tryon-warmup-clip", "class_type": "CLIPLoader", "overrides": {{"clip_name": "mistral_3_small_flux2_fp8.safetensors", "type": "flux2", "device": "default"}}}},
-    {{"node_id": "tryon-warmup-unet", "class_type": "UNETLoader", "overrides": {{"unet_name": "flux2_dev_fp8mixed (1).safetensors", "weight_dtype": "default"}}}},
-    {{"node_id": "tryon-warmup-lora", "class_type": "LoraLoaderModelOnly", "overrides": {{"lora_name": "Flux_2-Turbo-LoRA_comfyui.safetensors", "strength_model": 1.0}}, "links": {{"model": ["tryon-warmup-unet", 0]}}}},
-    {{"node_id": "tryon-warmup-controlnet", "class_type": "JLCFlux2ControlNetLoader", "overrides": {{"controlnet_name": "FLUX.2-dev-Fun-Controlnet-Union-2602-JLC-fp8mixed-e4m3fn.safetensors"}}}},
-    {{"node_id": "tryon-warmup-depth", "class_type": "DepthAnythingPreprocessor", "overrides": {{"ckpt_name": "depth_anything_vitl14.pth"}}, "links": {{"image": ["tryon-warmup-image", 0]}}}},
+    # Mantener el snapshot ligero: la primera etapa real del pipeline es Pony.
+    # Precargar Flux/CLIP/VAE/ControlNet/LoRA/Depth aquí dejó estado pesado
+    # de DynamicVRAM y degradó fuertemente el primer workflow tras restore.
+    # SAM3 sí se conserva porque es un recurso transversal protegido por el
+    # runtime guard y ya formaba parte del snapshot estable anterior.
     {{"node_id": "tryon-warmup-sam3", "class_type": "TBGSAM3ModelLoaderAdvanced", "overrides": {{"model_source": "sam3.pt", "device": "cuda"}}}},
 )
 
