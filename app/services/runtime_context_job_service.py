@@ -187,16 +187,19 @@ class RuntimeContextJobService:
                 if config is None:
                     raise ValueError("La configuración del Runtime Builder ya no existe.")
                 modal_volume_name = None
+                modal_resident_models = None
                 if str(getattr(config, "provider", "") or "").strip().lower() == "modal":
                     from app.services.infrastructure_provider_service import InfrastructureProviderService
                     modal_config = InfrastructureProviderService.get_modal(db)
                     modal_volume_name = modal_config.volume_name
+                    modal_resident_models = modal_config.snapshot_resident_models
 
                 result = RuntimeContextGeneratorService.generate(
                     config,
                     payload,
                     progress,
                     modal_volume_name=modal_volume_name,
+                    modal_resident_models=modal_resident_models,
                 )
                 project = db.query(RuntimeProject).filter(
                     RuntimeProject.project_key == config.project_key
