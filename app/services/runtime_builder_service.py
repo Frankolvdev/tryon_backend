@@ -359,15 +359,11 @@ class RuntimeBuilderService:
 
     @staticmethod
     def modal_runtime_engine_enabled(config: RuntimeBuilderConfig | None) -> bool:
-        if config is None:
-            return False
-        for item in getattr(config, "environment_variables", None) or []:
-            if str(item.get("key") or "").strip() != "TRYON_MODAL_RUNTIME_ENGINE_ENABLED":
-                continue
-            return str(item.get("value") or "").strip().lower() in {
-                "1", "true", "yes", "on"
-            }
-        return False
+        # TEMPORAL / INTENCIONAL: el Runtime Engine queda forzado para Modal.
+        # No dependemos de environment_variables durante esta fase de pruebas,
+        # evitando que una pérdida de propagación en build/deploy vuelva a
+        # generar una imagen Modal sin el Engine instalado.
+        return True
 
     @staticmethod
     def _is_modal(config: RuntimeBuilderConfig) -> bool:
@@ -634,10 +630,10 @@ GENERATION_CONCURRENCY = int(os.getenv("TRYON_MODAL_CONCURRENCY", "1"))
 INPUT_CONCURRENCY = int(os.getenv("TRYON_MODAL_INPUT_CONCURRENCY", "1000"))
 SCALEDOWN_WINDOW = int(os.getenv("TRYON_MODAL_SCALEDOWN_WINDOW", "300"))
 EXECUTION_TIMEOUT = int(os.getenv("TRYON_MODAL_EXECUTION_TIMEOUT", "1800"))
-RUNTIME_ENGINE_ENABLED = os.getenv(
-    "TRYON_MODAL_RUNTIME_ENGINE_ENABLED",
-    "false",
-).strip().lower() in {{"1", "true", "yes", "on"}}
+# TEMPORAL / INTENCIONAL: Runtime Engine forzado para los runtimes Modal.
+# Se mantiene independiente del entorno de deploy para que el snapshot no
+# pueda caer silenciosamente al camino legacy de ComfyUI.
+RUNTIME_ENGINE_ENABLED = True
 RUNTIME_ENGINE_CONFIG = Path(
     os.getenv(
         "TRYON_MODAL_RUNTIME_ENGINE_CONFIG",
