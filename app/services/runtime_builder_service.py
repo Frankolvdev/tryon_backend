@@ -28,6 +28,10 @@ class RuntimeBuilderService:
         "https://github.com/Frankolvdev/comfyui_runtime_engine.git"
     )
     DEFAULT_RUNTIME_ENGINE_REF = "main"
+    # Bump deliberado para invalidar exclusivamente la capa Docker que clona
+    # el Runtime Engine. Evita reutilizar una copia antigua de `main` cuando
+    # Modal conserva la cache de la instruccion git clone.
+    DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-06-diagnostics-20260902"
     DEFAULT_RUNTIME_ENGINE_INSTALL_PATH = "/opt/comfyui-runtime-engine"
     DEFAULT_MODAL_RESIDENT_MODELS = (
         "diffusion_models/flux2_dev_fp8mixed (1).safetensors",
@@ -2297,7 +2301,12 @@ class ComfyUIServer:
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
                     ) if modal_enabled and RuntimeBuilderService.modal_runtime_engine_enabled(config) else "",
                     (
-                        "RUN git clone --filter=blob:none "
+                        "ARG COMFY_RUNTIME_ENGINE_CACHE_BUSTER="
+                        + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER
+                    ) if modal_enabled and RuntimeBuilderService.modal_runtime_engine_enabled(config) else "",
+                    (
+                        "RUN echo \"[runtime] Runtime Engine cache buster: ${COMFY_RUNTIME_ENGINE_CACHE_BUSTER}\" "
+                        "&& git clone --filter=blob:none "
                         "${COMFY_RUNTIME_ENGINE_GIT_URL} "
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
                         + " && git -C "
