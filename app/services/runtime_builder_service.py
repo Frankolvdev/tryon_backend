@@ -31,7 +31,7 @@ class RuntimeBuilderService:
     # Bump deliberado para invalidar exclusivamente la capa Docker que clona
     # el Runtime Engine. Evita reutilizar una copia antigua de `main` cuando
     # Modal conserva la cache de la instruccion git clone.
-    DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-06-diagnostics-20260902"
+    DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-07-python310-tomli-20260903"
     DEFAULT_RUNTIME_ENGINE_INSTALL_PATH = "/opt/comfyui-runtime-engine"
     DEFAULT_MODAL_RESIDENT_MODELS = (
         "diffusion_models/flux2_dev_fp8mixed (1).safetensors",
