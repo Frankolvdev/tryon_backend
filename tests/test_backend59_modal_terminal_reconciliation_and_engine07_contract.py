@@ -15,7 +15,7 @@ def _function_source(source: str, function_name: str) -> str:
 
 def test_engine08_cache_buster_is_current():
     source = Path("app/services/runtime_builder_service.py").read_text(encoding="utf-8")
-    assert 'DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-08-force-full-residents-20260903"' in source
+    assert 'DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-09-disable-dynamic-snapshot-20260903"' in source
 
 
 def test_modal_async_wait_has_no_per_execution_graph_polling():

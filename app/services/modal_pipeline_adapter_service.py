@@ -367,6 +367,84 @@ class ModalPipelineAdapterService:
                 "resumed": transient_attempts > 0,
             }
 
+    async def inspect_terminal_failure_async(
+        self,
+        config: ModalProviderConfig,
+        *,
+        call_id: str,
+    ) -> dict[str, Any] | None:
+        """Low-frequency safety inspection for a durable Modal call.
+
+        This is intentionally NOT part of normal result delivery. The global
+        reconciler calls it at a coarse interval to catch container/init failures
+        that can leave the parent FunctionCall pending while Modal tries another
+        container. No new FunctionCall is ever created here.
+        """
+        call_id = str(call_id or "").strip()
+        if not call_id:
+            return None
+        call = await self._call_async(config, call_id)
+        getter = getattr(call, "get_call_graph", None)
+        if not callable(getter):
+            return None
+        try:
+            aio_getter = getattr(getter, "aio", None)
+            if callable(aio_getter):
+                graph = await aio_getter()
+            else:
+                graph = await asyncio.to_thread(getter)
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                raise
+            logger.warning(
+                "Could not inspect Modal call graph: call_id=%s error=%s",
+                call_id,
+                exc,
+            )
+            return None
+
+        states = [self._graph_status_name(node) for node in list(graph or [])]
+        failed = [
+            state
+            for state in states
+            if state in {"FAILURE", "INIT_FAILURE", "TIMEOUT"}
+        ]
+        if not failed:
+            return None
+        all_terminal = bool(states) and all(
+            state in self._TERMINAL_GRAPH_STATES for state in states
+        )
+        return {
+            "call_id": call_id,
+            "states": states,
+            "failed_states": failed,
+            "all_terminal": all_terminal,
+        }
+
+    async def stop_failed_call_async(
+        self,
+        config: ModalProviderConfig,
+        *,
+        call_id: str,
+    ) -> None:
+        """Stop the SAME pending FunctionCall after a child/init failure.
+
+        This prevents Modal from continuing to provision replacement containers.
+        It never submits, spawns, or requeues work.
+        """
+        call = await self._call_async(config, call_id)
+        cancel = getattr(call, "cancel", None)
+        if not callable(cancel):
+            return
+        try:
+            aio_cancel = getattr(cancel, "aio", None)
+            if callable(aio_cancel):
+                await aio_cancel(terminate_containers=False)
+            else:
+                await asyncio.to_thread(cancel, terminate_containers=False)
+        finally:
+            self._forget_call(call_id)
+
     def cancel_call(
         self,
         config: ModalProviderConfig,

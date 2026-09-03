@@ -1337,6 +1337,68 @@ class GenerationModuleRuntimeService:
             wait_task.cancel()
             raise
 
+    async def reconcile_modal_terminal_failure_async(
+        self,
+        execution_id: UUID,
+    ) -> BaseException | None:
+        """Inspect one active Modal call for child/init terminal failure.
+
+        Normal completion remains event-driven through get.aio(). This method is
+        only used by the global low-frequency reconciler.
+        """
+        with self._lock:
+            item = self._items.get(execution_id)
+        if item is None:
+            persisted = generation_module_execution_store_service.get(execution_id)
+            if persisted is None or persisted.status != "running":
+                return None
+            self.attach_persisted(persisted)
+            with self._lock:
+                item = self._items[execution_id]
+        call_id = str(item.provider_job_id or "").strip()
+        if not call_id or item.status != "running":
+            return None
+
+        db = SessionLocal()
+        try:
+            config = infrastructure_provider_service.get_modal(db)
+            config = self._modal_config_for_target(config, item.provider_endpoint_id)
+        finally:
+            db.close()
+
+        report = await modal_pipeline_adapter_service.inspect_terminal_failure_async(
+            config,
+            call_id=call_id,
+        )
+        if not report:
+            return None
+
+        # A child INIT_FAILURE/FAILURE can leave the parent pending while Modal
+        # provisions another container. Stop that SAME parent call once so the
+        # provider cannot keep retrying container startup.
+        if not bool(report.get("all_terminal")):
+            try:
+                await modal_pipeline_adapter_service.stop_failed_call_async(
+                    config,
+                    call_id=call_id,
+                )
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                    raise
+                logger.warning(
+                    "Could not stop Modal call after terminal child failure: execution_id=%s call_id=%s error=%s",
+                    execution_id,
+                    call_id,
+                    exc,
+                )
+
+        states = report.get("states") or []
+        failed = report.get("failed_states") or []
+        return AppException(
+            "Modal FunctionCall reached terminal provider failure "
+            f"{failed}; call graph states={states}. No retry was created."
+        )
+
     def finalize_modal_supervised(
         self,
         execution_id: UUID,
