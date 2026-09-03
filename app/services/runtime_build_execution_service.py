@@ -14,6 +14,33 @@ ROOT.mkdir(parents=True, exist_ok=True)
 
 class RuntimeBuildExecutionService:
     @staticmethod
+    def _runtime_modal_environment(db, build):
+        """Return runtime-profile variables intended for the Modal launcher only.
+
+        Runtime Builder profile variables are persisted separately from the global
+        infrastructure provider.  Modal evaluates modal_app.py in the launcher
+        process during deploy, so TRYON_MODAL_* switches must be present there.
+        Keep the propagation deliberately scoped to this prefix; provider-owned
+        deployment settings are applied afterwards and therefore remain authoritative.
+        """
+        config = db.get(RuntimeBuilderConfig, build.runtime_config_id)
+        if config is None:
+            return {}
+
+        result = {}
+        for item in getattr(config, "environment_variables", None) or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            if not key.startswith("TRYON_MODAL_"):
+                continue
+            value = item.get("value")
+            if value is None:
+                continue
+            result[key] = str(value)
+        return result
+
+    @staticmethod
     def _runtime_deployment_name(db, build, default_name):
         """Return the per-runtime deployment name, falling back to the provider default.
 
@@ -1694,7 +1721,9 @@ class RuntimeBuildExecutionService:
             )
             proc = subprocess.Popen(
                 [executable, "deploy", "--name", deployment_name, "--env", cfg.environment, str(app_file)], cwd=str(context),
-                env={**InfrastructureProviderService._modal_env(cfg),
+                env={
+                    **InfrastructureProviderService._modal_env(cfg),
+                    **RuntimeBuildExecutionService._runtime_modal_environment(db, build),
                     "TRYON_MODAL_GPU": selected_gpu,
                     "TRYON_MODAL_REGION_MODE": str(getattr(cfg, "region_mode", "automatic") or "automatic"),
                     "TRYON_MODAL_REGION": str(getattr(cfg, "region", "") or ""),
@@ -1764,6 +1793,7 @@ class RuntimeBuildExecutionService:
             RuntimeBuildExecutionService._append(db,build,f'[modal] Publicando compilación {build.image_tag} desde {context} con GPU {selected_gpu}...','publishing',95)
             modal_env={
                 **InfrastructureProviderService._modal_env(cfg),
+                **RuntimeBuildExecutionService._runtime_modal_environment(db, build),
                 "TRYON_MODAL_GPU": selected_gpu,
                 "TRYON_MODAL_REGION_MODE": str(getattr(cfg, "region_mode", "automatic") or "automatic"),
                 "TRYON_MODAL_REGION": str(getattr(cfg, "region", "") or ""),

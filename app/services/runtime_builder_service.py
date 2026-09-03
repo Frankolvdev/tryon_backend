@@ -1435,19 +1435,15 @@ def _proxy_app():
 
 
 SNAPSHOT_MODEL_WARMUP_ENABLED = os.getenv(
-    "TRYON_MODAL_SNAPSHOT_MODEL_WARMUP", "true"
+    "TRYON_MODAL_SNAPSHOT_MODEL_WARMUP", "false"
 ).strip().lower() in {{"1", "true", "yes", "on"}}
 SNAPSHOT_MODEL_WARMUP_TIMEOUT = int(
     os.getenv("TRYON_MODAL_SNAPSHOT_MODEL_WARMUP_TIMEOUT", "420")
 )
-SNAPSHOT_MODEL_WARMUP_TARGETS = (
-    # Mantener el snapshot ligero: la primera etapa real del pipeline es Pony.
-    # Precargar Flux/CLIP/VAE/ControlNet/LoRA/Depth aquí dejó estado pesado
-    # de DynamicVRAM y degradó fuertemente el primer workflow tras restore.
-    # SAM3 sí se conserva porque es un recurso transversal protegido por el
-    # runtime guard y ya formaba parte del snapshot estable anterior.
-    {{"node_id": "tryon-warmup-sam3", "class_type": "TBGSAM3ModelLoaderAdvanced", "overrides": {{"model_source": "sam3.pt", "device": "cuda"}}}},
-)
+# No precargar modelos por la ruta legacy. Los modelos residentes del snapshot
+# son responsabilidad exclusiva del Runtime Engine. Esto evita que un Engine
+# desactivado por configuración produzca silenciosamente un snapshot de SAM3.
+SNAPSHOT_MODEL_WARMUP_TARGETS = ()
 
 
 def _write_snapshot_warmup_node() -> None:
@@ -1588,6 +1584,14 @@ def _run_snapshot_model_warmup() -> None:
     """Precarga fija y encapsulada; cualquier fallo conserva el snapshot normal."""
     if not SNAPSHOT_MODEL_WARMUP_ENABLED:
         _modal_trace("snapshot_model_warmup", role="pipeline_server", enabled=False)
+        return
+    if not SNAPSHOT_MODEL_WARMUP_TARGETS:
+        _modal_trace(
+            "snapshot_model_warmup",
+            role="pipeline_server",
+            enabled=False,
+            reason="no_legacy_warmup_targets",
+        )
         return
 
     started = time.monotonic()
