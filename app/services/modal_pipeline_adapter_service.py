@@ -48,17 +48,57 @@ class ModalPipelineAdapterService:
             ) from exc
         return modal
 
-    def _client(self, config: ModalProviderConfig) -> Any:
+    @staticmethod
+    def _credential_key(config: ModalProviderConfig) -> tuple[str, str]:
         token_id = str(config.token_id or "").strip()
         token_secret = str(config.token_secret or "").strip()
         if not token_id or not token_secret:
             raise AppException("Modal credentials are not configured.")
-        key = (token_id, token_secret)
+        return token_id, token_secret
+
+    def _cached_client(self, key: tuple[str, str]) -> Any | None:
         with self._client_lock:
             client = self._clients.get(key)
-            if client is None or bool(getattr(client, "is_closed", lambda: False)()):
-                client = self._modal().Client.from_credentials(token_id, token_secret)
-                self._clients[key] = client
+            if client is not None and not bool(getattr(client, "is_closed", lambda: False)()):
+                return client
+            if client is not None:
+                self._clients.pop(key, None)
+            return None
+
+    def _client(self, config: ModalProviderConfig) -> Any:
+        """Return a Modal client for synchronous adapter entry points only."""
+        token_id, token_secret = self._credential_key(config)
+        key = (token_id, token_secret)
+        client = self._cached_client(key)
+        if client is not None:
+            return client
+
+        client = self._modal().Client.from_credentials(token_id, token_secret)
+        with self._client_lock:
+            current = self._clients.get(key)
+            if current is not None and not bool(getattr(current, "is_closed", lambda: False)()):
+                return current
+            self._clients[key] = client
+            return client
+
+    async def _client_async(self, config: ModalProviderConfig) -> Any:
+        """Return a Modal client without invoking a blocking SDK interface in asyncio."""
+        token_id, token_secret = self._credential_key(config)
+        key = (token_id, token_secret)
+        client = self._cached_client(key)
+        if client is not None:
+            return client
+
+        # Modal's Client.from_credentials opens the authenticated connection and is
+        # therefore an I/O operation. In async supervision it must use the SDK's
+        # asynchronous interface; otherwise Modal emits AsyncUsageWarning and the
+        # event loop can be blocked during client creation.
+        client = await self._modal().Client.from_credentials.aio(token_id, token_secret)
+        with self._client_lock:
+            current = self._clients.get(key)
+            if current is not None and not bool(getattr(current, "is_closed", lambda: False)()):
+                return current
+            self._clients[key] = client
             return client
 
     @staticmethod
@@ -99,6 +139,33 @@ class ModalPipelineAdapterService:
             restored = self._modal().FunctionCall.from_id(
                 call_id, client=self._client(config)
             )
+        except Exception as exc:
+            raise AppException(f"Could not restore Modal FunctionCall {call_id}: {exc}") from exc
+        with self._calls_lock:
+            self._calls[call_id] = restored
+        return restored
+
+    async def _call_async(
+        self,
+        config: ModalProviderConfig,
+        call_id: str,
+        *,
+        refresh: bool = False,
+    ) -> Any:
+        """Restore a durable FunctionCall using an async-safe Modal client path."""
+        call_id = str(call_id or "").strip()
+        if not call_id:
+            raise AppException("Modal FunctionCall ID is missing.")
+        if not refresh:
+            with self._calls_lock:
+                original = self._calls.get(call_id)
+            if original is not None:
+                return original
+        try:
+            client = await self._client_async(config)
+            # FunctionCall.from_id() is intentionally synchronous in current Modal:
+            # it only creates a lazy handle and performs no network I/O.
+            restored = self._modal().FunctionCall.from_id(call_id, client=client)
         except Exception as exc:
             raise AppException(f"Could not restore Modal FunctionCall {call_id}: {exc}") from exc
         with self._calls_lock:
@@ -215,7 +282,7 @@ class ModalPipelineAdapterService:
                     f"Modal FunctionCall {call_id} exceeded {timeout_seconds} seconds."
                 )
 
-            call = self._call(
+            call = await self._call_async(
                 config,
                 call_id,
                 refresh=transient_attempts > 0,
