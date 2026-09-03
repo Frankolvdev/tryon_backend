@@ -596,7 +596,7 @@ fi
                 'TRYON_RUNTIME_CONTRACT = "tryon.generation-runtime/v1"',
                 'from generation_runtime import GenerationRuntime',
                 'from comfyui_runtime_engine.modal import ModalSnapshotAdapter',
-                'TRYON_MODAL_RUNTIME_ENGINE_ENABLED',
+                'RUNTIME_ENGINE_ENABLED = True',
                 'snapshot_adapter.prepare_snapshot()',
                 'adapter.after_restore()',
             )
