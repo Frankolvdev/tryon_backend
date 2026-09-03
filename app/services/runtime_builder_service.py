@@ -30,8 +30,8 @@ class RuntimeBuilderService:
     DEFAULT_RUNTIME_ENGINE_REF = "main"
     DEFAULT_RUNTIME_ENGINE_INSTALL_PATH = "/opt/comfyui-runtime-engine"
     DEFAULT_MODAL_RESIDENT_MODELS = (
-        "diffusion_models/realDream_klein9BV1.safetensors",
-        "text_encoders/qwen_3_8b.safetensors",
+        "diffusion_models/flux2_dev_fp8mixed (1).safetensors",
+        "text_encoders/mistral_3_small_flux2_fp8.safetensors",
     )
 
 
@@ -477,7 +477,7 @@ host = "127.0.0.1"
 port = 8188
 startup_timeout_seconds = 900
 strict_version = true
-supported_versions = ["0.15"]
+supported_versions = ["0.15", "0.31"]
 
 [embedded]
 allow_simulation_only = false

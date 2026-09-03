@@ -31,8 +31,8 @@ class ModalProviderConfig(BaseModel):
     region_mode: str = Field(default="automatic", pattern="^(automatic|fixed)$")
     region: str = Field(default="us", max_length=120)
     snapshot_resident_models: list[str] = Field(default_factory=lambda: [
-        "diffusion_models/realDream_klein9BV1.safetensors",
-        "text_encoders/qwen_3_8b.safetensors",
+        "diffusion_models/flux2_dev_fp8mixed (1).safetensors",
+        "text_encoders/mistral_3_small_flux2_fp8.safetensors",
     ])
     timeout_seconds: int = Field(default=900, ge=60, le=86400)
 
