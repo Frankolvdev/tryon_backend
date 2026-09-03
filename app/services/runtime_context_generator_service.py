@@ -682,7 +682,12 @@ fi
                     + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_REF
                 ),
                 (
-                    "RUN git clone --filter=blob:none "
+                    "ARG COMFY_RUNTIME_ENGINE_CACHE_BUSTER="
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER
+                ),
+                (
+                    "RUN echo \"[runtime] Runtime Engine cache buster: ${COMFY_RUNTIME_ENGINE_CACHE_BUSTER}\" "
+                    "&& git clone --filter=blob:none "
                     "${COMFY_RUNTIME_ENGINE_GIT_URL} "
                     + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
                     + " && git -C "
