@@ -1,0 +1,41 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by:
+    - alertname
+    - service
+    - severity
+
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    - receiver: critical
+      matchers:
+        - severity="critical"
+      group_wait: 10s
+      repeat_interval: 1h
+
+    - receiver: warning
+      matchers:
+        - severity="warning"
+      group_wait: 1m
+      repeat_interval: 6h
+
+receivers:
+  - name: default
+
+  - name: warning
+
+  - name: critical
+
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal:
+      - service

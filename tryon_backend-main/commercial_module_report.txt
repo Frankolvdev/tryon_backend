@@ -1,0 +1,162 @@
+AI VIRTUAL TRY-ON PLATFORM
+COMMERCIAL MODULE INSPECTION
+
+================================================================================
+MODULE: app.services.billing_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.subscription_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.stripe_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.stripe_checkout_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.stripe_customer_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.stripe_webhook_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.billing_payment_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.billing_invoice_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.billing_refund_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.refund_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.token_purchase_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.services.subscription_plan_service
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.repositories.billing_repository
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.repositories.billing_payment_repository
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.repositories.billing_invoice_repository
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.repositories.billing_customer_repository
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.repositories.user_subscription_repository
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.repositories.subscription_repository
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.repositories.subscription_plan_repository
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.repositories.token_purchase_repository
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.models.billing_customer
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.models.billing_payment
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.models.billing_invoice
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.models.billing_event
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.models.user_subscription
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.models.subscription_plan
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.models.token_purchase
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.schemas.billing
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.schemas.subscription
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.schemas.subscription_plan
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.schemas.billing_history
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.schemas.token_purchase
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.api.v1.endpoints.billing
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.api.v1.endpoints.billing_history
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.api.v1.endpoints.subscription_plans
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.api.v1.endpoints.stripe_webhooks
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.api.v1.endpoints.admin.subscriptions
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.api.v1.endpoints.admin.billing_payments
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.api.v1.endpoints.admin.billing_invoices
+STATUS: NOT FOUND
+
+================================================================================
+MODULE: app.api.v1.endpoints.admin.billing_operations
+STATUS: NOT FOUND

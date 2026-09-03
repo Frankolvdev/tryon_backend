@@ -1,22 +1,11 @@
-
 import asyncio
-import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.common.exceptions import AppException
 from app.services.modal_pipeline_adapter_service import ModalPipelineAdapterService
-
-
-class _Status:
-    def __init__(self, name):
-        self.name = name
-
-
-class _Node:
-    def __init__(self, name):
-        self.status = _Status(name)
 
 
 class _AioMethod:
@@ -27,28 +16,9 @@ class _AioMethod:
         return await self._fn(*args, **kwargs)
 
 
-class _NeverGet:
-    def __init__(self):
-        self.aio = _AioMethod(self._wait)
-
-    async def _wait(self, timeout=None):
-        await asyncio.sleep(3600)
-
-
-class _GraphMethod:
-    def __init__(self, states):
-        self._states = states
-        self.aio = _AioMethod(self._read)
-
-    async def _read(self):
-        await asyncio.sleep(0)
-        return [_Node(state) for state in self._states]
-
-
-class _Call:
-    def __init__(self, states):
-        self.get = _NeverGet()
-        self.get_call_graph = _GraphMethod(states)
+class _Get:
+    def __init__(self, fn):
+        self.aio = _AioMethod(fn)
 
 
 class _FakeModal:
@@ -60,46 +30,73 @@ class _FakeModal:
             pass
 
 
-def _run_wait(service, call):
+def test_modal_async_wait_is_event_driven_without_call_graph_polling():
+    service = ModalPipelineAdapterService()
+    calls = {"get": 0, "graph": 0}
+
+    async def get_result(timeout=None):
+        calls["get"] += 1
+        return {"status": "completed", "outputs": {"image": "ok"}}
+
+    class Call:
+        get = _Get(get_result)
+
+        async def get_call_graph(self):
+            calls["graph"] += 1
+            raise AssertionError("normal result supervision must not poll the call graph")
+
     async def restore(config, call_id, refresh=False):
-        return call
+        assert call_id == "fc-event-driven"
+        return Call()
 
     service._call_async = restore
     service._modal = lambda: _FakeModal
-    return asyncio.run(
+
+    result = asyncio.run(
         service.await_result_async(
             SimpleNamespace(),
-            call_id="fc-terminal-test",
+            call_id="fc-event-driven",
             timeout_seconds=30,
         )
     )
 
+    assert result["provider_job_id"] == "fc-event-driven"
+    assert calls == {"get": 1, "graph": 0}
 
-def test_init_failure_is_detected_without_waiting_for_execution_timeout():
+
+def test_terminal_provider_error_fails_same_call_without_generation_retry():
     service = ModalPipelineAdapterService()
-    service._GRAPH_WATCH_INTERVAL_SECONDS = 0.01
-    started = time.monotonic()
+    get_calls = 0
 
-    with pytest.raises(AppException, match="INIT_FAILURE"):
-        _run_wait(service, _Call(["INIT_FAILURE"]))
+    async def fail_result(timeout=None):
+        nonlocal get_calls
+        get_calls += 1
+        raise RuntimeError("provider execution failed")
 
-    assert time.monotonic() - started < 1.0
+    class Call:
+        get = _Get(fail_result)
 
+    async def restore(config, call_id, refresh=False):
+        assert call_id == "fc-failed-once"
+        return Call()
 
-def test_success_without_result_payload_is_an_error():
-    service = ModalPipelineAdapterService()
-    service._GRAPH_WATCH_INTERVAL_SECONDS = 0.01
-    service._SUCCESS_RESULT_GRACE_SECONDS = 0.02
+    service._call_async = restore
+    service._modal = lambda: _FakeModal
 
-    with pytest.raises(AppException, match="SUCCESS.*result payload"):
-        _run_wait(service, _Call(["SUCCESS"]))
+    with pytest.raises(AppException, match="provider execution failed"):
+        asyncio.run(
+            service.await_result_async(
+                SimpleNamespace(),
+                call_id="fc-failed-once",
+                timeout_seconds=30,
+            )
+        )
+
+    assert get_calls == 1
 
 
 def test_generation_finalizer_still_requires_image_before_completed():
-    source = (
-        __import__("pathlib").Path("app/services/generation_module_runtime_service.py")
-        .read_text(encoding="utf-8")
-    )
+    source = Path("app/services/generation_module_runtime_service.py").read_text(encoding="utf-8")
     start = source.index("def finalize_modal_supervised")
     end = source.index("def _run_modal_module", start)
     block = source[start:end]

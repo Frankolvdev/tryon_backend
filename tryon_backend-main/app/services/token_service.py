@@ -1,0 +1,346 @@
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.common.enums import TokenTransactionType
+from app.common.exceptions import ConflictException, NotFoundException
+from app.models.token_package import TokenPackage
+from app.models.token_transaction import TokenTransaction
+from app.models.user import User
+from app.repositories.token_package_repository import token_package_repository
+from app.repositories.token_transaction_repository import token_transaction_repository
+from app.repositories.user_repository import user_repository
+from app.schemas.token import TokenPackageCreate, TokenPackageResponse, TokenPackageUpdate
+from app.services.pricing_service import pricing_service
+from app.services.financial_protection_service import financial_protection_service
+from app.services.token_value_ledger_service import token_value_ledger_service
+
+
+class TokenService:
+    def _package_response(self, db: Session, package: TokenPackage) -> TokenPackageResponse:
+        nominal_price, currency = pricing_service.price_for_tokens(db, package.tokens_amount)
+        protected_price = financial_protection_service.protected_price(
+            db, nominal_price_usd=nominal_price, requested_discount_percent=float(package.requested_discount_percent or 0), tokens_amount=package.tokens_amount
+        )
+        calculated_cents = int(round(protected_price.final_price_usd * 100))
+        return TokenPackageResponse(
+            id=package.id,
+            name=package.name,
+            description=package.description,
+            tokens_amount=package.tokens_amount,
+            price_cents=package.price_cents,
+            calculated_price_cents=calculated_cents,
+            commercial_token_value=pricing_service._token_value(db),
+            price_is_automatic=True,
+            nominal_price_cents=int(round(protected_price.nominal_price_usd * 100)),
+            requested_discount_percent=protected_price.requested_discount_percent,
+            effective_discount_percent=protected_price.effective_discount_percent,
+            discount_amount_cents=int(round(protected_price.discount_amount_usd * 100)),
+            protected_discount_percent=protected_price.protected_discount_percent,
+            currency=currency.lower(),
+            stripe_price_id=package.stripe_price_id,
+            is_active=package.is_active,
+            created_at=package.created_at,
+        )
+
+    def get_balance(self, user: User) -> int:
+        return user.token_balance
+
+    def list_public_packages(self, db: Session) -> list[TokenPackageResponse]:
+        return [
+            self._package_response(db, item)
+            for item in token_package_repository.list_active(db)
+        ]
+
+    def list_admin_packages(self, db: Session) -> list[TokenPackageResponse]:
+        return [
+            self._package_response(db, item)
+            for item in token_package_repository.list_all(db)
+        ]
+
+    def create_package(
+        self,
+        db: Session,
+        data: TokenPackageCreate,
+    ) -> TokenPackageResponse:
+        nominal_price, currency = pricing_service.price_for_tokens(db, data.tokens_amount)
+        protected_price = financial_protection_service.protected_price(
+            db, nominal_price_usd=nominal_price, requested_discount_percent=data.requested_discount_percent, tokens_amount=data.tokens_amount
+        )
+        package = token_package_repository.create(
+            db,
+            data={
+                **data.model_dump(exclude={"price_cents", "currency", "requested_discount_percent"}),
+                "price_cents": int(round(protected_price.final_price_usd * 100)),
+                "nominal_price_cents": int(round(protected_price.nominal_price_usd * 100)),
+                "requested_discount_percent": protected_price.requested_discount_percent,
+                "effective_discount_percent": protected_price.effective_discount_percent,
+                "currency": currency.lower(),
+            },
+        )
+        return self._package_response(db, package)
+
+    def update_package(
+        self,
+        db: Session,
+        package_id: int,
+        data: TokenPackageUpdate,
+    ) -> TokenPackageResponse:
+        package_obj = token_package_repository.get_by_id(db, package_id)
+
+        if not package_obj:
+            raise NotFoundException("Token package not found.")
+
+        update_data = data.model_dump(
+            exclude_unset=True,
+            exclude={"price_cents", "currency"},
+        )
+        final_tokens = int(update_data.get("tokens_amount", package_obj.tokens_amount))
+        requested_discount = float(update_data.pop("requested_discount_percent", package_obj.requested_discount_percent or 0) or 0)
+        nominal_price, currency = pricing_service.price_for_tokens(db, final_tokens)
+        protected_price = financial_protection_service.protected_price(
+            db, nominal_price_usd=nominal_price, requested_discount_percent=requested_discount, tokens_amount=final_tokens
+        )
+        update_data["price_cents"] = int(round(protected_price.final_price_usd * 100))
+        update_data["nominal_price_cents"] = int(round(protected_price.nominal_price_usd * 100))
+        update_data["requested_discount_percent"] = protected_price.requested_discount_percent
+        update_data["effective_discount_percent"] = protected_price.effective_discount_percent
+        update_data["currency"] = currency.lower()
+        package = token_package_repository.update(
+            db,
+            db_obj=package_obj,
+            data=update_data,
+        )
+        return self._package_response(db, package)
+
+    def get_user_transactions(
+        self,
+        db: Session,
+        user_id: int,
+        *,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> list[TokenTransaction]:
+        return token_transaction_repository.list_by_user_id(
+            db,
+            user_id,
+            skip=skip,
+            limit=limit,
+        )
+
+    def get_admin_transactions(
+        self,
+        db: Session,
+        *,
+        user_id: int | None = None,
+        transaction_type: str | None = None,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> list[TokenTransaction]:
+        return token_transaction_repository.list_all_filtered(
+            db, user_id=user_id, transaction_type=transaction_type, skip=skip, limit=limit
+        )
+
+    def credit_tokens(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        amount: int,
+        source: str,
+        reference_id: str | None = None,
+        description: str | None = None,
+        commit: bool = True,
+        monetary_value_usd: float = 0.0,
+        lot_metadata: dict | None = None,
+        create_value_lot: bool = True,
+    ) -> User:
+        if amount <= 0:
+            raise ConflictException("Credit amount must be greater than zero.")
+
+        user = db.execute(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        if not user:
+            raise NotFoundException("User not found.")
+
+        user.token_balance += amount
+
+        transaction = TokenTransaction(
+            user_id=user.id,
+            transaction_type=TokenTransactionType.CREDIT.value,
+            amount=amount,
+            balance_after=user.token_balance,
+            source=source,
+            reference_id=reference_id,
+            description=description,
+        )
+
+        db.add(user)
+        db.add(transaction)
+        db.flush()
+        if create_value_lot:
+            token_value_ledger_service.create_lot(
+                db, user_id=user.id, tokens=amount, source=source, reference_id=reference_id,
+                amount_paid_usd=monetary_value_usd, metadata=lot_metadata,
+            )
+        if commit:
+            db.commit()
+            db.refresh(user)
+
+        return user
+
+    def debit_tokens(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        amount: int,
+        source: str,
+        reference_id: str | None = None,
+        description: str | None = None,
+        commit: bool = True,
+        allocation_reference: str | None = None,
+        allocation_provider: str | None = None,
+        allow_promotional: bool = True,
+        strict_allocation_eligibility: bool = False,
+    ) -> User:
+        if amount <= 0:
+            raise ConflictException("Debit amount must be greater than zero.")
+
+        user = db.execute(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        if not user:
+            raise NotFoundException("User not found.")
+
+        if user.token_balance < amount:
+            raise ConflictException("Insufficient token balance.")
+
+        if allocation_reference:
+            token_value_ledger_service.ensure_legacy_balance_lot(
+                db, user_id=user_id, wallet_balance=int(user.token_balance or 0),
+            )
+
+        if allocation_reference and strict_allocation_eligibility:
+            eligible = token_value_ledger_service.eligible_token_balance(
+                db, user_id=user_id, provider=allocation_provider,
+                allow_promotional=allow_promotional,
+            )
+            if eligible < amount:
+                raise ConflictException("Insufficient eligible token balance for this generation.")
+
+        user.token_balance -= amount
+
+        transaction = TokenTransaction(
+            user_id=user.id,
+            transaction_type=TokenTransactionType.DEBIT.value,
+            amount=-amount,
+            balance_after=user.token_balance,
+            source=source,
+            reference_id=reference_id,
+            description=description,
+        )
+
+        db.add(user)
+        db.add(transaction)
+        db.flush()
+        if allocation_reference:
+            token_value_ledger_service.allocate(
+                db, user_id=user.id, execution_id=allocation_reference, tokens=amount,
+                token_transaction_id=transaction.id, provider=allocation_provider,
+                allow_promotional=allow_promotional,
+                strict_eligibility=strict_allocation_eligibility,
+            )
+        if commit:
+            db.commit()
+            db.refresh(user)
+
+        return user
+
+    def refund_tryon_tokens(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        job_id: int,
+        amount: int,
+        reason: str | None = None,
+    ) -> User:
+        reference_id = str(job_id)
+        user = db.execute(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if not user:
+            raise NotFoundException("User not found.")
+
+        existing = token_transaction_repository.get_by_source_reference(
+            db,
+            user_id=user_id,
+            source="tryon_refund",
+            reference_id=reference_id,
+        )
+        if existing:
+            db.rollback()
+            return user
+
+        return self.credit_tokens(
+            db,
+            user_id=user_id,
+            amount=amount,
+            source="tryon_refund",
+            reference_id=reference_id,
+            description=reason or "Automatic refund for failed try-on job",
+        )
+
+    def admin_adjust_tokens(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        amount: int,
+        description: str | None = None,
+    ) -> User:
+        user = user_repository.get_by_id(db, user_id)
+
+        if not user:
+            raise NotFoundException("User not found.")
+
+        new_balance = user.token_balance + amount
+
+        if new_balance < 0:
+            raise ConflictException("Token balance cannot be negative.")
+
+        transaction_type = (
+            TokenTransactionType.CREDIT.value
+            if amount >= 0
+            else TokenTransactionType.DEBIT.value
+        )
+
+        user.token_balance = new_balance
+
+        transaction = TokenTransaction(
+            user_id=user.id,
+            transaction_type=transaction_type,
+            amount=amount,
+            balance_after=user.token_balance,
+            source="admin",
+            description=description,
+        )
+
+        db.add(user)
+        db.add(transaction)
+        db.commit()
+        db.refresh(user)
+
+        return user
+
+
+token_service = TokenService()

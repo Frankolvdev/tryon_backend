@@ -1,0 +1,509 @@
+﻿{
+    "id": "e7e91e0c-4f89-4f38-a898-e1fc511041bb",
+    "logs": [
+        {
+            "level": "info",
+            "message": "Execution queued. 12 tokens charged.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:32:38.202359"
+        },
+        {
+            "level": "info",
+            "message": "Execution started by the unified provider worker.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:32:38.642881"
+        },
+        {
+            "level": "info",
+            "message": "Dispatching the complete generation pipeline to Modal.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:32:38.695762"
+        },
+        {
+            "level": "info",
+            "message": "Submitting Modal FunctionCall.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:32:38.700956"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall submitted: fc-01KZ5M52H7M79JADXZ4YF2QEB6.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:32:42.247957"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall accepted.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:32:42.312364"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:32:44.667846"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:32:50.686934"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:32:59.002098"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:33:09.006882"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:33:14.839775"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:33:21.118804"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:33:27.662148"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:33:34.037210"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:33:40.988643"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:33:47.377598"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:33:53.642775"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:33:59.980100"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:34:06.217850"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:34:12.848278"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:34:19.165834"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:34:25.580349"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:34:31.978973"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:34:38.205660"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:34:44.490654"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:34:50.742665"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:34:57.387886"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:35:03.685808"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:35:09.926055"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:35:16.282836"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:35:22.526049"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:35:28.757676"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:35:35.022512"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:35:41.863645"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:35:48.142765"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:35:54.410408"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:00.680227"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:06.918280"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:13.309894"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:19.578955"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:25.863715"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:32.350626"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:38.633370"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall is running.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:45.037358"
+        },
+        {
+            "level": "info",
+            "message": "Modal FunctionCall completed.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:48.270758"
+        },
+        {
+            "level": "info",
+            "message": "Modal completed the entire generation pipeline in one GPU container.",
+            "step_key": null,
+            "timestamp": "2026-08-04T05:36:48.512638"
+        }
+    ],
+    "error": null,
+    "steps": [
+        {
+            "error": null,
+            "status": "completed",
+            "outputs": {
+                "files": [
+                    {
+                        "node_id": "21589",
+                        "filename": "ComfyUI_00001_.png",
+                        "temporary": true,
+                        "local_path": "C:\\Users\\frank\\AppData\\Local\\Temp\\tryon-modal-results\\e7e91e0c-4f89-4f38-a898-e1fc511041bb\\fd1b756707-ComfyUI_00001_.png",
+                        "size_bytes": 3207622,
+                        "content_type": "application/octet-stream",
+                        "__generation_file__": true
+                    }
+                ],
+                "output_1": {
+                    "node_id": "21589",
+                    "filename": "ComfyUI_00001_.png",
+                    "temporary": true,
+                    "local_path": "C:\\Users\\frank\\AppData\\Local\\Temp\\tryon-modal-results\\e7e91e0c-4f89-4f38-a898-e1fc511041bb\\c37d9b228e-ComfyUI_00001_.png",
+                    "size_bytes": 3207622,
+                    "content_type": "application/octet-stream",
+                    "__generation_file__": true
+                },
+                "provider_result": {
+                    "prompt_id": "ded59ced-0eac-477c-b9ce-9d15e046135b"
+                }
+            },
+            "step_key": "workflow_1",
+            "step_name": "Workflow ComfyUI",
+            "step_type": "workflow",
+            "started_at": null,
+            "duration_ms": 80726,
+            "finished_at": null
+        }
+    ],
+    "engine": "modal",
+    "inputs": {
+        "input_1": {
+            "bucket": null,
+            "filename": "ComfyUI_temp_pxyda_00001_.png",
+            "provider": "local",
+            "object_key": "generation-inputs/virtual-clothing-try-on/bca03122a9384b74b0e8d95c081a8ae0.png",
+            "public_url": "/local-files/generation-inputs/virtual-clothing-try-on/bca03122a9384b74b0e8d95c081a8ae0.png",
+            "size_bytes": 5704301,
+            "content_type": "image/png",
+            "storage_file_id": 631,
+            "__generation_file__": true
+        },
+        "input_2": {
+            "bucket": null,
+            "filename": "41668509_038_eedb.jpg",
+            "provider": "local",
+            "object_key": "generation-inputs/virtual-clothing-try-on/3887dbac587644199671c1f1c31237fe.jpg",
+            "public_url": "/local-files/generation-inputs/virtual-clothing-try-on/3887dbac587644199671c1f1c31237fe.jpg",
+            "size_bytes": 226768,
+            "content_type": "image/jpeg",
+            "storage_file_id": 632,
+            "__generation_file__": true
+        }
+    },
+    "status": "completed",
+    "context": {
+        "files": [
+            {
+                "node_id": "21589",
+                "filename": "ComfyUI_00001_.png",
+                "temporary": true,
+                "local_path": "C:\\Users\\frank\\AppData\\Local\\Temp\\tryon-modal-results\\e7e91e0c-4f89-4f38-a898-e1fc511041bb\\bfbcd58085-ComfyUI_00001_.png",
+                "size_bytes": 3207622,
+                "content_type": "application/octet-stream",
+                "__generation_file__": true
+            }
+        ],
+        "input_1": {
+            "filename": "ComfyUI_temp_pxyda_00001_.png",
+            "temporary": true,
+            "local_path": "C:\\Users\\frank\\AppData\\Local\\Temp\\tryon-modal-results\\e7e91e0c-4f89-4f38-a898-e1fc511041bb\\9e870b3e80-ComfyUI_temp_pxyda_00001_.png",
+            "size_bytes": 5704301,
+            "content_type": "image/png",
+            "__generation_file__": true
+        },
+        "input_2": {
+            "filename": "41668509_038_eedb.jpg",
+            "temporary": true,
+            "local_path": "C:\\Users\\frank\\AppData\\Local\\Temp\\tryon-modal-results\\e7e91e0c-4f89-4f38-a898-e1fc511041bb\\4520e3e479-41668509_038_eedb.jpg",
+            "size_bytes": 226768,
+            "content_type": "image/jpeg",
+            "__generation_file__": true
+        },
+        "output_1": {
+            "node_id": "21589",
+            "filename": "ComfyUI_00001_.png",
+            "temporary": true,
+            "local_path": "C:\\Users\\frank\\AppData\\Local\\Temp\\tryon-modal-results\\e7e91e0c-4f89-4f38-a898-e1fc511041bb\\c1b1f968bf-ComfyUI_00001_.png",
+            "size_bytes": 3207622,
+            "content_type": "application/octet-stream",
+            "__generation_file__": true
+        },
+        "workflow_1": {
+            "files": [
+                {
+                    "node_id": "21589",
+                    "filename": "ComfyUI_00001_.png",
+                    "temporary": true,
+                    "local_path": "C:\\Users\\frank\\AppData\\Local\\Temp\\tryon-modal-results\\e7e91e0c-4f89-4f38-a898-e1fc511041bb\\f8845a1bb9-ComfyUI_00001_.png",
+                    "size_bytes": 3207622,
+                    "content_type": "application/octet-stream",
+                    "__generation_file__": true
+                }
+            ],
+            "output_1": {
+                "node_id": "21589",
+                "filename": "ComfyUI_00001_.png",
+                "temporary": true,
+                "local_path": "C:\\Users\\frank\\AppData\\Local\\Temp\\tryon-modal-results\\e7e91e0c-4f89-4f38-a898-e1fc511041bb\\51d73b9284-ComfyUI_00001_.png",
+                "size_bytes": 3207622,
+                "content_type": "application/octet-stream",
+                "__generation_file__": true
+            },
+            "provider_result": {
+                "prompt_id": "ded59ced-0eac-477c-b9ce-9d15e046135b"
+            }
+        },
+        "provider_result": {
+            "prompt_id": "ded59ced-0eac-477c-b9ce-9d15e046135b"
+        }
+    },
+    "outputs": {
+        "output_1": {
+            "bucket": null,
+            "node_id": "21589",
+            "filename": "ComfyUI_00001_.png",
+            "provider": "local",
+            "local_path": "C:\\Users\\frank\\AppData\\Local\\Temp\\tryon-modal-results\\e7e91e0c-4f89-4f38-a898-e1fc511041bb\\86016eff19-ComfyUI_00001_.png",
+            "object_key": "generation-results/e7e91e0c-4f89-4f38-a898-e1fc511041bb/ed3d6a57e3b14b528078f571a9bf545f.png",
+            "public_url": "/local-files/generation-results/e7e91e0c-4f89-4f38-a898-e1fc511041bb/ed3d6a57e3b14b528078f571a9bf545f.png",
+            "size_bytes": 3207622,
+            "content_type": "application/octet-stream",
+            "download_url": "/local-files/generation-results/e7e91e0c-4f89-4f38-a898-e1fc511041bb/ed3d6a57e3b14b528078f571a9bf545f.png",
+            "result_position": 0,
+            "storage_file_id": 633,
+            "__generation_file__": true
+        }
+    },
+    "user_id": 14,
+    "currency": "USD",
+    "progress": 100,
+    "module_id": 1,
+    "created_at": "2026-08-04T05:32:38.202359",
+    "module_key": "virtual-clothing-try-on",
+    "queue_name": "modal",
+    "started_at": "2026-08-04T05:32:38.642881",
+    "duration_ms": 249869,
+    "finished_at": "2026-08-04T05:36:48.512638",
+    "heartbeat_at": "2026-08-04T05:36:48.512638",
+    "recovered_at": null,
+    "queue_position": null,
+    "recovery_count": 0,
+    "tokens_charged": 11,
+    "pricing_rule_id": 1,
+    "provider_job_id": "fc-01KZ5M52H7M79JADXZ4YF2QEB6",
+    "provider_status": "COMPLETED",
+    "runtime_metrics": {
+        "steps": [
+            {
+                "status": "completed",
+                "step_key": "workflow_1",
+                "step_type": "workflow",
+                "duration_ms": 80726
+            }
+        ],
+        "step_count": 1,
+        "schema_version": 1,
+        "duration_source": "runtime_exact",
+        "execution_time_ms": 80787,
+        "failed_step_count": 0,
+        "total_duration_ms": 80787,
+        "python_duration_ms": 0,
+        "termination_status": "completed",
+        "completed_step_count": 1,
+        "execution_started_at": "2026-08-04T05:35:17.476351+00:00",
+        "pipeline_duration_ms": 80798,
+        "workflow_duration_ms": 80726,
+        "execution_finished_at": "2026-08-04T05:36:38.264235+00:00"
+    },
+    "tokens_refunded": true,
+    "cancel_requested": false,
+    "commercial_price": 1.054626554,
+    "provider_metrics": {
+        "provider": "modal",
+        "runtime_url": null,
+        "duration_source": "runtime_exact",
+        "provider_job_id": "fc-01KZ5M52H7M79JADXZ4YF2QEB6",
+        "execution_time_ms": 80787,
+        "termination_status": "completed",
+        "pipeline_duration_ms": 80798,
+        "resumed_after_backend_restart": false
+    },
+    "billing_breakdown": {
+        "gpu_key": "L40S",
+        "provider": "modal",
+        "finalized": true,
+        "final_tokens": 11,
+        "duration_source": "runtime_exact",
+        "final_price_usd": 1.054626554,
+        "pricing_rule_id": 1,
+        "token_value_usd": 0.1,
+        "tokens_refunded": 1,
+        "billable_seconds": 100.787,
+        "desired_profit_usd": 1.0,
+        "termination_status": "completed",
+        "extra_tokens_debited": 0,
+        "real_provider_seconds": 80.787,
+        "gpu_cost_usd_per_second": 0.000542,
+        "infrastructure_cost_usd": 0.054626554,
+        "technical_margin_seconds": 5,
+        "configured_scaledown_seconds": 15,
+        "estimated_tokens_before_execution": 12
+    },
+    "dispatch_attempts": 1,
+    "provider_endpoint_id": "https://frank-olv-dev--ia-comfyui-python-modal-comfyuiserver-comfyui.modal.run",
+    "provider_submitted_at": "2026-08-04T05:32:42.247957",
+    "estimated_duration_source": null,
+    "real_provider_duration_ms": 80787,
+    "estimated_duration_seconds": null
+}

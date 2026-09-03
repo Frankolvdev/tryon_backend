@@ -26,4 +26,4 @@ def test_modal_app_keeps_pipeline_and_adds_engine_hooks():
     assert "ModalSnapshotAdapter" in content
     assert "snapshot_adapter.prepare_snapshot()" in content
     assert "adapter.after_restore()" in content
-    assert "TRYON_MODAL_RUNTIME_ENGINE_ENABLED" in content
+    assert "RUNTIME_ENGINE_ENABLED = True" in content

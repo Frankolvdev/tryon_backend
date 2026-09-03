@@ -1,0 +1,276 @@
+groups:
+  - name: tryon-availability
+    interval: 15s
+
+    rules:
+      - alert: TryOnBackendDown
+        expr: up{job="tryon-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: tryon-backend
+        annotations:
+          summary: "Try-On backend is unavailable"
+          description: >
+            Prometheus has been unable to scrape the Try-On backend
+            for more than one minute.
+
+      - alert: TryOnApplicationNotReady
+        expr: tryon_application_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: tryon-backend
+        annotations:
+          summary: "Try-On backend is not ready"
+          description: >
+            One or more required dependencies are unavailable.
+
+      - alert: TryOnPostgreSQLUnavailable
+        expr: tryon_postgres_available == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: postgresql
+        annotations:
+          summary: "PostgreSQL is unavailable"
+          description: >
+            The backend cannot connect to PostgreSQL.
+
+      - alert: TryOnRedisUnavailable
+        expr: tryon_redis_available == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis is unavailable"
+          description: >
+            Redis health checks have failed for more than one minute.
+
+      - alert: TryOnLocalStorageUnavailable
+        expr: tryon_local_storage_available == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: storage
+        annotations:
+          summary: "Local storage is unavailable"
+          description: >
+            The backend cannot write to its configured local storage directory.
+
+  - name: tryon-http
+    interval: 30s
+
+    rules:
+      - record: job:http_requests:rate5m
+        expr: >
+          sum by (method, route, status_code) (
+            rate(tryon_http_requests_total[5m])
+          )
+
+      - record: job:http_errors:ratio5m
+        expr: >
+          (
+            sum(rate(tryon_http_requests_total{status_code=~"5.."}[5m]))
+          )
+          /
+          clamp_min(
+            sum(rate(tryon_http_requests_total[5m])),
+            0.001
+          )
+
+      - record: job:http_latency_seconds:p95_5m
+        expr: >
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(tryon_http_request_duration_seconds_bucket[5m])
+            )
+          )
+
+      - alert: TryOnHighHttpErrorRate
+        expr: job:http_errors:ratio5m > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: tryon-backend
+        annotations:
+          summary: "High HTTP 5xx error rate"
+          description: >
+            More than 5 percent of backend requests have returned
+            server errors during the last five minutes.
+
+      - alert: TryOnCriticalHttpErrorRate
+        expr: job:http_errors:ratio5m > 0.20
+        for: 2m
+        labels:
+          severity: critical
+          service: tryon-backend
+        annotations:
+          summary: "Critical HTTP 5xx error rate"
+          description: >
+            More than 20 percent of backend requests are failing.
+
+      - alert: TryOnHighHttpLatency
+        expr: job:http_latency_seconds:p95_5m > 2
+        for: 10m
+        labels:
+          severity: warning
+          service: tryon-backend
+        annotations:
+          summary: "High HTTP latency"
+          description: >
+            The 95th percentile response time has exceeded two seconds
+            for ten minutes.
+
+  - name: tryon-background-jobs
+    interval: 30s
+
+    rules:
+      - alert: TryOnExpiredWorkerLeases
+        expr: tryon_background_job_expired_leases > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: workers
+        annotations:
+          summary: "Expired background-job leases detected"
+          description: >
+            One or more claimed jobs have not received a valid worker heartbeat.
+
+      - alert: TryOnQueueOldestJobTooOld
+        expr: tryon_background_job_queue_oldest_age_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: workers
+        annotations:
+          summary: "Background-job queue is delayed"
+          description: >
+            The oldest waiting job has remained queued for more than five minutes.
+
+      - alert: TryOnQueueCriticallyDelayed
+        expr: tryon_background_job_queue_oldest_age_seconds > 1800
+        for: 2m
+        labels:
+          severity: critical
+          service: workers
+        annotations:
+          summary: "Background-job queue is critically delayed"
+          description: >
+            A queued job has been waiting for more than thirty minutes.
+
+      - alert: TryOnDeadLetterJobsDetected
+        expr: >
+          sum(
+            tryon_background_jobs{status="dead_letter"}
+          ) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: workers
+        annotations:
+          summary: "Dead-letter jobs detected"
+          description: >
+            One or more jobs exhausted their allowed attempts.
+
+  - name: tryon-runpod
+    interval: 30s
+
+    rules:
+      - alert: TryOnRunPodUnavailable
+        expr: >
+          tryon_runpod_configured == 1
+          and
+          sum(tryon_runpod_available) == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: runpod
+        annotations:
+          summary: "RunPod endpoint is unavailable"
+          description: >
+            RunPod is configured, but its endpoint health check is failing.
+
+      - alert: TryOnRunPodQueueDelayHigh
+        expr: >
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(tryon_runpod_queue_delay_seconds_bucket[10m])
+            )
+          ) > 120
+        for: 10m
+        labels:
+          severity: warning
+          service: runpod
+        annotations:
+          summary: "RunPod queue delay is high"
+          description: >
+            The RunPod queue delay p95 has exceeded two minutes.
+
+  - name: tryon-redis
+    interval: 30s
+
+    rules:
+      - record: job:redis_cache_hit_ratio
+        expr: >
+          tryon_redis_keyspace_hits_total
+          /
+          clamp_min(
+            tryon_redis_keyspace_hits_total
+            +
+            tryon_redis_keyspace_misses_total,
+            1
+          )
+
+      - alert: TryOnRedisCacheHitRatioLow
+        expr: job:redis_cache_hit_ratio < 0.50
+        for: 30m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "Redis cache hit ratio is low"
+          description: >
+            Less than half of cache lookups are being served from Redis.
+
+      - alert: TryOnRedisEvictionsDetected
+        expr: increase(tryon_redis_evicted_keys_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "Redis is evicting keys"
+          description: >
+            Redis has evicted cache keys during the last fifteen minutes.
+
+  - name: tryon-operational-events
+    interval: 30s
+
+    rules:
+      - alert: TryOnCriticalOperationalEvent
+        expr: >
+          tryon_operational_events_unresolved{severity="critical"} > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: tryon-backend
+        annotations:
+          summary: "Unresolved critical operational event"
+          description: >
+            At least one critical operational event remains unresolved.
+
+      - alert: TryOnManyUnresolvedErrors
+        expr: >
+          tryon_operational_events_unresolved{severity="error"} > 10
+        for: 10m
+        labels:
+          severity: warning
+          service: tryon-backend
+        annotations:
+          summary: "Many unresolved operational errors"
+          description: >
+            More than ten error-level operational events remain unresolved.

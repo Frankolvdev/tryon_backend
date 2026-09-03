@@ -28,9 +28,6 @@ class ModalPipelineAdapterService:
     """
 
     _TERMINAL_GRAPH_STATES = {"SUCCESS", "FAILURE", "INIT_FAILURE", "TERMINATED", "TIMEOUT"}
-    _FAILED_GRAPH_STATES = {"FAILURE", "INIT_FAILURE", "TERMINATED", "TIMEOUT"}
-    _GRAPH_WATCH_INTERVAL_SECONDS = 1.0
-    _SUCCESS_RESULT_GRACE_SECONDS = 10.0
 
     def __init__(self) -> None:
         self._client_lock = threading.Lock()
@@ -285,17 +282,12 @@ class ModalPipelineAdapterService:
         call_id: str,
         timeout_seconds: int,
     ) -> dict[str, Any]:
-        """Wait for one durable Modal FunctionCall and reconcile terminal provider state.
+        """Wait for one durable Modal FunctionCall without per-job status polling.
 
-        The normal path remains event-driven through ``FunctionCall.get.aio``. A
-        lightweight call-graph watcher is only a safety net: it makes INIT_FAILURE,
-        FAILURE, TIMEOUT and TERMINATED visible immediately instead of leaving a
-        durable Backend execution stuck as ``running`` until the full timeout.
-
-        If Modal reports terminal SUCCESS, the result payload still has to arrive.
-        SUCCESS without a payload after a short propagation grace is treated as a
-        provider error. Image/output contract validation remains in
-        ``GenerationModuleRuntimeService.finalize_modal_supervised``.
+        Normal completion is event-driven through Modal ``FunctionCall.get.aio``.
+        A transient control-plane reconnect may reattach to the SAME persisted
+        FunctionCall ID, but this method never submits, spawns, requeues, or retries
+        the remote generation itself.
         """
         modal = self._modal()
         call_id = str(call_id or "").strip()
@@ -318,133 +310,62 @@ class ModalPipelineAdapterService:
                 call_id,
                 refresh=transient_attempts > 0,
             )
-            result_task = asyncio.create_task(call.get.aio(timeout=remaining))
-            success_seen_at: float | None = None
-            retry_transport = False
-
             try:
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        await self._cancel_local_wait_task(result_task)
-                        raise TimeoutError(
-                            f"Modal FunctionCall {call_id} exceeded {timeout_seconds} seconds."
-                        )
-
-                    watch_interval = max(
-                        0.05,
-                        min(float(self._GRAPH_WATCH_INTERVAL_SECONDS), remaining),
-                    )
-                    done, _ = await asyncio.wait(
-                        {result_task},
-                        timeout=watch_interval,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-
-                    if result_task in done:
-                        try:
-                            output = await result_task
-                        except modal.exception.OutputExpiredError as exc:
-                            raise AppException(
-                                f"Modal FunctionCall {call_id} output expired."
-                            ) from exc
-                        except (TimeoutError, modal.exception.TimeoutError) as exc:
-                            raise TimeoutError(
-                                f"Modal FunctionCall {call_id} exceeded {timeout_seconds} seconds."
-                            ) from exc
-                        except asyncio.CancelledError:
-                            raise
-                        except BaseException as exc:
-                            if self._is_cancelled_exception(exc):
-                                raise InterruptedError(
-                                    "Modal FunctionCall cancellation confirmed."
-                                ) from exc
-                            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                                raise
-                            name = exc.__class__.__name__.lower()
-                            if any(
-                                term in name
-                                for term in (
-                                    "connection",
-                                    "service",
-                                    "internal",
-                                    "resourceexhausted",
-                                    "unavailable",
-                                )
-                            ):
-                                transient_attempts += 1
-                                retry_transport = True
-                                break
-                            raise AppException(
-                                f"Modal FunctionCall {call_id} failed: {exc}"
-                            ) from exc
-
-                        if not isinstance(output, dict):
-                            raise AppException(
-                                "Modal FunctionCall returned an invalid pipeline result."
-                            )
-                        self._forget_call(call_id)
-                        return {
-                            "provider": "modal",
-                            "output": output,
-                            "execution_time_ms": int((time.monotonic() - started) * 1000),
-                            "runtime_url": None,
-                            "provider_job_id": call_id,
-                            "resumed": transient_attempts > 0,
-                        }
-
-                    # Safety-net reconciliation. Failure to read the graph is not
-                    # itself fatal because get.aio remains the authoritative path.
-                    try:
-                        states = await self._call_graph_states_async(call)
-                    except asyncio.CancelledError:
-                        raise
-                    except BaseException as graph_exc:
-                        if isinstance(graph_exc, (KeyboardInterrupt, SystemExit)):
-                            raise
-                        logger.debug(
-                            "Could not read Modal call graph while awaiting result: call_id=%s error=%s",
-                            call_id,
-                            graph_exc,
-                        )
-                        states = []
-
-                    failed_states = sorted(
-                        {state for state in states if state in self._FAILED_GRAPH_STATES}
-                    )
-                    if failed_states:
-                        await self._cancel_local_wait_task(result_task)
-                        self._forget_call(call_id)
-                        raise AppException(
-                            f"Modal FunctionCall {call_id} reached terminal provider "
-                            f"failure state(s): {failed_states}. Full graph states: {states}"
-                        )
-
-                    if states and all(state == "SUCCESS" for state in states):
-                        now = time.monotonic()
-                        if success_seen_at is None:
-                            success_seen_at = now
-                        elif now - success_seen_at >= float(
-                            self._SUCCESS_RESULT_GRACE_SECONDS
-                        ):
-                            await self._cancel_local_wait_task(result_task)
-                            self._forget_call(call_id)
-                            raise AppException(
-                                f"Modal FunctionCall {call_id} reported terminal SUCCESS "
-                                "but did not return a result payload."
-                            )
-                    else:
-                        success_seen_at = None
+                output = await call.get.aio(timeout=remaining)
+            except modal.exception.OutputExpiredError as exc:
+                raise AppException(
+                    f"Modal FunctionCall {call_id} output expired."
+                ) from exc
+            except (TimeoutError, modal.exception.TimeoutError) as exc:
+                # This is the full execution deadline, not a polling interval.
+                raise TimeoutError(
+                    f"Modal FunctionCall {call_id} exceeded {timeout_seconds} seconds."
+                ) from exc
             except asyncio.CancelledError:
-                # Backend shutdown only. Stopping this local await does not request
-                # FunctionCall.cancel(); startup recovery attaches to the same ID.
-                await self._cancel_local_wait_task(result_task)
+                # Backend shutdown only. The provider call is left untouched so
+                # startup recovery can reattach to the same durable FunctionCall ID.
                 raise
+            except BaseException as exc:
+                if self._is_cancelled_exception(exc):
+                    raise InterruptedError(
+                        "Modal FunctionCall cancellation confirmed."
+                    ) from exc
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                name = exc.__class__.__name__.lower()
+                if any(
+                    term in name
+                    for term in (
+                        "connection",
+                        "service",
+                        "internal",
+                        "resourceexhausted",
+                        "unavailable",
+                    )
+                ):
+                    # Reconnect only to the SAME call_id. This is transport recovery,
+                    # never a second Modal generation / spawn.
+                    transient_attempts += 1
+                    await asyncio.sleep(min(10.0, 0.5 * transient_attempts))
+                    continue
+                raise AppException(
+                    f"Modal FunctionCall {call_id} failed: {exc}"
+                ) from exc
 
-            if retry_transport:
-                await self._cancel_local_wait_task(result_task)
-                await asyncio.sleep(min(10.0, 0.5 * transient_attempts))
-                continue
+            if not isinstance(output, dict):
+                raise AppException(
+                    "Modal FunctionCall returned an invalid pipeline result."
+                )
+
+            self._forget_call(call_id)
+            return {
+                "provider": "modal",
+                "output": output,
+                "execution_time_ms": int((time.monotonic() - started) * 1000),
+                "runtime_url": None,
+                "provider_job_id": call_id,
+                "resumed": transient_attempts > 0,
+            }
 
     def cancel_call(
         self,

@@ -1,0 +1,56 @@
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Integer, JSON, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.common.time import utc_now
+from app.db.database import Base
+
+
+class RuntimeBuilderConfig(Base):
+    __tablename__ = "runtime_builder_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), default="Runtime principal", nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), default="modal", nullable=False, index=True)
+    runtime_name: Mapped[str] = mapped_column(String(120), default="generation-runtime", nullable=False, index=True)
+    runtime_version: Mapped[str] = mapped_column(String(64), default="1.0.0", nullable=False)
+    validated_profile_id: Mapped[str] = mapped_column(
+        String(64), default="universal-legacy-2026-02", nullable=False
+    )
+    python_version: Mapped[str] = mapped_column(String(32), default="3.11", nullable=False)
+    cuda_version: Mapped[str] = mapped_column(String(32), default="12.8.0", nullable=False)
+    pytorch_index_url: Mapped[str] = mapped_column(
+        String(1000), default="https://download.pytorch.org/whl/cu128", nullable=False
+    )
+    comfyui_repository: Mapped[str] = mapped_column(
+        String(1000), default="https://github.com/comfyanonymous/ComfyUI.git", nullable=False
+    )
+    comfyui_commit: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    target_platform: Mapped[str] = mapped_column(String(64), default="linux/amd64", nullable=False)
+    registry_image: Mapped[str] = mapped_column(
+        String(500), default="ghcr.io/your-org/generation-runtime", nullable=False
+    )
+    include_comfyui_manager: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    custom_nodes: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    python_dependencies: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    models: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    environment_variables: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    volumes: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    project_key: Mapped[str] = mapped_column(String(120), default="tryon", nullable=False, index=True)
+    module_type: Mapped[str] = mapped_column(String(120), default="tryon", nullable=False, index=True)
+    container_workdir: Mapped[str] = mapped_column(String(1000), default="/app", nullable=False)
+    source_comfyui_path: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    workflow_filename: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    workflow_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_index_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    export_root_directory: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    export_directory: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    workspace_status: Mapped[str] = mapped_column(String(64), default="draft", nullable=False)
+    last_export_archive: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    last_export_manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_exported_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)

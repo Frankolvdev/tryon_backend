@@ -31,7 +31,7 @@ class RuntimeBuilderService:
     # Bump deliberado para invalidar exclusivamente la capa Docker que clona
     # el Runtime Engine. Evita reutilizar una copia antigua de `main` cuando
     # Modal conserva la cache de la instruccion git clone.
-    DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-07-python310-tomli-20260903"
+    DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-08-force-full-residents-20260903"
     DEFAULT_RUNTIME_ENGINE_INSTALL_PATH = "/opt/comfyui-runtime-engine"
     DEFAULT_MODAL_RESIDENT_MODELS = (
         "diffusion_models/flux2_dev_fp8mixed (1).safetensors",
@@ -1754,6 +1754,10 @@ if STORAGE_BENCHMARK_ENABLED:
 MODAL_CLASS_OPTIONS = {{
     "image": image,
     "gpu": GPU,
+    # Fail closed: one user input maps to one provider invocation. Modal must not
+    # automatically retry a failed generation input. Recovery always reattaches
+    # to the persisted FunctionCall ID instead of creating another one.
+    "retries": 0,
     "min_containers": MIN_CONTAINERS,
     "max_containers": MAX_CONTAINERS,
     "timeout": EXECUTION_TIMEOUT,
