@@ -232,7 +232,19 @@ class ModalPipelineAdapterService:
             sdk_version,
         )
         try:
-            call = self._worker(config).run_pipeline.spawn(jsonable_encoder(payload))
+            worker = self._worker(config)
+            # Apply the current global scaledown to the already deployed runtime.
+            # This changes future container lifecycle without creating a separate pool.
+            try:
+                from app.db.database import SessionLocal
+                from app.services.ai_engine_settings_service import ai_engine_settings_service
+                with SessionLocal() as db:
+                    scaledown = int(ai_engine_settings_service.get(db).modal_scaledown_window_seconds)
+                worker.run_pipeline.update_autoscaler(scaledown_window=scaledown)
+                logger.info("[backend-modal-autoscaler] scaledown_window=%s", scaledown)
+            except Exception as autoscaler_exc:
+                logger.warning("[backend-modal-autoscaler-warning] %s", autoscaler_exc)
+            call = worker.run_pipeline.spawn(jsonable_encoder(payload))
         except Exception as exc:
             raise AppException(f"Could not submit the Modal FunctionCall: {exc}") from exc
         call_id = str(getattr(call, "object_id", "") or "").strip()

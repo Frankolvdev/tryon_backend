@@ -44,6 +44,7 @@ class RuntimeVolume(BaseModel):
 class RuntimeBuilderConfigUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     provider: Literal["modal", "runpod", "beam", "local"] = "modal"
+    gpu: str = Field(default="L40S", min_length=1, max_length=120)
     runtime_name: str = Field(default="generation-runtime", min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
     runtime_version: str = Field(min_length=1, max_length=64)
     python_version: str = Field(min_length=1, max_length=32)
@@ -357,6 +358,7 @@ class RuntimeBuilderProfileSummary(BaseModel):
     id: int
     name: str
     provider: str
+    gpu: str
     runtime_name: str
     runtime_version: str
     registry_image: str

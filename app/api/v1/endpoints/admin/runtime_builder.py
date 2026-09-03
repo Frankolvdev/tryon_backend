@@ -1,4 +1,5 @@
 import threading
+import copy
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
@@ -170,6 +171,7 @@ def create_profile(payload: RuntimeBuilderProfileCreate, db: Session = Depends(g
     for row in db.query(RuntimeBuilderConfig).all(): row.is_active = False
     config = RuntimeBuilderConfig(
         name=payload.name, provider=payload.provider, is_active=True, runtime_name=slug,
+        gpu=(base.gpu if payload.provider == base.provider else "L40S"),
         runtime_version="1.0.0", validated_profile_id=base.validated_profile_id,
         python_version=base.python_version, cuda_version=base.cuda_version,
         pytorch_index_url=base.pytorch_index_url, comfyui_repository=base.comfyui_repository,
@@ -182,6 +184,40 @@ def create_profile(payload: RuntimeBuilderProfileCreate, db: Session = Depends(g
     db.add(config); db.commit(); db.refresh(config)
     get_or_create_project(db, config)
     return config
+
+@router.post("/profiles/{profile_id}/clone", response_model=RuntimeBuilderConfigResponse, status_code=201)
+def clone_profile(profile_id: int, payload: RuntimeBuilderProfileCreate, db: Session = Depends(get_db)):
+    source = db.get(RuntimeBuilderConfig, profile_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Runtime profile not found")
+    new_name = payload.name.strip()
+    if new_name.casefold() == source.name.strip().casefold():
+        raise HTTPException(status_code=409, detail="El runtime clonado debe tener un nombre diferente.")
+    if db.query(RuntimeBuilderConfig).filter(RuntimeBuilderConfig.name == new_name).first():
+        raise HTTPException(status_code=409, detail="Ya existe un runtime con ese nombre.")
+    slug = RuntimeBuilderService.sanitize_runtime_name(new_name)
+    if db.query(RuntimeBuilderConfig).filter(RuntimeBuilderConfig.runtime_name == slug).first():
+        raise HTTPException(status_code=409, detail="El nombre genera un runtime_name que ya existe.")
+    for row in db.query(RuntimeBuilderConfig).all():
+        row.is_active = False
+    clone = RuntimeBuilderConfig()
+    excluded = {"id", "created_at", "updated_at", "is_active", "name", "runtime_name", "project_key", "last_export_archive", "last_export_manifest", "last_exported_at"}
+    for column in RuntimeBuilderConfig.__table__.columns:
+        key = column.name
+        if key not in excluded:
+            setattr(clone, key, copy.deepcopy(getattr(source, key)))
+    clone.name = new_name
+    clone.runtime_name = slug
+    clone.project_key = f"{slug}-{int(__import__('time').time())}"
+    clone.workspace_status = "draft"
+    clone.last_export_archive = None
+    clone.last_export_manifest = None
+    clone.last_exported_at = None
+    clone.is_active = True
+    db.add(clone); db.commit(); db.refresh(clone)
+    get_or_create_project(db, clone)
+    return clone
+
 
 @router.post("/profiles/{profile_id}/select", response_model=RuntimeBuilderConfigResponse)
 def select_profile(profile_id: int, db: Session = Depends(get_db)):

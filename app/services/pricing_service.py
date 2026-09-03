@@ -332,6 +332,14 @@ class PricingService:
             update_data["margin_percent"] = round(data.desired_profit_percent)
         if data.initial_estimated_duration_seconds is not None:
             update_data["estimated_gpu_seconds"] = data.initial_estimated_duration_seconds
+        # Validate the merged financial rule BEFORE the repository commits it.
+        # This keeps the existing token economics authoritative and prevents an
+        # invalid profit-per-token from being persisted by an UPDATE.
+        merged_profit = float(update_data.get("desired_profit_per_token_usd", rule.desired_profit_per_token_usd or 0))
+        token_financial_snapshot_service.generation_infrastructure_capacity(
+            token_value_usd=self._token_value(db),
+            normal_profit_per_token_usd=merged_profit,
+        )
         from app.services.financial_protection_service import financial_protection_service
         financial_protection_service.assert_rule_change(
             db, rule.id, update_data, action="update pricing rule"
@@ -438,7 +446,22 @@ class PricingService:
                 continue
             provider = str(module.default_execution_engine or "").lower()
             if provider == "modal":
-                gpu_key = settings.modal_gpu
+                # Resolve the GPU from the runtime selected by this generation module.
+                # Pricing formulas remain unchanged; only the GPU source moves from
+                # global Modal settings to the selected Runtime Builder profile.
+                gpu_key = None
+                try:
+                    from app.services.generation_execution_target_service import generation_execution_target_service
+                    targets = generation_execution_target_service.list_targets(db).get("modal", [])
+                    selected_target = next((item for item in targets if item.get("value") == module.endpoint), None)
+                    if selected_target and selected_target.get("runtime_config_id"):
+                        from app.models.runtime_builder_config import RuntimeBuilderConfig
+                        runtime_cfg = db.get(RuntimeBuilderConfig, int(selected_target["runtime_config_id"]))
+                        gpu_key = str(getattr(runtime_cfg, "gpu", "") or "").strip() or None
+                except Exception:
+                    gpu_key = None
+                # Compatibility fallback for modules/runtimes created before per-runtime GPU.
+                gpu_key = gpu_key or settings.modal_gpu
                 scaledown = settings.modal_scaledown_window_seconds
             elif provider == "local_docker":
                 local_cfg = infrastructure_provider_service.get_local_docker(db)
@@ -464,11 +487,17 @@ class PricingService:
                         db, infrastructure_cost_usd=infra,
                         desired_profit_per_token_usd=profit_per_token, apply_profit=True,
                     )
-                except Exception:
+                except Exception as exc:
                     tokens = None; total = None; configured_profit = None
+                    calculation_error = str(exc) or "Pricing rule cannot be calculated."
+                else:
+                    calculation_error = None
             else:
                 tokens = None; total = None; configured_profit = None
+                calculation_error = None
             warnings = []
+            if calculation_error:
+                warnings.append(f"Regla financiera inválida: {calculation_error}")
             if gpu_key is None:
                 warnings.append("GPU selection is not yet configured for this provider.")
             if gpu_cost is None:

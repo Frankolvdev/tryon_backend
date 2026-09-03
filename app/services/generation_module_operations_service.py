@@ -31,6 +31,11 @@ class GenerationModuleOperationsService:
 
     def clone(self, db: Session, *, module_id: int, data: GenerationModuleCloneRequest, user_id: int | None):
         source = generation_module_service.get_response(db, module_id=module_id)
+        clone_name = str(data.name or "").strip()
+        if not clone_name:
+            raise ConflictException("El módulo clonado requiere un nombre nuevo.")
+        if clone_name.casefold() == source.name.strip().casefold():
+            raise ConflictException("El módulo clonado debe tener un nombre diferente.")
         max_version = (
             db.query(GenerationModule.version)
             .filter(GenerationModule.key == source.key)
@@ -40,7 +45,7 @@ class GenerationModuleOperationsService:
         next_version = (max_version[0] if max_version else source.version) + 1
         payload = GenerationModuleCreate(
             key=source.key,
-            name=data.name or source.name,
+            name=clone_name,
             description=source.description,
             version=next_version,
             category=source.category,

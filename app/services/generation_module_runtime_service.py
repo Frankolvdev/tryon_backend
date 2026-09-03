@@ -755,7 +755,18 @@ class GenerationModuleRuntimeService:
             gpu_key, scaledown_seconds = self._local_gpu_settings(db, item.engine)
         elif provider == GenerationExecutionEngine.MODAL.value:
             engine_settings = ai_engine_settings_service.get(db)
-            gpu_key = engine_settings.modal_gpu
+            gpu_key = None
+            try:
+                from app.services.generation_execution_target_service import generation_execution_target_service
+                targets = generation_execution_target_service.list_targets(db).get("modal", [])
+                selected_target = next((target for target in targets if target.get("value") == item.provider_endpoint_id), None)
+                if selected_target and selected_target.get("runtime_config_id"):
+                    from app.models.runtime_builder_config import RuntimeBuilderConfig
+                    runtime_cfg = db.get(RuntimeBuilderConfig, int(selected_target["runtime_config_id"]))
+                    gpu_key = str(getattr(runtime_cfg, "gpu", "") or "").strip() or None
+            except Exception:
+                gpu_key = None
+            gpu_key = gpu_key or engine_settings.modal_gpu
             scaledown_seconds = int(engine_settings.modal_scaledown_window_seconds)
         gpu_cost = provider_pricing_service.get_cost(db, provider=provider, gpu_key=gpu_key)
 
