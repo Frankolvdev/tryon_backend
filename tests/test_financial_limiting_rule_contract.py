@@ -1,9 +1,9 @@
 from pathlib import Path
 
 
-def test_limiting_rule_is_selected_by_smallest_desired_profit():
+def test_limiting_rule_is_selected_by_smallest_desired_profit_per_token():
     source = Path("app/services/financial_protection_service.py").read_text(encoding="utf-8")
-    assert "min(diagnostics, key=lambda item: item.desired_profit_usd)" in source
+    assert "min(diagnostics, key=lambda item: item.desired_profit_per_token_usd)" in source
     assert "min(enriched, key=lambda item: item[1])" not in source
     assert "They must never decide which rule is the highest-risk rule" in source
 

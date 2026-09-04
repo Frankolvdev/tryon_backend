@@ -11,8 +11,8 @@ def test_active_rules_are_not_excluded_when_module_relation_is_missing_or_inacti
     assert 'module is None or not module.is_active' not in SERVICE
 
 
-def test_limiting_rule_is_selected_by_lowest_desired_profit():
-    assert 'min(diagnostics, key=lambda item: item.desired_profit_usd)' in SERVICE
+def test_limiting_rule_is_selected_by_lowest_desired_profit_per_token():
+    assert 'min(diagnostics, key=lambda item: item.desired_profit_per_token_usd)' in SERVICE
 
 
 def test_diagnostics_allow_unassigned_active_rule():
