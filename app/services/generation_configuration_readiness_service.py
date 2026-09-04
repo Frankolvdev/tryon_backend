@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from decimal import Decimal
 from typing import Any
 
@@ -16,6 +17,8 @@ from app.services.docker_local_runtime_manager_service import docker_local_runti
 from app.services.infrastructure_provider_service import infrastructure_provider_service
 from app.services.provider_pricing_service import provider_pricing_service
 from app.services.pricing_service import TOKEN_VALUE_KEY, pricing_service
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,7 @@ class GenerationConfigurationReadinessService:
 
     @classmethod
     def _fail(cls, missing: list[str]) -> None:
+        logger.error("Generation configuration readiness failed: missing=%s", ", ".join(missing))
         # Missing keys are intentionally not exposed to end users. They remain
         # available in server logs/tests through the exception object.
         exc = AppException(
