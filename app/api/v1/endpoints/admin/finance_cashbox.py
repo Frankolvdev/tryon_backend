@@ -10,6 +10,7 @@ from app.schemas.finance_cashbox import *
 from app.schemas.promotional_credit import *
 from app.services.audit_service import audit_service
 from app.services.finance_cashbox_service import finance_cashbox_service
+from app.services.finance_cashbox_movement_service import finance_cashbox_movement_service
 from app.services.pending_recovery_service import pending_recovery_service
 from app.services.promotional_credit_service import promotional_credit_service
 from app.services.promotional_funding_cycle_service import promotional_funding_cycle_service
@@ -17,6 +18,14 @@ router=APIRouter(prefix='/finances')
 @router.get('/cashbox',response_model=CashboxSummaryResponse)
 def cashbox(db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):
  result=finance_cashbox_service.summary(db); db.commit(); return result
+
+@router.get('/cashbox/movements/{cashbox_key}', response_model=CashboxMovementHistoryResponse)
+def cashbox_movements(cashbox_key:str, db:Session=Depends(get_db), current_admin:User=Depends(admin_guard)):
+ try:
+  result=finance_cashbox_movement_service.history(db,cashbox_key)
+ except ValueError as exc:
+  raise ConflictException(str(exc)) from exc
+ db.commit(); return result
 
 @router.get('/pending-recoveries',response_model=PendingRecoveryListResponse)
 def pending_recoveries(db:Session=Depends(get_db),current_admin:User=Depends(admin_guard)):

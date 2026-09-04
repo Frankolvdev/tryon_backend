@@ -271,3 +271,32 @@ class OperationalExpenseResponse(BaseModel):
     created_by_user_id: int | None
     spent_at: datetime
     created_at: datetime
+
+
+class CashboxMovementResponse(BaseModel):
+    id: str
+    occurred_at: datetime
+    movement_type: str
+    label: str
+    amount_usd: float
+    balance_before_usd: float
+    balance_after_usd: float
+    source_type: str
+    source_id: str | None = None
+    lot_id: int | None = None
+    execution_id: str | None = None
+    provider: str | None = None
+    user_id: int | None = None
+    user_email: str | None = None
+    details: dict = Field(default_factory=dict)
+
+
+class CashboxMovementHistoryResponse(BaseModel):
+    cashbox_key: str
+    label: str
+    mode: str = "history"
+    current_balance_usd: float
+    reconstructed_balance_usd: float
+    reconciled: bool
+    note: str | None = None
+    movements: list[CashboxMovementResponse] = Field(default_factory=list)
