@@ -40,6 +40,7 @@ def test_runtime_marks_provider_failure_no_retry_created():
     assert 'No retry was created.' in RUNTIME
 
 
-def test_generated_modal_function_still_has_zero_retries_and_engine09_cache():
+def test_generated_modal_function_still_has_zero_retries_and_pinned_engine():
     assert '"retries": 0' in BUILDER
-    assert 'runtime-engine-09-disable-dynamic-snapshot-20260903' in BUILDER
+    assert 'DEFAULT_RUNTIME_ENGINE_REF = "c18d48cebdf54a74dda0defeb570ae402a07b3f1"' in BUILDER
+    assert 'runtime-engine-c18d48cebdf5-20260904' in BUILDER

@@ -691,17 +691,34 @@ fi
                     + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER
                 ),
                 (
-                    "RUN echo \"[runtime] Runtime Engine cache buster: ${COMFY_RUNTIME_ENGINE_CACHE_BUSTER}\" "
-                    "&& git clone --filter=blob:none "
+                    "RUN set -eux; "
+                    "echo \"[runtime] Runtime Engine cache buster: ${COMFY_RUNTIME_ENGINE_CACHE_BUSTER}\"; "
+                    "git clone --filter=blob:none "
                     "${COMFY_RUNTIME_ENGINE_GIT_URL} "
                     + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                    + " && git -C "
+                    + "; git -C "
                     + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                    + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
+                    + " checkout \"${COMFY_RUNTIME_ENGINE_GIT_REF}\"; "
+                    "actual_ref=\"$(git -C "
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                    + " rev-parse HEAD)\"; "
+                    "echo \"[runtime] Runtime Engine checkout SHA: ${actual_ref}\"; "
+                    "test \"${actual_ref}\" = \"${COMFY_RUNTIME_ENGINE_GIT_REF}\""
                 ),
                 (
                     "RUN python -m pip install --no-cache-dir "
                     + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                    + " && python -c 'import hashlib; from pathlib import Path; "
+                    "import comfyui_runtime_engine.warmup.residency_guard as rg; "
+                    "src=Path(\""
+                    + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                    + "/src/comfyui_runtime_engine/warmup/residency_guard.py\"); "
+                    "dst=Path(rg.__file__).resolve(); "
+                    "src_sha=hashlib.sha256(src.read_bytes()).hexdigest(); "
+                    "dst_sha=hashlib.sha256(dst.read_bytes()).hexdigest(); "
+                    "print(\"[runtime] Runtime Engine installed guard:\", dst); "
+                    "print(\"[runtime] Runtime Engine guard sha256 source/installed:\", src_sha, dst_sha); "
+                    "assert src_sha == dst_sha, \"installed comfyui_runtime_engine does not match checked-out source\"'"
                 ),
             ])
         modal_runtime_lines.extend([

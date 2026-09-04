@@ -27,11 +27,10 @@ class RuntimeBuilderService:
     DEFAULT_RUNTIME_ENGINE_REPOSITORY = (
         "https://github.com/Frankolvdev/comfyui_runtime_engine.git"
     )
-    DEFAULT_RUNTIME_ENGINE_REF = "main"
-    # Bump deliberado para invalidar exclusivamente la capa Docker que clona
-    # el Runtime Engine. Evita reutilizar una copia antigua de `main` cuando
-    # Modal conserva la cache de la instruccion git clone.
-    DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-09-disable-dynamic-snapshot-20260903"
+    # Pin exacto: cada runtime exportado usa un commit reproducible del Engine.
+    # Cambiar este SHA invalida también la capa Docker de clone/install.
+    DEFAULT_RUNTIME_ENGINE_REF = "c18d48cebdf54a74dda0defeb570ae402a07b3f1"
+    DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-c18d48cebdf5-20260904"
     DEFAULT_RUNTIME_ENGINE_INSTALL_PATH = "/opt/comfyui-runtime-engine"
     DEFAULT_MODAL_RESIDENT_MODELS = (
         "diffusion_models/flux2_dev_fp8mixed (1).safetensors",
@@ -2318,17 +2317,34 @@ class ComfyUIServer:
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER
                     ) if modal_enabled and RuntimeBuilderService.modal_runtime_engine_enabled(config) else "",
                     (
-                        "RUN echo \"[runtime] Runtime Engine cache buster: ${COMFY_RUNTIME_ENGINE_CACHE_BUSTER}\" "
-                        "&& git clone --filter=blob:none "
+                        "RUN set -eux; "
+                        "echo \"[runtime] Runtime Engine cache buster: ${COMFY_RUNTIME_ENGINE_CACHE_BUSTER}\"; "
+                        "git clone --filter=blob:none "
                         "${COMFY_RUNTIME_ENGINE_GIT_URL} "
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                        + " && git -C "
+                        + "; git -C "
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
-                        + " checkout ${COMFY_RUNTIME_ENGINE_GIT_REF}"
+                        + " checkout \"${COMFY_RUNTIME_ENGINE_GIT_REF}\"; "
+                        "actual_ref=\"$(git -C "
+                        + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                        + " rev-parse HEAD)\"; "
+                        "echo \"[runtime] Runtime Engine checkout SHA: ${actual_ref}\"; "
+                        "test \"${actual_ref}\" = \"${COMFY_RUNTIME_ENGINE_GIT_REF}\""
                     ) if modal_enabled and RuntimeBuilderService.modal_runtime_engine_enabled(config) else "",
                     (
                         "RUN python -m pip install --no-cache-dir "
                         + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                        + " && python -c 'import hashlib; from pathlib import Path; "
+                        "import comfyui_runtime_engine.warmup.residency_guard as rg; "
+                        "src=Path(\""
+                        + RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_INSTALL_PATH
+                        + "/src/comfyui_runtime_engine/warmup/residency_guard.py\"); "
+                        "dst=Path(rg.__file__).resolve(); "
+                        "src_sha=hashlib.sha256(src.read_bytes()).hexdigest(); "
+                        "dst_sha=hashlib.sha256(dst.read_bytes()).hexdigest(); "
+                        "print(\"[runtime] Runtime Engine installed guard:\", dst); "
+                        "print(\"[runtime] Runtime Engine guard sha256 source/installed:\", src_sha, dst_sha); "
+                        "assert src_sha == dst_sha, \"installed comfyui_runtime_engine does not match checked-out source\"'"
                     ) if modal_enabled and RuntimeBuilderService.modal_runtime_engine_enabled(config) else "",
                     f"RUN python -m pip install --index-url {config.pytorch_index_url} {RuntimeBuilderService.torch_install_packages(config)}",
                     "RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' /app/ComfyUI/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r /app/ComfyUI/requirements.txt",

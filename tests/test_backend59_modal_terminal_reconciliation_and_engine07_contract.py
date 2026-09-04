@@ -13,9 +13,10 @@ def _function_source(source: str, function_name: str) -> str:
     return source[start:] if not ends else source[start : start + 4 + min(ends)]
 
 
-def test_engine08_cache_buster_is_current():
+def test_runtime_engine_sha_pin_is_current():
     source = Path("app/services/runtime_builder_service.py").read_text(encoding="utf-8")
-    assert 'DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-09-disable-dynamic-snapshot-20260903"' in source
+    assert 'DEFAULT_RUNTIME_ENGINE_REF = "c18d48cebdf54a74dda0defeb570ae402a07b3f1"' in source
+    assert 'DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER = "runtime-engine-c18d48cebdf5-20260904"' in source
 
 
 def test_modal_async_wait_has_no_per_execution_graph_polling():

@@ -14,7 +14,10 @@ def test_modal_dockerfile_gets_runtime_engine_cache_buster():
     assert '"ARG COMFY_RUNTIME_ENGINE_CACHE_BUSTER="' in modal_source
     assert "RuntimeBuilderService.DEFAULT_RUNTIME_ENGINE_CACHE_BUSTER" in modal_source
     assert '[runtime] Runtime Engine cache buster: ${COMFY_RUNTIME_ENGINE_CACHE_BUSTER}' in modal_source
-    assert '"&& git clone --filter=blob:none "' in modal_source
+    assert '"git clone --filter=blob:none "' in modal_source
+    assert 'rev-parse HEAD' in modal_source
+    assert 'Runtime Engine checkout SHA:' in modal_source
+    assert 'Runtime Engine guard sha256 source/installed:' in modal_source
 
 
 def test_patch_is_scoped_to_modal_generator_contract():
