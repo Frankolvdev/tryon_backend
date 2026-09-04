@@ -408,6 +408,17 @@ class DefaultSettingsService:
             # FRONTEND
             SystemSettingCreate(
                 category=SettingCategory.FRONTEND,
+                key="generation_loading_progress_mode",
+                label="Generation loading progress mode",
+                description="Controls generation loaders only: use Backend-reported progress or the elapsed-time/ETA visualization. Upload progress and other loaders are unaffected.",
+                value_type=SettingValueType.STRING,
+                value="backend",
+                default_value="backend",
+                is_public=True,
+                sort_order=5,
+            ),
+            SystemSettingCreate(
+                category=SettingCategory.FRONTEND,
                 key="frontend_base_url",
                 label="Frontend Base URL",
                 description="Public frontend URL.",
