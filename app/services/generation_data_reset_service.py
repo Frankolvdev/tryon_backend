@@ -530,15 +530,22 @@ class GenerationDataResetService:
             # Creative/user-generated records. Admin catalogs and generation-module definitions survive.
             delete_for_users("user_gallery_items")
             delete_for_users("ai_model_profiles")
+            # Preserve the original, user-scoped reset path. This is the historical
+            # behavior for ordinary customer executions and remains the primary delete.
+            delete_for_users("generation_module_executions")
+
+            # Extend (do not replace) the original reset so test/admin executions that
+            # may have no final-user owner are also removed from AI Jobs. Rows already
+            # deleted above simply no longer match here, so counts remain accurate.
             target_execution_ids = [row.id for row in target_generation_rows]
             if target_execution_ids:
                 result = db.execute(
                     text("DELETE FROM generation_module_executions WHERE id = ANY(:ids)"),
                     {"ids": target_execution_ids},
                 )
-                deleted["generation_module_executions"] = int(result.rowcount or 0)
-            else:
-                deleted["generation_module_executions"] = 0
+                deleted["generation_module_executions"] = (
+                    int(deleted.get("generation_module_executions", 0)) + int(result.rowcount or 0)
+                )
             delete_for_users("tryon_jobs")
 
             if delete_storage_files and file_ids and self._table_exists(db, "storage_files"):
