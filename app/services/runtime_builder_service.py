@@ -546,6 +546,15 @@ event_log = "/tmp/comfy-runtime-events.jsonl"
                         "device": "default",
                     },
                 }
+            elif category in {"controlnet", "controlnets"}:
+                # Match the exact loader contract used by the production FLUX.2
+                # workflow so Modal GPU-snapshot warmup can keep this model resident.
+                workflow[loader_id] = {
+                    "class_type": "JLCFlux2ControlNetLoader",
+                    "inputs": {
+                        "controlnet_name": filename,
+                    },
+                }
             else:
                 raise ValueError(
                     "Modelo residente Modal no soportado para warmup automático: "

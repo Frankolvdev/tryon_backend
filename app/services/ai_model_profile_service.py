@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.models.ai_model_profile import AiModelProfile
 from app.models.body_proportion_tool import BodyProportionPreset, BubbleButtPreset
 from app.models.storage_file import StorageFile
+from app.models.generation_module import GenerationModuleOutput
 from app.services.storage_service import storage_service
 from app.services.body_proportion_tool_service import body_proportion_tool_service
 from app.services.bubble_butt_tool_service import bubble_butt_tool_service
@@ -142,6 +143,9 @@ class AiModelProfileService:
         model_id: int,
         execution_id,
         storage_file_id: int,
+        primary_output_id: int | None = None,
+        identity_face_storage_file_id: int | None = None,
+        identity_face_output_id: int | None = None,
     ) -> AiModelProfile:
         row = self.get(db, user_id, model_id)
 
@@ -172,16 +176,69 @@ class AiModelProfileService:
         if storage_file_id not in output_file_ids:
             raise ValueError("The selected image does not belong to this generation execution.")
 
+        def validate_bound_output(output_id: int, file_id: int, label: str) -> GenerationModuleOutput:
+            output = db.get(GenerationModuleOutput, output_id)
+            if not output or output.generation_module_id != execution.module_id:
+                raise ValueError(f"The {label} output does not belong to this generation module.")
+            if str(output.output_type or "").lower() not in {"image", "images"}:
+                raise ValueError(f"The {label} output is not configured as an image output.")
+
+            scoped_ids: set[int] = set()
+
+            def collect_scoped(value) -> None:
+                if isinstance(value, dict):
+                    scoped_file_id = value.get("storage_file_id")
+                    if isinstance(scoped_file_id, int):
+                        scoped_ids.add(scoped_file_id)
+                    for nested in value.values():
+                        collect_scoped(nested)
+                elif isinstance(value, list):
+                    for nested in value:
+                        collect_scoped(nested)
+
+            collect_scoped((execution.outputs or {}).get(output.key))
+            if file_id not in scoped_ids:
+                raise ValueError(
+                    f"The selected {label} image is not produced by module output {output.id} ({output.key})."
+                )
+            return output
+
+        primary_output = None
+        if primary_output_id is not None:
+            primary_output = validate_bound_output(primary_output_id, storage_file_id, "primary model")
+
         stored = db.get(StorageFile, storage_file_id)
         if not stored or stored.user_id != user_id:
             raise LookupError("Generated image not found.")
         if not str(stored.content_type or "").startswith("image/"):
             raise ValueError("The selected generation result is not an image.")
 
+        if (identity_face_storage_file_id is None) != (identity_face_output_id is None):
+            raise ValueError("Identity face file and output ID must be provided together.")
+
+        identity_face = None
+        identity_face_output = None
+        if identity_face_storage_file_id is not None and identity_face_output_id is not None:
+            identity_face_output = validate_bound_output(
+                identity_face_output_id, identity_face_storage_file_id, "identity face"
+            )
+            if primary_output_id is not None and identity_face_output_id == primary_output_id:
+                raise ValueError("Primary model image and identity face must use different outputs.")
+            identity_face = db.get(StorageFile, identity_face_storage_file_id)
+            if not identity_face or identity_face.user_id != user_id:
+                raise LookupError("Generated identity face image not found.")
+            if not str(identity_face.content_type or "").startswith("image/"):
+                raise ValueError("The identity face generation result is not an image.")
+
         draft = dict(row.draft_json or {})
         draft["selected_generation"] = {
             "execution_id": str(execution.id),
             "storage_file_id": stored.id,
+            "primary_output_id": primary_output.id if primary_output else None,
+            "primary_output_key": primary_output.key if primary_output else None,
+            "identity_face_storage_file_id": identity_face.id if identity_face else None,
+            "identity_face_output_id": identity_face_output.id if identity_face_output else None,
+            "identity_face_output_key": identity_face_output.key if identity_face_output else None,
         }
         row.draft_json = draft
         row.stage = "studio"

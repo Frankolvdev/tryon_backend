@@ -50,6 +50,9 @@ class AiModelProfileDraftUpdate(BaseModel):
 class AiModelProfileFinalizeRequest(BaseModel):
     execution_id: UUID
     storage_file_id: int = Field(gt=0)
+    primary_output_id: int | None = Field(default=None, gt=0)
+    identity_face_storage_file_id: int | None = Field(default=None, gt=0)
+    identity_face_output_id: int | None = Field(default=None, gt=0)
 
 class AiModelProfileResponse(BaseModel):
     id: int

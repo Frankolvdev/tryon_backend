@@ -87,6 +87,9 @@ def finalize_model(
                 model_id,
                 data.execution_id,
                 data.storage_file_id,
+                data.primary_output_id,
+                data.identity_face_storage_file_id,
+                data.identity_face_output_id,
             ),
         )
     except Exception as error:
