@@ -158,6 +158,19 @@ class GenerationModuleRuntimeService:
             if pricing is not None and pricing.estimated_duration_source
             else None
         )
+        loading_backend_estimated_duration_seconds = None
+        loading_backend_estimated_duration_source = None
+        loading_backend_historical_samples_used = 0
+        if pricing is not None:
+            (
+                loading_backend_estimated_duration_seconds,
+                loading_backend_estimated_duration_source,
+                loading_backend_historical_samples_used,
+                _loading_backend_confidence,
+                _loading_backend_updated_at,
+            ) = pricing_service.historical_backend_loading_duration(
+                module.id, int(pricing.estimated_duration_seconds or 30)
+            )
         estimated_billable_seconds = (
             float(pricing.estimated_billable_seconds)
             if pricing is not None and pricing.estimated_billable_seconds is not None
@@ -213,6 +226,9 @@ class GenerationModuleRuntimeService:
             provider_endpoint_id=module.endpoint,
             estimated_duration_seconds=estimated_duration_seconds,
             estimated_duration_source=estimated_duration_source,
+            loading_backend_estimated_duration_seconds=loading_backend_estimated_duration_seconds,
+            loading_backend_estimated_duration_source=loading_backend_estimated_duration_source,
+            loading_backend_historical_samples_used=loading_backend_historical_samples_used,
             estimated_billable_seconds=estimated_billable_seconds,
             estimated_infrastructure_cost_usd=estimated_infrastructure_cost_usd,
             estimated_final_price_usd=estimated_final_price_usd,

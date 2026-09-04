@@ -96,6 +96,22 @@ class GenerationDataResetService:
             ).scalars().all()
         ]
 
+    def _target_generation_execution_rows(self, db: Session, user_ids: list[int]):
+        if not self._table_exists(db, "generation_module_executions"):
+            return []
+        rows = db.query(GenerationModuleExecution).all()
+        targets = []
+        final_user_ids = set(user_ids)
+        for row in rows:
+            try:
+                snapshot = json.loads(row.snapshot_json or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                snapshot = {}
+            accounting_mode = str(snapshot.get("accounting_mode") or "commercial").lower()
+            if row.user_id in final_user_ids or accounting_mode in {"admin_test", "owner_private"}:
+                targets.append(row)
+        return targets
+
     def _preserved_account_file_ids(self, db: Session) -> set[int]:
         """Identity-level files survive because user accounts survive."""
         if not self._table_exists(db, "users"):
@@ -142,26 +158,21 @@ class GenerationDataResetService:
         extra safety net for old rows whose ownership may be null. Admin/catalog
         references and account avatars are subtracted at the end.
         """
-        if not user_ids or not self._table_exists(db, "storage_files"):
+        if not self._table_exists(db, "storage_files"):
             return set()
 
-        found: set[int] = {
-            int(value)
-            for value in db.execute(
-                text("SELECT id FROM storage_files WHERE user_id = ANY(:user_ids)"),
-                {"user_ids": user_ids},
-            ).scalars().all()
-        }
+        found: set[int] = set()
+        if user_ids:
+            found.update(
+                int(value)
+                for value in db.execute(
+                    text("SELECT id FROM storage_files WHERE user_id = ANY(:user_ids)"),
+                    {"user_ids": user_ids},
+                ).scalars().all()
+            )
 
-        if self._table_exists(db, "generation_module_executions"):
-            for snapshot in db.execute(
-                text(
-                    "SELECT snapshot_json FROM generation_module_executions "
-                    "WHERE user_id = ANY(:user_ids)"
-                ),
-                {"user_ids": user_ids},
-            ).scalars().all():
-                self._collect_file_ids(snapshot, found)
+        for execution_row in self._target_generation_execution_rows(db, user_ids):
+            self._collect_file_ids(execution_row.snapshot_json, found)
 
         if self._table_exists(db, "ai_model_profiles"):
             for draft in db.execute(
@@ -197,12 +208,10 @@ class GenerationDataResetService:
     def _active_generation_ids(self, db: Session, user_ids: list[int]) -> tuple[list[str], list[int]]:
         active_execution_ids: list[str] = []
         active_tryon_job_ids: list[int] = []
-        if not user_ids:
-            return active_execution_ids, active_tryon_job_ids
         if self._table_exists(db, "generation_module_executions"):
-            rows = db.query(GenerationModuleExecution).filter(GenerationModuleExecution.user_id.in_(user_ids)).all()
+            rows = self._target_generation_execution_rows(db, user_ids)
             active_execution_ids = [r.public_id for r in rows if str(r.status).lower() in ACTIVE_STATUSES]
-        if self._table_exists(db, "tryon_jobs"):
+        if user_ids and self._table_exists(db, "tryon_jobs"):
             rows = db.query(TryOnJob).filter(TryOnJob.user_id.in_(user_ids)).all()
             active_tryon_job_ids = [r.id for r in rows if str(r.status).lower() in ACTIVE_STATUSES]
         return active_execution_ids, active_tryon_job_ids
@@ -226,7 +235,7 @@ class GenerationDataResetService:
         counts = {
             "end_users_targeted": len(user_ids),
             "ai_model_profiles": self._count_for_users(db, "ai_model_profiles", "user_id", user_ids),
-            "generation_module_executions": self._count_for_users(db, "generation_module_executions", "user_id", user_ids),
+            "generation_module_executions": len(self._target_generation_execution_rows(db, user_ids)),
             "legacy_generation_jobs": self._count_for_users(db, "tryon_jobs", "user_id", user_ids),
             "generation_financial_records": self._count_for_users(db, "generation_financial_records", "user_id", user_ids),
             "token_consumption_allocations": self._count_for_users(db, "token_consumption_allocations", "user_id", user_ids),
@@ -392,6 +401,8 @@ class GenerationDataResetService:
             ]
 
         try:
+            target_generation_rows = self._target_generation_execution_rows(db, user_ids)
+            target_generation_public_ids = [row.public_id for row in target_generation_rows]
             lot_ids = ids_for_users("token_value_lots")
             transaction_ids = ids_for_users("token_transactions")
             purchase_ids = ids_for_users("token_purchases")
@@ -491,7 +502,21 @@ class GenerationDataResetService:
 
             # User finance/token ledger dependencies.
             delete_for_users("token_consumption_allocations")
-            delete_for_users("generation_financial_records")
+            if target_generation_public_ids and self._table_exists(db, "generation_financial_records"):
+                result = db.execute(
+                    text("DELETE FROM generation_financial_records WHERE execution_id = ANY(:execution_ids)"),
+                    {"execution_ids": target_generation_public_ids},
+                )
+                deleted["generation_financial_records"] = int(result.rowcount or 0)
+                # Also remove any remaining user-scoped records not tied to a persisted execution.
+                if user_ids:
+                    result = db.execute(
+                        text("DELETE FROM generation_financial_records WHERE user_id = ANY(:user_ids)"),
+                        {"user_ids": user_ids},
+                    )
+                    deleted["generation_financial_records"] += int(result.rowcount or 0)
+            else:
+                delete_for_users("generation_financial_records")
             delete_for_users("billing_invoices")
             delete_for_users("token_purchases")
             delete_for_users("billing_payments")
@@ -505,7 +530,15 @@ class GenerationDataResetService:
             # Creative/user-generated records. Admin catalogs and generation-module definitions survive.
             delete_for_users("user_gallery_items")
             delete_for_users("ai_model_profiles")
-            delete_for_users("generation_module_executions")
+            target_execution_ids = [row.id for row in target_generation_rows]
+            if target_execution_ids:
+                result = db.execute(
+                    text("DELETE FROM generation_module_executions WHERE id = ANY(:ids)"),
+                    {"ids": target_execution_ids},
+                )
+                deleted["generation_module_executions"] = int(result.rowcount or 0)
+            else:
+                deleted["generation_module_executions"] = 0
             delete_for_users("tryon_jobs")
 
             if delete_storage_files and file_ids and self._table_exists(db, "storage_files"):

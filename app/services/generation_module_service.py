@@ -197,6 +197,30 @@ class GenerationModuleService:
     def get_response(self, db: Session, *, module_id: int) -> GenerationModuleResponse:
         return self._response(db, self.get(db, module_id=module_id))
 
+    def _copy_pricing_rule_for_module(self, db: Session, *, source_rule, module_id: int):
+        from app.models.pricing_rule import PricingRule
+        module = generation_module_repository.get_by_id(db, module_id)
+        suffix = f" · {module.name}" if module is not None else " · copia"
+        copy_rule = PricingRule(
+            title=f"{source_rule.title}{suffix}"[:255],
+            operation_type=source_rule.operation_type,
+            item_type=source_rule.item_type,
+            quality_mode=source_rule.quality_mode,
+            generation_module_id=module_id,
+            tokens_cost=source_rule.tokens_cost,
+            estimated_gpu_seconds=source_rule.estimated_gpu_seconds,
+            estimated_gpu_cost_cents=source_rule.estimated_gpu_cost_cents,
+            margin_percent=source_rule.margin_percent,
+            desired_profit_usd=source_rule.desired_profit_usd,
+            desired_profit_per_token_usd=source_rule.desired_profit_per_token_usd,
+            initial_estimated_duration_seconds=source_rule.initial_estimated_duration_seconds,
+            technical_margin_seconds=source_rule.technical_margin_seconds,
+            is_active=source_rule.is_active,
+        )
+        db.add(copy_rule)
+        db.flush()
+        return copy_rule
+
     def _bind_pricing_rule(self, db: Session, *, module_id: int, pricing_rule_id: int | None) -> None:
         module = generation_module_repository.get_by_id(db, module_id)
         for current in pricing_rule_repository.list_for_generation_module(db, module_id):
@@ -213,8 +237,15 @@ class GenerationModuleService:
             selected = pricing_rule_repository.get_by_id(db, pricing_rule_id)
             if not selected:
                 raise NotFoundException("Pricing rule not found.")
-            selected.generation_module_id = module_id
-            db.add(selected)
+            # Pricing rules are module-scoped. Reusing a rule already attached to
+            # another module must COPY it, never move it away from the source module.
+            if selected.generation_module_id not in (None, module_id):
+                selected = self._copy_pricing_rule_for_module(
+                    db, source_rule=selected, module_id=module_id
+                )
+            else:
+                selected.generation_module_id = module_id
+                db.add(selected)
 
     def list_modules(
         self,

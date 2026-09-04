@@ -390,6 +390,53 @@ class PricingService:
                 return milliseconds / 1000.0
         return None
 
+    @staticmethod
+    def _backend_execution_duration_seconds(row) -> float | None:
+        """Return total Backend wall-clock duration used by Backoffice `Tiempo backend`."""
+        try:
+            milliseconds = float(getattr(row, "duration_ms", None) or 0)
+        except (TypeError, ValueError):
+            return None
+        return milliseconds / 1000.0 if milliseconds > 0 else None
+
+    def _historical_duration_from_selector(
+        self, module_id: int, fallback: int, selector
+    ) -> tuple[float, str, int, str, str | None]:
+        rows, _ = generation_module_execution_store_service.list(
+            module_id=module_id, status="completed", skip=0, limit=5,
+        )
+        samples: list[tuple[float, object]] = []
+        for row in rows:
+            if str(getattr(row, "accounting_mode", "commercial") or "commercial") != "commercial":
+                continue
+            duration = selector(row)
+            if duration is not None:
+                samples.append((duration, row))
+        if not samples:
+            return float(fallback), "initial", 0, "low", None
+        durations = [item[0] for item in samples]
+        if len(durations) >= 4:
+            center = median(durations)
+            lower = max(center * 0.5, 0.001)
+            upper = center * 2.0
+            filtered = [item for item in samples if lower <= item[0] <= upper]
+            if filtered:
+                samples = filtered
+        count = len(samples)
+        estimate = max(duration for duration, _row in samples)
+        confidence = "high" if count >= 5 else "medium" if count >= 2 else "low"
+        latest = samples[0][1]
+        latest_at = latest.finished_at or latest.updated_at or latest.created_at
+        return round(estimate, 3), "historical_max", count, confidence, latest_at.isoformat() if latest_at else None
+
+    def historical_backend_loading_duration(
+        self, module_id: int, fallback: int
+    ) -> tuple[float, str, int, str, str | None]:
+        """UI-only ETA based on Backend duration_ms; never used for pricing/costs."""
+        return self._historical_duration_from_selector(
+            module_id, fallback, self._backend_execution_duration_seconds
+        )
+
     def _historical_duration(
         self, module_id: int, fallback: int
     ) -> tuple[float, str, int, str, str | None]:
