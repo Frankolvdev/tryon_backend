@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.db.database import SessionLocal
 from app.schemas.generation_module_runtime import GenerationModuleExecutionLog
 from app.services.generation_job_queue_service import generation_job_queue_service
+from app.services.generation_execution_state_contract import generation_execution_state_contract
 from app.services.ai_engine_settings_service import ai_engine_settings_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.generation_module_service import generation_module_service
@@ -241,7 +242,8 @@ class GenerationJobOrchestratorService:
         # Queued work remains Redis-owned. SADD dedupe keeps repeated startup
         # recovery idempotent if the queue already contains the execution.
         for item in self._iter_persisted(status="queued"):
-            generation_job_queue_service.enqueue(item.id, engine=item.engine)
+            if generation_execution_state_contract.is_dispatchable(item):
+                generation_job_queue_service.enqueue(item.id, engine=item.engine)
 
         # Snapshot running rows before mutating any state. This avoids pagination
         # skips if already-completed Modal calls finalize immediately during startup.
@@ -560,36 +562,6 @@ class GenerationJobOrchestratorService:
                     return
                 await asyncio.sleep(min(10.0, float(attempt)))
 
-    async def _reconcile_modal_terminal_failures(self, execution_ids: list[UUID]) -> None:
-        """Global bounded safety pass for Modal terminal child/init failures."""
-        concurrency = max(
-            1,
-            int(getattr(settings, "GENERATION_MODAL_RECONCILE_CONCURRENCY", 16)),
-        )
-        semaphore = asyncio.Semaphore(concurrency)
-
-        async def inspect(execution_id: UUID) -> None:
-            async with semaphore:
-                try:
-                    error = await self._runtime.reconcile_modal_terminal_failure_async(
-                        execution_id
-                    )
-                    if error is None:
-                        return
-                    self._release_modal_active(execution_id)
-                    await self._finalize_modal_with_retry(execution_id, error=error)
-                except asyncio.CancelledError:
-                    raise
-                except BaseException as exc:
-                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                        raise
-                    logger.exception(
-                        "Modal terminal-state reconciliation failed for %s",
-                        execution_id,
-                    )
-
-        await asyncio.gather(*(inspect(eid) for eid in execution_ids))
-
     def _modal_reconcile_loop(self) -> None:
         """Low-frequency safety net; never controls normal result latency."""
         interval = max(
@@ -598,38 +570,20 @@ class GenerationJobOrchestratorService:
         )
         while not self._stop.wait(interval):
             try:
-                items = [
-                    item
-                    for item in self._iter_persisted(
-                        status="running",
-                        engine=GenerationExecutionEngine.MODAL.value,
-                    )
-                    if item.provider_job_id
-                ]
-
-                # First preserve the original recovery behavior: only executions
-                # that lost their supervisor are reattached to the SAME call_id.
-                for item in items:
+                for item in self._iter_persisted(
+                    status="running",
+                    engine=GenerationExecutionEngine.MODAL.value,
+                ):
+                    if not item.provider_job_id:
+                        continue
                     with self._modal_watch_lock:
                         future = self._modal_watch_futures.get(item.id)
                         watched = future is not None and not future.done()
-                    if not watched:
-                        self._runtime.attach_persisted(item)
-                        self._register_modal_active(item.id)
-                        self._schedule_modal_supervision(item.id)
-
-                # Then run one GLOBAL low-frequency, bounded safety pass across the
-                # active calls. This catches INIT_FAILURE/FAILURE in child call-graph
-                # nodes even when get.aio() is still waiting on the parent. It is
-                # deliberately not a per-execution polling loop.
-                loop = self._modal_loop
-                if items and loop is not None and loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self._reconcile_modal_terminal_failures(
-                            [item.id for item in items]
-                        ),
-                        loop,
-                    )
+                    if watched:
+                        continue
+                    self._runtime.attach_persisted(item)
+                    self._register_modal_active(item.id)
+                    self._schedule_modal_supervision(item.id)
             except Exception:
                 logger.exception("Modal supervision reconciliation failed; next pass will retry.")
 
