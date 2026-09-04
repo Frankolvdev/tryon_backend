@@ -19,6 +19,7 @@ class CashboxSummaryResponse(BaseModel):
     blocked_profit_usd: float
     released_commercial_profit_usd: float
     rounding_and_operational_surplus_usd: float
+    profitability_surplus_usd: float = 0.0
     expiration_releases_usd: float
     withdrawals_usd: float
     infrastructure_cash_available_usd: float = 0.0
@@ -85,6 +86,9 @@ class TokenBagResponse(BaseModel):
     commercial_profit_total_usd: float
     commercial_profit_released_usd: float
     realized_extra_profit_usd: float
+    profitability_surplus_usd: float = 0.0
+    profitability_surplus_total_usd: float = 0.0
+    provider_profitability_credit_usd: float = 0.0
     total_available_from_bag_usd: float
     protected_infrastructure_remaining_usd: float
     infrastructure_used_usd: float
@@ -123,6 +127,7 @@ class TokenBagGenerationResponse(BaseModel):
     created_at: datetime
     infrastructure_cost_usd: float
     company_profit_usd: float
+    profitability_surplus_usd: float = 0.0
     rounding_surplus_usd: float
     status: str | None = None
 

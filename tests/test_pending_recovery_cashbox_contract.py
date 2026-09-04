@@ -28,6 +28,6 @@ def test_pending_recovery_separates_exact_infrastructure_from_estimated_profit()
 def test_cashbox_exposes_pending_recovery_without_changing_available_profit_formula():
     source = read("app/services/finance_cashbox_service.py")
     assert "pending_recovery_service.list_pending" in source
-    # Existing green-cash formula remains intact.
-    assert "available=max(D('0'),released+rounding+expir-D(str(withdrawals)))" in source
+    # Green cash includes only confirmed/physically available profit components.
+    assert "available=max(D('0'),released+rounding+profitability_surplus+expir-D(str(withdrawals)))" in source
     assert "pending_recovery_infrastructure_usd" in source

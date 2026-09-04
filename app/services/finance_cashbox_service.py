@@ -32,6 +32,7 @@ from app.services.infrastructure_cashbox_accounting import (
 from app.services.pending_recovery_service import pending_recovery_service
 from app.services.promotional_credit_service import promotional_credit_service
 from app.services.operational_cashbox_service import operational_cashbox_service
+from app.services.profitability_surplus_accounting import calculate_profitability_surplus
 
 D=Decimal
 class FinanceCashboxService:
@@ -372,25 +373,39 @@ class FinanceCashboxService:
             if rec:
                 try: breakdown=json.loads(rec.breakdown_json or '{}')
                 except Exception: breakdown={}
+            raw_parts=breakdown.get('token_bags_used') or []
+            rounding_total=D(str(
+                breakdown.get('rounding_surplus_for_company_usd')
+                or breakdown.get('profit_rounding_surplus_usd')
+                or 0
+            ))
+            annotated_parts, _profitability_total = calculate_profitability_surplus(
+                allocations=raw_parts,
+                desired_profit_per_token_usd=breakdown.get('desired_profit_per_token_usd'),
+                infrastructure_cost_usd=D(str(rec.infrastructure_cost_usd or 0)) if rec else D('0'),
+                rounding_surplus_usd=rounding_total,
+                profit_applied=bool(breakdown.get('profit_applied', True)),
+            )
             bag_parts=[
-                x for x in (breakdown.get('token_bags_used') or [])
+                x for x in annotated_parts
                 if int(x.get('token_bag_id') or 0)==lot.id
             ]
             if bag_parts:
                 tokens=sum(max(int(x.get('tokens_used') or x.get('tokens') or 0),0) for x in bag_parts)
                 capacity=sum(D(str(x.get('infrastructure_capacity_from_tokens_usd') or x.get('infrastructure_capacity_used_usd') or 0)) for x in bag_parts)
                 commercial=sum(D(str(x.get('company_profit_usd') or 0)) for x in bag_parts)
-                all_parts=breakdown.get('token_bags_used') or []
-                total_capacity=sum(D(str(x.get('infrastructure_capacity_from_tokens_usd') or x.get('infrastructure_capacity_used_usd') or 0)) for x in all_parts)
+                profitability=sum(D(str(x.get('profitability_surplus_usd') or 0)) for x in bag_parts)
+                total_capacity=sum(D(str(x.get('infrastructure_capacity_from_tokens_usd') or x.get('infrastructure_capacity_used_usd') or 0)) for x in annotated_parts)
                 share=(capacity/total_capacity) if total_capacity>0 else D('0')
                 infra=D(str(rec.infrastructure_cost_usd or 0))*share if rec else D('0')
-                rounding=D(str(breakdown.get('rounding_surplus_for_company_usd') or 0))*share
+                rounding=rounding_total*share
             else:
                 # Legacy fallback: consolidate net allocations for the execution.
                 tokens=sum(max(int(a.tokens_allocated or 0)-int(a.tokens_reversed or 0),0) for a in item['allocations'])
                 snap=token_value_ledger_service._snapshot_for_lot(lot)
                 capacity=snap['infrastructure_capacity_per_token']*tokens
                 commercial=snap['effective_profit_per_token']*tokens
+                profitability=D('0')
                 infra=D('0'); rounding=D('0')
                 if rec and tokens>0:
                     infra=D(str(rec.infrastructure_cost_usd or 0))
@@ -403,8 +418,9 @@ class FinanceCashboxService:
                 'created_at':getattr(rec,'created_at',None) or item['created_at'],
                 'infrastructure_cost_usd':float(infra),
                 'commercial_profit_usd':float(commercial),
+                'profitability_surplus_usd':float(profitability),
                 'rounding_surplus_usd':float(rounding),
-                'company_profit_usd':float(commercial+rounding),
+                'company_profit_usd':float(commercial+profitability+rounding),
                 'status':rec.status if rec else None,
                 'provider': str(breakdown.get('provider') or 'unknown').lower(),
             })
@@ -418,6 +434,7 @@ class FinanceCashboxService:
         consumed=max(int(lot.original_tokens or 0)-int(lot.remaining_tokens or 0),historical_consumed,0)
         infra_used=sum(D(str(x['infrastructure_cost_usd'])) for x in generation_rows)
         rounding=sum(D(str(x['rounding_surplus_usd'])) for x in generation_rows)
+        profitability_surplus=sum(D(str(x.get('profitability_surplus_usd') or 0)) for x in generation_rows)
         total_profit=snap['effective_profit_per_token']*lot.original_tokens
         # Repair only the unmistakable historical double-count signature: the
         # expiration bucket can never exceed the complete AI reserve of the bag.
@@ -453,6 +470,13 @@ class FinanceCashboxService:
             max(D(str(funding_state['provider_excess_credit_usd'])),D('0')),
         )
         cash_rounding=max(rounding-provider_rounding_credit,D('0'))
+        provider_profitability_credit=min(
+            max(profitability_surplus,D('0')),
+            max(D(str(funding_state['provider_excess_credit_usd']))-provider_rounding_credit,D('0')),
+        )
+        cash_profitability_surplus=max(
+            profitability_surplus-provider_profitability_credit,D('0')
+        )
         released=D(str(lot.released_commercial_profit_usd or 0))
         purchase=None
         try: purchase=db.get(TokenPurchase,int(lot.reference_id)) if lot.source in ('free_token_purchase','token_package','subscription','plan') and lot.reference_id else None
@@ -478,11 +502,11 @@ class FinanceCashboxService:
             )
         )
         realized_extra=cash_rounding
-        total_available=released+realized_extra+D(str(lot.released_expiration_usd or 0))
+        total_available=released+realized_extra+cash_profitability_surplus+D(str(lot.released_expiration_usd or 0))
         discount=D(str(m.get('profit_discount_percent') or 0))
         benefit_source=m.get('benefit_source') or ('coupon' if m.get('coupon_code') else ('plan' if m.get('plan_name') else ('package' if package_name else None)))
         benefit_label=m.get('benefit_label') or m.get('coupon_code') or m.get('plan_name') or package_name
-        return {'id':lot.id,'user_id':lot.user_id,'user_email':user_email,'source':lot.source,'source_label':m.get('source_label') or m.get('plan_name') or package_name or lot.source,'reference_id':lot.reference_id,'status':lot.status,'original_tokens':lot.original_tokens,'remaining_tokens':lot.remaining_tokens,'consumed_tokens':consumed,'amount_paid_usd':float(lot.amount_paid_usd or 0),'effective_token_value_usd':float(snap['paid_value_per_token']),'normal_profit_per_token_usd':float(snap['normal_profit_per_token']),'effective_profit_per_token_usd':float(snap['effective_profit_per_token']),'infrastructure_capacity_per_token_usd':float(snap['infrastructure_capacity_per_token']),'operational_reserve_per_token_usd':float(snap.get('operational_reserve_per_token') or 0),'operational_reserve_total_usd':float(D(str(snap.get('operational_reserve_per_token') or 0))*max(int(lot.original_tokens or 0),0)),'operational_reserve_released_usd':float(getattr(lot,'released_operational_reserve_usd',0) or 0),'commercial_profit_total_usd':float(total_profit),'commercial_profit_released_usd':float(released),'realized_extra_profit_usd':float(realized_extra),'total_available_from_bag_usd':float(total_available),'protected_infrastructure_remaining_usd':float(protected),'infrastructure_used_usd':float(infra_used),'infrastructure_funded_usd':float(funding_state['funded_usd']),'infrastructure_unfunded_usd':float(funding_state['unfunded_usd']),'provider_credit_released_usd':float(funding_state['provider_credit_released_usd']),'rounding_surplus_usd':float(cash_rounding),'rounding_surplus_total_usd':float(max(rounding,D('0'))),'provider_rounding_credit_usd':float(provider_rounding_credit),'expiration_release_usd':float(lot.released_expiration_usd or 0),'coupon_code':m.get('coupon_code'),'plan_name':m.get('plan_name'),'package_name':package_name,'benefit_source':benefit_source,'benefit_label':benefit_label,'profit_discount_percent':float(discount),'snapshot_version':int(m.get('financial_snapshot_version')) if str(m.get('financial_snapshot_version') or '').isdigit() else None,'snapshot_source':snap.get('snapshot_source'),'payment_status':str(pstatus) if pstatus else None,'refundable':refundable,'refund_reason':reason,'activated_at':lot.activated_at,'expires_at':lot.expires_at,'expired_at':lot.expired_at,'created_at':lot.created_at}
+        return {'id':lot.id,'user_id':lot.user_id,'user_email':user_email,'source':lot.source,'source_label':m.get('source_label') or m.get('plan_name') or package_name or lot.source,'reference_id':lot.reference_id,'status':lot.status,'original_tokens':lot.original_tokens,'remaining_tokens':lot.remaining_tokens,'consumed_tokens':consumed,'amount_paid_usd':float(lot.amount_paid_usd or 0),'effective_token_value_usd':float(snap['paid_value_per_token']),'normal_profit_per_token_usd':float(snap['normal_profit_per_token']),'effective_profit_per_token_usd':float(snap['effective_profit_per_token']),'infrastructure_capacity_per_token_usd':float(snap['infrastructure_capacity_per_token']),'operational_reserve_per_token_usd':float(snap.get('operational_reserve_per_token') or 0),'operational_reserve_total_usd':float(D(str(snap.get('operational_reserve_per_token') or 0))*max(int(lot.original_tokens or 0),0)),'operational_reserve_released_usd':float(getattr(lot,'released_operational_reserve_usd',0) or 0),'commercial_profit_total_usd':float(total_profit),'commercial_profit_released_usd':float(released),'realized_extra_profit_usd':float(realized_extra),'profitability_surplus_usd':float(cash_profitability_surplus),'profitability_surplus_total_usd':float(max(profitability_surplus,D('0'))),'provider_profitability_credit_usd':float(provider_profitability_credit),'total_available_from_bag_usd':float(total_available),'protected_infrastructure_remaining_usd':float(protected),'infrastructure_used_usd':float(infra_used),'infrastructure_funded_usd':float(funding_state['funded_usd']),'infrastructure_unfunded_usd':float(funding_state['unfunded_usd']),'provider_credit_released_usd':float(funding_state['provider_credit_released_usd']),'rounding_surplus_usd':float(cash_rounding),'rounding_surplus_total_usd':float(max(rounding,D('0'))),'provider_rounding_credit_usd':float(provider_rounding_credit),'expiration_release_usd':float(lot.released_expiration_usd or 0),'coupon_code':m.get('coupon_code'),'plan_name':m.get('plan_name'),'package_name':package_name,'benefit_source':benefit_source,'benefit_label':benefit_label,'profit_discount_percent':float(discount),'snapshot_version':int(m.get('financial_snapshot_version')) if str(m.get('financial_snapshot_version') or '').isdigit() else None,'snapshot_source':snap.get('snapshot_source'),'payment_status':str(pstatus) if pstatus else None,'refundable':refundable,'refund_reason':reason,'activated_at':lot.activated_at,'expires_at':lot.expires_at,'expired_at':lot.expired_at,'created_at':lot.created_at}
     def list_bags(self,db,*,status=None,user_id=None,skip=0,limit=100):
         self.ensure_expirations(db); q=select(TokenValueLot,User.email).join(User,User.id==TokenValueLot.user_id)
         if status:q=q.where(TokenValueLot.status==status)
@@ -699,9 +723,10 @@ class FinanceCashboxService:
         protected=sum(D(str(x['protected_infrastructure_remaining_usd'])) for x in values)
         blocked=sum(D(str(x['commercial_profit_total_usd'])) for x in values if x['status']=='new')
         rounding=sum(D(str(x['rounding_surplus_usd'])) for x in values)
+        profitability_surplus=sum(D(str(x.get('profitability_surplus_usd') or 0)) for x in values)
         expir=sum(D(str(x['expiration_release_usd'])) for x in values)
         withdrawals=db.execute(select(func.coalesce(func.sum(FinanceWithdrawal.amount_usd),0))).scalar_one()
-        available=max(D('0'),released+rounding+expir-D(str(withdrawals)))
+        available=max(D('0'),released+rounding+profitability_surplus+expir-D(str(withdrawals)))
 
         infrastructure_cash_available=sum(
             D(str(x['infrastructure_unfunded_usd'])) for x in values
@@ -736,6 +761,7 @@ class FinanceCashboxService:
             'blocked_profit_usd':float(blocked),
             'released_commercial_profit_usd':float(released),
             'rounding_and_operational_surplus_usd':float(rounding),
+            'profitability_surplus_usd':float(profitability_surplus),
             'expiration_releases_usd':float(expir),
             'withdrawals_usd':float(withdrawals),
             'infrastructure_cash_available_usd':float(infrastructure_cash_available),

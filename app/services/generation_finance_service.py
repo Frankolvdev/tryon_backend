@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.models.generation_financial_record import GenerationFinancialRecord
 from app.services.token_value_ledger_service import token_value_ledger_service
+from app.services.profitability_surplus_accounting import calculate_profitability_surplus
 
 class GenerationFinanceService:
     def finalize(self,db:Session,*,execution_id:str,module_id:int|None,module_key:str,user_id:int|None,status:str,infrastructure_cost_usd:float|None,billing_breakdown:dict)->GenerationFinancialRecord:
@@ -28,7 +29,16 @@ class GenerationFinanceService:
                 bag["benefit_given_usd"]=0.0
                 bag["company_profit_usd"]=0.0
         rounding_surplus=max(float(billing_breakdown.get("profit_rounding_surplus_usd") or 0),0.0)
-        company_profit=profit_after_benefits+rounding_surplus
+        annotated_allocations, profitability_surplus = calculate_profitability_surplus(
+            allocations=summary.get("allocations") or [],
+            desired_profit_per_token_usd=billing_breakdown.get("desired_profit_per_token_usd"),
+            infrastructure_cost_usd=infra,
+            rounding_surplus_usd=rounding_surplus,
+            profit_applied=profit_applied,
+        )
+        summary["allocations"] = annotated_allocations
+        profitability_surplus_float=float(profitability_surplus)
+        company_profit=profit_after_benefits+profitability_surplus_float+rounding_surplus
         economic_total=infra+company_profit
         margin=(company_profit/economic_total*100) if economic_total>0 else None
         payload={
@@ -39,6 +49,7 @@ class GenerationFinanceService:
             "profit_without_benefits_usd":round(normal_profit,6),
             "benefit_given_to_customer_usd":round(benefit,6),
             "profit_after_customer_benefits_usd":round(profit_after_benefits,6),
+            "profitability_surplus_for_company_usd":round(profitability_surplus_float,6),
             "rounding_surplus_for_company_usd":round(rounding_surplus,6),
             "company_profit_usd":round(company_profit,6),
             "economic_total_for_generation_usd":round(economic_total,6),
@@ -94,7 +105,16 @@ class GenerationFinanceService:
             ),
             0.0,
         )
-        company_profit = profit_after_benefits + rounding_surplus
+        annotated_allocations, profitability_surplus = calculate_profitability_surplus(
+            allocations=summary.get("allocations") or [],
+            desired_profit_per_token_usd=breakdown.get("desired_profit_per_token_usd"),
+            infrastructure_cost_usd=infra,
+            rounding_surplus_usd=rounding_surplus,
+            profit_applied=profit_applied,
+        )
+        summary["allocations"] = annotated_allocations
+        profitability_surplus_float = float(profitability_surplus)
+        company_profit = profit_after_benefits + profitability_surplus_float + rounding_surplus
         economic_total = infra + company_profit
         margin = company_profit / economic_total * 100 if economic_total > 0 else None
 
@@ -113,6 +133,7 @@ class GenerationFinanceService:
                 "profit_after_customer_benefits_usd": round(
                     profit_after_benefits, 6
                 ),
+                "profitability_surplus_for_company_usd": round(profitability_surplus_float, 6),
                 "rounding_surplus_for_company_usd": round(rounding_surplus, 6),
                 "company_profit_usd": round(company_profit, 6),
                 "economic_total_for_generation_usd": round(economic_total, 6),
