@@ -61,7 +61,8 @@ def test_manual_existing_funds_remain_company_owned_and_never_reset():
 def test_reset_includes_new_cycle_tables_before_fund_parent():
     reset = read("app/services/generation_data_reset_service.py")
     assert 'delete_all("promotional_funding_cycles")' in reset
-    assert 'delete_all("promotional_funding_sources")' in reset
+    assert 'delete_all("promotional_funding_sources")' not in reset
+    assert '"promotional_funding_sources_preserved": self._count(db, "promotional_funding_sources")' in reset
     assert reset.index('delete_all("promotional_funding_cycles")') < reset.index('delete_all("promotional_credit_funds")')
 
 

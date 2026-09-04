@@ -26,21 +26,21 @@ def test_execution_surplus_keeps_database_idempotency_guard_and_row_lock():
     assert "db.flush()" in service
 
 
-def test_reset_removes_all_promotional_runtime_financial_rows_before_parents():
+def test_reset_removes_promotional_runtime_rows_but_preserves_source_configuration():
     reset = read("app/services/generation_data_reset_service.py")
     ordered = [
         'delete_all("promotional_credit_returns")',
         'delete_all("promotional_token_grants")',
         'delete_all("promotional_funding_cycles")',
-        'delete_all("promotional_funding_sources")',
         'delete_all("promotional_credit_funds")',
     ]
     positions = [reset.index(item) for item in ordered]
     assert positions == sorted(positions)
+    assert 'delete_all("promotional_funding_sources")' not in reset
     assert '"promotional_credit_returns": self._count(db, "promotional_credit_returns")' in reset
     assert '"promotional_token_grants": self._count(db, "promotional_token_grants")' in reset
     assert '"promotional_funding_cycles": self._count(db, "promotional_funding_cycles")' in reset
-    assert '"promotional_funding_sources": self._count(db, "promotional_funding_sources")' in reset
+    assert '"promotional_funding_sources_preserved": self._count(db, "promotional_funding_sources")' in reset
     assert '"promotional_credit_funds": self._count(db, "promotional_credit_funds")' in reset
 
 

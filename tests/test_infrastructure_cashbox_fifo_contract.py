@@ -133,7 +133,7 @@ def test_full_test_reset_removes_new_ledgers_before_token_bags():
     release_pos = reset_service.index('delete_all("infrastructure_provider_credit_releases")')
     allocation_pos = reset_service.index('delete_all("infrastructure_funding_allocations")')
     movement_pos = reset_service.index('delete_all("infrastructure_funding_movements")')
-    lot_pos = reset_service.index('delete_all("token_value_lots")')
+    lot_pos = reset_service.index('delete_for_users("token_value_lots")')
     assert release_pos < allocation_pos < movement_pos < lot_pos
 
 

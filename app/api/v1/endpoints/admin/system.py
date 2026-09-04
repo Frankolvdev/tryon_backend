@@ -144,7 +144,7 @@ def reset_generation_data(
     audit_service.create_log(
         db, actor_user_id=current_admin.id, action="admin_generation_data_reset",
         entity_type="system_maintenance", entity_id=None,
-        description="Admin reset all test commercial activity, generation data, tokens, payments, subscriptions, and related storage files.",
+        description="Admin reset end-user test activity while preserving accounts and platform/admin configuration.",
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )

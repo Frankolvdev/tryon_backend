@@ -8,14 +8,14 @@ def read(rel: str) -> str:
 def test_reset_preview_counts_recurring_promotional_cycle_tables():
     service = read("app/services/generation_data_reset_service.py")
     assert '"promotional_funding_cycles": self._count(db, "promotional_funding_cycles")' in service
-    assert '"promotional_funding_sources": self._count(db, "promotional_funding_sources")' in service
+    assert '"promotional_funding_sources_preserved": self._count(db, "promotional_funding_sources")' in service
 
-def test_reset_deletes_cycles_before_sources_and_funds():
+def test_reset_deletes_generated_cycles_before_funds_but_preserves_sources():
     service = read("app/services/generation_data_reset_service.py")
     cycle = service.index('delete_all("promotional_funding_cycles")')
-    source = service.index('delete_all("promotional_funding_sources")')
     fund = service.index('delete_all("promotional_credit_funds")')
-    assert cycle < source < fund
+    assert cycle < fund
+    assert 'delete_all("promotional_funding_sources")' not in service
 
 def test_reset_still_preserves_users_and_account_files():
     service = read("app/services/generation_data_reset_service.py")
