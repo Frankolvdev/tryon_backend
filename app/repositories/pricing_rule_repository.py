@@ -29,6 +29,19 @@ class PricingRuleRepository(BaseRepository[PricingRule]):
         return db.execute(statement).scalars().first()
 
     def get_for_generation_module(self, db: Session, module_id: int) -> PricingRule | None:
+        # Generation modules own the assignment; pricing rules are reusable catalog
+        # entries and may be referenced by any number of modules.
+        from app.models.generation_module import GenerationModule
+
+        module = db.get(GenerationModule, module_id)
+        if module is None:
+            return None
+        pricing_rule_id = getattr(module, "pricing_rule_id", None)
+        if pricing_rule_id is not None:
+            return db.get(PricingRule, pricing_rule_id)
+
+        # Transitional compatibility for databases that have not run the reusable
+        # pricing-rule migration yet.
         statement = (
             select(PricingRule)
             .where(PricingRule.generation_module_id == module_id)
@@ -37,8 +50,8 @@ class PricingRuleRepository(BaseRepository[PricingRule]):
         return db.execute(statement).scalars().first()
 
     def list_for_generation_module(self, db: Session, module_id: int) -> list[PricingRule]:
-        statement = select(PricingRule).where(PricingRule.generation_module_id == module_id)
-        return list(db.execute(statement).scalars().all())
+        rule = self.get_for_generation_module(db, module_id)
+        return [rule] if rule is not None else []
 
     def list_all(self, db: Session) -> list[PricingRule]:
         statement = select(PricingRule).order_by(PricingRule.id.desc())

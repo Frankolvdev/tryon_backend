@@ -88,8 +88,6 @@ class GenerationConfigurationReadinessService:
             else:
                 if not rule.is_active:
                     missing.append("pricing_rule.active")
-                if rule.generation_module_id != module.id:
-                    missing.append("pricing_rule.generation_module_id")
                 if not self._positive(rule.initial_estimated_duration_seconds):
                     missing.append("pricing_rule.initial_estimated_duration_seconds")
                 if int(rule.technical_margin_seconds or 0) < 0:

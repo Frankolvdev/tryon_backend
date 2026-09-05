@@ -33,6 +33,9 @@ class GenerationModule(Base):
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    pricing_rule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("pricing_rules.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utc_now, nullable=False, index=True
     )

@@ -351,11 +351,17 @@ class PricingService:
         rule = pricing_rule_repository.get_by_id(db, rule_id)
         if not rule:
             raise NotFoundException("Pricing rule not found.")
-        if rule.generation_module_id is not None:
-            module = db.get(GenerationModule, rule.generation_module_id)
-            if module is not None:
-                module.is_active = False
-                db.add(module)
+        # A reusable pricing rule can be referenced by multiple generation
+        # modules. Deleting it safely detaches/deactivates every dependent module.
+        modules = (
+            db.query(GenerationModule)
+            .filter(GenerationModule.pricing_rule_id == rule.id)
+            .all()
+        )
+        for module in modules:
+            module.pricing_rule_id = None
+            module.is_active = False
+            db.add(module)
         db.delete(rule)
         db.commit()
 
@@ -485,11 +491,15 @@ class PricingService:
         settings = ai_engine_settings_service.get(db)
         token_value = self._token_value(db)
         responses: list[AppliedPricingRuleResponse] = []
-        for rule in pricing_rule_repository.list_all(db):
-            if rule.generation_module_id is None:
-                continue
-            module = db.get(GenerationModule, rule.generation_module_id)
-            if module is None:
+        modules = (
+            db.query(GenerationModule)
+            .filter(GenerationModule.pricing_rule_id.is_not(None))
+            .order_by(GenerationModule.id.asc())
+            .all()
+        )
+        for module in modules:
+            rule = db.get(PricingRule, module.pricing_rule_id)
+            if rule is None:
                 continue
             provider = str(module.default_execution_engine or "").lower()
             if provider == "modal":
