@@ -2036,8 +2036,65 @@ class ComfyUIServer:
             status=result.get("status") if isinstance(result, dict) else None,
         )
         _emit_model_diagnostics(payload, phase="after_pipeline", execution_id=execution_id)
+        modal_post_runtime_finished_at = datetime.now(timezone.utc)
+
+        def _transport_payload_stats(value):
+            stats = {
+                "generation_file_occurrences": 0,
+                "base64_character_count": 0,
+                "declared_file_bytes": 0,
+            }
+            stack = [value]
+            while stack:
+                current = stack.pop()
+                if isinstance(current, dict):
+                    if current.get("__generation_file__"):
+                        stats["generation_file_occurrences"] += 1
+                        try:
+                            stats["declared_file_bytes"] += int(current.get("size_bytes") or 0)
+                        except (TypeError, ValueError):
+                            pass
+                        data = current.get("data")
+                        if isinstance(data, str):
+                            marker = ";base64,"
+                            payload_part = data.split(marker, 1)[1] if marker in data else data
+                            stats["base64_character_count"] += len(payload_part)
+                    stack.extend(current.values())
+                elif isinstance(current, (list, tuple)):
+                    stack.extend(current)
+            return stats
+
+        return_stats = _transport_payload_stats(result)
+        modal_pipeline_returning_at = datetime.now(timezone.utc)
         if isinstance(result, dict) and isinstance(result.get("metrics"), dict):
-            result["metrics"]["modal_pipeline_returning_at"] = datetime.now(timezone.utc).isoformat()
+            metrics = result["metrics"]
+            metrics["modal_post_runtime_finished_at"] = modal_post_runtime_finished_at.isoformat()
+            metrics["modal_pipeline_returning_at"] = modal_pipeline_returning_at.isoformat()
+            metrics["modal_post_runtime_ms"] = max(
+                0,
+                int((modal_post_runtime_finished_at - modal_runtime_execute_finished_at).total_seconds() * 1000),
+            )
+            metrics["modal_return_payload_generation_file_occurrences"] = return_stats["generation_file_occurrences"]
+            metrics["modal_return_payload_declared_file_bytes"] = return_stats["declared_file_bytes"]
+            metrics["modal_return_payload_base64_character_count"] = return_stats["base64_character_count"]
+            metrics["modal_return_payload_base64_approx_bytes"] = return_stats["base64_character_count"]
+        _modal_trace(
+            "return_payload_ready",
+            role="pipeline_server",
+            execution_id=execution_id,
+            post_runtime_ms=(
+                max(0, int((modal_post_runtime_finished_at - modal_runtime_execute_finished_at).total_seconds() * 1000))
+            ),
+            generation_file_occurrences=return_stats["generation_file_occurrences"],
+            declared_file_bytes=return_stats["declared_file_bytes"],
+            base64_character_count=return_stats["base64_character_count"],
+        )
+        _modal_trace(
+            "function_return_start",
+            role="pipeline_server",
+            execution_id=execution_id,
+            timestamp_iso=modal_pipeline_returning_at.isoformat(),
+        )
         return result
 
     @modal.asgi_app(requires_proxy_auth=False)

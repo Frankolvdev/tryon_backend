@@ -1547,7 +1547,13 @@ class GenerationModuleRuntimeService:
                         "modal_non_runtime_overhead_ms": non_runtime_overhead_ms,
                         "modal_pipeline_started_at": runtime_metrics.get("modal_pipeline_started_at"),
                         "modal_runtime_execute_finished_at": runtime_metrics.get("modal_runtime_execute_finished_at"),
+                        "modal_post_runtime_finished_at": runtime_metrics.get("modal_post_runtime_finished_at"),
                         "modal_pipeline_returning_at": runtime_metrics.get("modal_pipeline_returning_at"),
+                        "modal_post_runtime_ms": runtime_metrics.get("modal_post_runtime_ms"),
+                        "modal_return_payload_generation_file_occurrences": runtime_metrics.get("modal_return_payload_generation_file_occurrences"),
+                        "modal_return_payload_declared_file_bytes": runtime_metrics.get("modal_return_payload_declared_file_bytes"),
+                        "modal_return_payload_base64_character_count": runtime_metrics.get("modal_return_payload_base64_character_count"),
+                        "modal_return_payload_base64_approx_bytes": runtime_metrics.get("modal_return_payload_base64_approx_bytes"),
                     })
                     if runtime_started_at and metric_item.provider_submitted_at:
                         try:
