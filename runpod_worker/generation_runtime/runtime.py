@@ -4,6 +4,7 @@ import base64
 import copy
 import io
 import json
+import hashlib
 import os
 import tempfile
 import time
@@ -168,7 +169,7 @@ class GenerationRuntime:
                 GenerationRuntimeContext.merge_step_outputs(context, key, outputs)
                 duration_ms = int((time.monotonic() - started) * 1000)
                 metrics.add_step(step_key=key, step_type=step_type, duration_ms=duration_ms, status="completed")
-                states.append({"step_key": key, "step_type": step_type, "status": "completed", "duration_ms": duration_ms, "outputs": self._externalize(outputs)})
+                states.append({"step_key": key, "step_type": step_type, "status": "completed", "duration_ms": duration_ms, "outputs": copy.deepcopy(outputs)})
                 if progress:
                     progress(((index + 1) / max(len(steps), 1)) * 100, f"Step '{key}' completed.")
             except Exception as exc:
@@ -177,7 +178,22 @@ class GenerationRuntime:
                 states.append({"step_key": key, "step_type": str(step.get("step_type") or ""), "status": "failed", "duration_ms": duration_ms, "outputs": {}, "error": str(exc)})
                 return {"runtime_contract": self.CONTRACT, "status": "failed", "error": str(exc), "steps": states, "metrics": metrics.snapshot(status="failed", error=str(exc))}
         outputs = GenerationRuntimeContext.resolve_module_outputs(module.get("outputs") or [], context)
-        return {"runtime_contract": self.CONTRACT, "status": "completed", "steps": states, "outputs": self._externalize(outputs), "context": self._externalize(context), "metrics": metrics.snapshot(status="completed")}
+        transport_payload, transport_metrics = self._externalize_transport({
+            "steps": states,
+            "outputs": outputs,
+            "context": context,
+        })
+        runtime_metrics = metrics.snapshot(status="completed")
+        runtime_metrics.update(transport_metrics)
+        return {
+            "runtime_contract": self.CONTRACT,
+            "status": "completed",
+            "steps": transport_payload["steps"],
+            "outputs": transport_payload["outputs"],
+            "context": transport_payload["context"],
+            "files": transport_payload["files"],
+            "metrics": runtime_metrics,
+        }
 
     def _materialize(self, value: Any, directory: Path) -> Any:
         if isinstance(value, dict) and value.get("__generation_file__"):
@@ -545,7 +561,82 @@ class GenerationRuntime:
             return [self._save_images(v, directory, prefix) for v in value]
         return value
 
+    def _externalize_transport(self, value: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Externalize generation files once and replace repetitions with file refs.
+
+        The registry is provider/storage agnostic. Backend still owns persistence and
+        storage selection; the remote runtime only deduplicates transport bytes.
+        """
+        files: dict[str, dict[str, Any]] = {}
+        file_id_by_digest: dict[str, str] = {}
+        path_content_cache: dict[str, tuple[bytes, str]] = {}
+        occurrence_count = 0
+        occurrence_declared_bytes = 0
+
+        def externalize(item: Any) -> Any:
+            nonlocal occurrence_count, occurrence_declared_bytes
+            if isinstance(item, dict) and item.get("__generation_file__"):
+                path = Path(item["local_path"])
+                cache_key = str(path.resolve())
+                cached_content = path_content_cache.get(cache_key)
+                if cached_content is None:
+                    content = path.read_bytes()
+                    digest = hashlib.sha256(content).hexdigest()
+                    path_content_cache[cache_key] = (content, digest)
+                else:
+                    content, digest = cached_content
+                size_bytes = len(content)
+                occurrence_count += 1
+                occurrence_declared_bytes += size_bytes
+                file_id = file_id_by_digest.get(digest)
+                if file_id is None:
+                    file_id = f"file_{len(files) + 1}"
+                    file_id_by_digest[digest] = file_id
+                    content_type = item.get("content_type") or "application/octet-stream"
+                    encoded = base64.b64encode(content).decode("ascii")
+                    files[file_id] = {
+                        "__generation_file__": True,
+                        "filename": item.get("filename") or path.name,
+                        "content_type": content_type,
+                        "size_bytes": size_bytes,
+                        "encoding": "base64",
+                        "data": "data:" + content_type + ";base64," + encoded,
+                        "sha256": digest,
+                        "node_id": item.get("node_id"),
+                    }
+                return {
+                    "__generation_file_ref__": file_id,
+                    "filename": item.get("filename") or path.name,
+                    "content_type": item.get("content_type") or "application/octet-stream",
+                    "size_bytes": size_bytes,
+                    "node_id": item.get("node_id"),
+                }
+            if isinstance(item, dict):
+                return {key: externalize(child) for key, child in item.items()}
+            if isinstance(item, list):
+                return [externalize(child) for child in item]
+            return item
+
+        externalized = externalize(value)
+        unique_declared_bytes = sum(int(item.get("size_bytes") or 0) for item in files.values())
+        unique_base64_characters = sum(
+            len(str(item.get("data") or "").split(",", 1)[1])
+            for item in files.values()
+            if isinstance(item.get("data"), str) and "," in str(item.get("data"))
+        )
+        externalized["files"] = files
+        return externalized, {
+            "transport_generation_file_occurrences": occurrence_count,
+            "transport_unique_file_count": len(files),
+            "transport_duplicate_file_occurrences": max(0, occurrence_count - len(files)),
+            "transport_occurrence_declared_file_bytes": occurrence_declared_bytes,
+            "transport_unique_declared_file_bytes": unique_declared_bytes,
+            "transport_unique_base64_character_count": unique_base64_characters,
+            "transport_saved_declared_file_bytes": max(0, occurrence_declared_bytes - unique_declared_bytes),
+        }
+
     def _externalize(self, value: Any) -> Any:
+        """Legacy single-value externalizer retained for compatibility/tests."""
         if isinstance(value, dict) and value.get("__generation_file__"):
             path = Path(value["local_path"])
             content_type = value.get("content_type") or "application/octet-stream"

@@ -1628,6 +1628,7 @@ class GenerationModuleRuntimeService:
                 # unstable Internet connections.
                 working_item = finalizing_snapshot.model_copy(deep=True)
                 remote_steps = output.get("steps") or []
+                modal_file_cache: dict[str, dict[str, Any]] = {}
 
                 materialization_started = time.perf_counter()
                 states_by_key = {
@@ -1648,12 +1649,16 @@ class GenerationModuleRuntimeService:
                     state.outputs = self._materialize_modal_files(
                         remote_step.get("outputs") or {},
                         execution_id,
+                        output.get("files"),
+                        modal_file_cache,
                     )
                     state.error = remote_step.get("error")
 
                 normalized_outputs = self._materialize_modal_files(
                     output.get("outputs") or {},
                     execution_id,
+                    output.get("files"),
+                    modal_file_cache,
                 )
                 materialization_ms = int((time.perf_counter() - materialization_started) * 1000)
 
@@ -1673,6 +1678,8 @@ class GenerationModuleRuntimeService:
                     working_item.context = self._materialize_modal_files(
                         remote_context,
                         execution_id,
+                        output.get("files"),
+                        modal_file_cache,
                     )
                 context_ms = int((time.perf_counter() - context_started) * 1000)
 
@@ -1938,6 +1945,7 @@ class GenerationModuleRuntimeService:
             raise RuntimeError(str(output.get("error") or "Modal Generation Runtime failed."))
 
         remote_steps = output.get("steps") or []
+        modal_file_cache: dict[str, dict[str, Any]] = {}
         with self._lock:
             item = self._items[execution_id]
             states_by_key = {
@@ -1956,12 +1964,12 @@ class GenerationModuleRuntimeService:
                 state.status = str(remote_step.get("status") or state.status)
                 state.duration_ms = int(remote_step.get("duration_ms") or 0)
                 state.outputs = self._materialize_modal_files(
-                    remote_step.get("outputs") or {}, execution_id
+                    remote_step.get("outputs") or {}, execution_id, output.get("files"), modal_file_cache
                 )
                 state.error = remote_step.get("error")
 
             normalized_outputs = self._materialize_modal_files(
-                output.get("outputs") or {}, execution_id
+                output.get("outputs") or {}, execution_id, output.get("files"), modal_file_cache
             )
             item.outputs = self._persist_final_outputs(
                 db, execution_id=execution_id, user_id=item.user_id, outputs=normalized_outputs
@@ -1969,7 +1977,9 @@ class GenerationModuleRuntimeService:
             self._assert_required_image_outputs(db, item=item)
             remote_context = output.get("context")
             if isinstance(remote_context, dict):
-                item.context = self._materialize_modal_files(remote_context, execution_id)
+                item.context = self._materialize_modal_files(
+                    remote_context, execution_id, output.get("files"), modal_file_cache
+                )
             item.runtime_metrics = runtime_metrics
             item.provider_metrics.update({
                 "provider": "modal",
@@ -2156,8 +2166,43 @@ class GenerationModuleRuntimeService:
             return [self._serialize_remote_value(db, item) for item in value]
         return value
 
-    def _materialize_modal_files(self, value: Any, execution_id: UUID) -> Any:
-        """Convert Modal data-URI files into backend-owned temporary files."""
+    def _materialize_modal_files(
+        self,
+        value: Any,
+        execution_id: UUID,
+        file_registry: Any = None,
+        materialized_ref_cache: dict[str, dict[str, Any]] | None = None,
+    ) -> Any:
+        """Convert Modal transport files/refs into backend-owned temporary files.
+
+        New runtimes return one top-level ``files`` registry and lightweight
+        ``__generation_file_ref__`` objects throughout steps/outputs/context.
+        Legacy runtimes that inline ``__generation_file__`` continue to work.
+        """
+        if isinstance(value, dict) and value.get("__generation_file_ref__"):
+            file_id = str(value.get("__generation_file_ref__") or "").strip()
+            if not file_id:
+                raise AppException("Modal returned an empty generation file reference.")
+            if not isinstance(file_registry, dict):
+                raise AppException("Modal returned generation file refs without a file registry.")
+            if materialized_ref_cache is not None and file_id in materialized_ref_cache:
+                normalized = copy.deepcopy(materialized_ref_cache[file_id])
+                for metadata_key in ("filename", "content_type", "size_bytes", "node_id"):
+                    if value.get(metadata_key) is not None:
+                        normalized[metadata_key] = value.get(metadata_key)
+                return normalized
+            registered = file_registry.get(file_id)
+            if not isinstance(registered, dict) or not registered.get("__generation_file__"):
+                raise AppException(f"Modal returned an unknown generation file reference: {file_id}.")
+            normalized = self._materialize_modal_files(
+                registered, execution_id, file_registry, materialized_ref_cache
+            )
+            if materialized_ref_cache is not None:
+                materialized_ref_cache[file_id] = copy.deepcopy(normalized)
+            for metadata_key in ("filename", "content_type", "size_bytes", "node_id"):
+                if value.get(metadata_key) is not None:
+                    normalized[metadata_key] = value.get(metadata_key)
+            return normalized
         if isinstance(value, dict) and value.get("__generation_file__"):
             data = value.get("data")
             if isinstance(data, str) and data.startswith("data:") and ";base64," in data:
@@ -2189,9 +2234,19 @@ class GenerationModuleRuntimeService:
             normalized["__generation_file__"] = True
             return normalized
         if isinstance(value, dict):
-            return {key: self._materialize_modal_files(item, execution_id) for key, item in value.items()}
+            return {
+                key: self._materialize_modal_files(
+                    item, execution_id, file_registry, materialized_ref_cache
+                )
+                for key, item in value.items()
+            }
         if isinstance(value, list):
-            return [self._materialize_modal_files(item, execution_id) for item in value]
+            return [
+                self._materialize_modal_files(
+                    item, execution_id, file_registry, materialized_ref_cache
+                )
+                for item in value
+            ]
         return value
 
     def _normalize_remote_files(self, value: Any, downloaded: list[dict[str, Any]]) -> Any:
