@@ -2039,11 +2039,11 @@ class ComfyUIServer:
         modal_post_runtime_finished_at = datetime.now(timezone.utc)
 
         def _transport_payload_stats(value):
-            stats = {
+            stats = {{
                 "generation_file_occurrences": 0,
                 "base64_character_count": 0,
                 "declared_file_bytes": 0,
-            }
+            }}
             stack = [value]
             while stack:
                 current = stack.pop()
