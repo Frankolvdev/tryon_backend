@@ -2852,20 +2852,13 @@ generation_job_orchestrator_service.bind(generation_module_runtime_service)
 
 # Persistent history helpers used by AppWeb and BackOffice.
 def _runtime_list(self, *, user_id: int | None = None, module_id: int | None = None, status: str | None = None, engine: str | None = None, search: str | None = None, created_from=None, created_to=None, skip: int = 0, limit: int = 100):
-    persisted, _ = generation_module_execution_store_service.list(
-        user_id=user_id,
-        module_id=module_id,
-        status=status,
-        engine=engine,
-        search=search,
-        created_from=created_from,
-        created_to=created_to,
-        skip=0,
-        limit=10000,
-    )
+    # Keep the historical in-memory overlay for live executions, but never hydrate
+    # an arbitrary 10k full snapshots just to render one admin page. Fetch only the
+    # persisted prefix required to produce the requested page after the merge.
     with self._lock:
         active = [item.model_copy(deep=True) for item in self._items.values()]
-    merged = {item.id: item for item in persisted}
+
+    filtered_active = []
     for item in active:
         if user_id is not None and item.user_id != user_id:
             continue
@@ -2883,9 +2876,33 @@ def _runtime_list(self, *, user_id: int | None = None, module_id: int | None = N
             haystack = " ".join([str(item.id), item.module_key, str(item.engine), item.status, item.error or ""]).lower()
             if search.strip().lower() not in haystack:
                 continue
+        filtered_active.append(item)
+
+    fetch_limit = max(1, skip + limit + len(filtered_active))
+    persisted, persisted_total = generation_module_execution_store_service.list(
+        user_id=user_id,
+        module_id=module_id,
+        status=status,
+        engine=engine,
+        search=search,
+        created_from=created_from,
+        created_to=created_to,
+        skip=0,
+        limit=fetch_limit,
+    )
+
+    persisted_ids = {item.id for item in persisted}
+    merged = {item.id: item for item in persisted}
+    for item in filtered_active:
         merged[item.id] = item
+
     items = sorted(merged.values(), key=lambda item: item.created_at, reverse=True)
-    return items[skip:skip + limit], len(items)
+    # Active executions are normally persisted too. If an execution only exists in
+    # memory for a brief window, include it in total without double-counting rows
+    # already present in the fetched persisted prefix.
+    active_only_count = sum(1 for item in filtered_active if item.id not in persisted_ids)
+    total = persisted_total + active_only_count
+    return items[skip:skip + limit], total
 
 
 def _runtime_retry(self, db: Session, execution_id: UUID, *, user_id: int | None = None, engine=None):

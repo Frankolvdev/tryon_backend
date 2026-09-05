@@ -273,6 +273,9 @@ class I18nAdminService:
             locale
         )
 
+    def list_translation_namespaces(self, db: Session) -> list[str]:
+        return i18n_repository.list_translation_namespaces(db)
+
     def list_translations(
         self,
         db: Session,

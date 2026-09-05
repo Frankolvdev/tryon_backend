@@ -30,3 +30,18 @@ class SupportTicketResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+class SupportTicketAdminSummary(BaseModel):
+    total: int
+    open: int
+    in_progress: int
+    resolved: int
+    urgent: int
+
+
+class SupportTicketAdminListResponse(BaseModel):
+    items: list[SupportTicketResponse]
+    total: int
+    skip: int
+    limit: int
+    summary: SupportTicketAdminSummary

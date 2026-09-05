@@ -150,6 +150,17 @@ def update_locale(
 
 
 @router.get(
+    "/i18n/translations/namespaces",
+    response_model=list[str],
+)
+def list_translation_namespaces(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return i18n_admin_service.list_translation_namespaces(db)
+
+
+@router.get(
     "/i18n/translations",
     response_model=(
         I18nTranslationListResponse

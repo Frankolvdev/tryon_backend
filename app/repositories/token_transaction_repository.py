@@ -46,6 +46,20 @@ class TokenTransactionRepository(BaseRepository[TokenTransaction]):
         statement = statement.order_by(TokenTransaction.created_at.desc()).offset(skip).limit(limit)
         return list(db.execute(statement).scalars().all())
 
+    def count_all_filtered(
+        self,
+        db: Session,
+        *,
+        user_id: int | None = None,
+        transaction_type: str | None = None,
+    ) -> int:
+        statement = select(func.count(TokenTransaction.id))
+        if user_id is not None:
+            statement = statement.where(TokenTransaction.user_id == user_id)
+        if transaction_type:
+            statement = statement.where(TokenTransaction.transaction_type == transaction_type)
+        return int(db.execute(statement).scalar_one())
+
     def get_by_source_reference(
         self,
         db: Session,

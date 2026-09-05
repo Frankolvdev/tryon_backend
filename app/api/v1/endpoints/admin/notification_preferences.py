@@ -374,6 +374,9 @@ def list_notification_deliveries(
         ge=1,
         le=500,
     ),
+    status: str | None = Query(default=None),
+    channel_type: str | None = Query(default=None),
+    search: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_admin: User = Depends(admin_guard),
 ):
@@ -384,6 +387,9 @@ def list_notification_deliveries(
             notification_id=notification_id,
             skip=skip,
             limit=limit,
+            status=status,
+            channel_type=channel_type,
+            search=search,
         )
     )
 

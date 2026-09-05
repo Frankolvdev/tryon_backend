@@ -186,6 +186,15 @@ class I18nRepository:
             ).scalars().all()
         )
 
+    def list_translation_namespaces(self, db: Session) -> list[str]:
+        statement = (
+            select(I18nTranslation.namespace)
+            .where(I18nTranslation.namespace.is_not(None))
+            .distinct()
+            .order_by(I18nTranslation.namespace.asc())
+        )
+        return [str(value) for value in db.execute(statement).scalars().all() if value]
+
     def count_translations(
         self,
         db: Session,

@@ -10,6 +10,7 @@ from app.schemas.token import (
     TokenPackageResponse,
     TokenPackageUpdate,
     TokenTransactionResponse,
+    TokenTransactionListResponse,
 )
 from app.schemas.user import UserResponse
 from app.services.token_service import token_service
@@ -82,6 +83,27 @@ def list_user_token_transactions(
         skip=skip,
         limit=limit,
     )
+
+@router.get(
+    "/token-transactions/page",
+    response_model=TokenTransactionListResponse,
+)
+def list_token_transactions_admin_page(
+    user_id: int | None = Query(default=None),
+    transaction_type: str | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    return token_service.get_admin_transactions_page(
+        db,
+        user_id=user_id,
+        transaction_type=transaction_type,
+        skip=skip,
+        limit=limit,
+    )
+
 
 @router.get(
     "/token-transactions",

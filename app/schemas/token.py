@@ -95,6 +95,13 @@ class TokenTransactionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class TokenTransactionListResponse(BaseModel):
+    items: list[TokenTransactionResponse]
+    total: int
+    skip: int
+    limit: int
+
+
 class TokenBalanceResponse(BaseModel):
     token_balance: int
 

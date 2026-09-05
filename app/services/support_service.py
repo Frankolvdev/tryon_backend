@@ -80,6 +80,38 @@ class SupportService:
             limit=limit,
         )
 
+    def admin_list_tickets_page(
+        self,
+        db: Session,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        status: str | None = None,
+        priority: str | None = None,
+        search: str | None = None,
+    ) -> dict:
+        items = support_ticket_repository.list_all(
+            db,
+            skip=skip,
+            limit=limit,
+            status=status,
+            priority=priority,
+            search=search,
+        )
+        total = support_ticket_repository.count_all(
+            db,
+            status=status,
+            priority=priority,
+            search=search,
+        )
+        return {
+            "items": items,
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "summary": support_ticket_repository.admin_summary(db),
+        }
+
     def admin_get_ticket(
         self,
         db: Session,

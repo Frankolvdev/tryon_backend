@@ -991,6 +991,9 @@ class AdminNotificationDeliveryService:
         notification_id: int,
         skip: int,
         limit: int,
+        status: str | None = None,
+        channel_type: str | None = None,
+        search: str | None = None,
     ) -> AdminNotificationDeliveryListResponse:
         items = (
             admin_notification_delivery_repository
@@ -999,6 +1002,9 @@ class AdminNotificationDeliveryService:
                 notification_id=notification_id,
                 skip=skip,
                 limit=limit,
+                status=status,
+                channel_type=channel_type,
+                search=search,
             )
         )
 
@@ -1007,6 +1013,9 @@ class AdminNotificationDeliveryService:
             .count_for_notification(
                 db,
                 notification_id=notification_id,
+                status=status,
+                channel_type=channel_type,
+                search=search,
             )
         )
 

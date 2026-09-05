@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db
 from app.api.v1.guards.admin_guard import admin_guard
 from app.models.user import User
-from app.schemas.support import SupportTicketAdminUpdate, SupportTicketResponse
+from app.schemas.support import SupportTicketAdminListResponse, SupportTicketAdminUpdate, SupportTicketResponse
 from app.services.audit_service import audit_service
 from app.services.support_service import support_service
 
@@ -22,6 +22,26 @@ def list_support_tickets(
         db=db,
         skip=skip,
         limit=limit,
+    )
+
+
+@router.get("/support-tickets/page", response_model=SupportTicketAdminListResponse)
+def list_support_tickets_page(
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    status: str | None = Query(default=None),
+    priority: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+):
+    return support_service.admin_list_tickets_page(
+        db=db,
+        skip=skip,
+        limit=limit,
+        status=status,
+        priority=priority,
+        search=search,
     )
 
 
