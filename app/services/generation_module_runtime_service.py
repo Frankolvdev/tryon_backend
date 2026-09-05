@@ -8,6 +8,7 @@ import json
 import threading
 import time
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any
@@ -1333,6 +1334,12 @@ class GenerationModuleRuntimeService:
         # exactly as the legacy execute_pipeline(existing_call_id=...) path did.
         remaining_timeout = configured_timeout
 
+        wait_started_at = utc_now()
+        with self._lock:
+            wait_item = self._items.get(execution_id)
+            if wait_item is not None:
+                wait_item.provider_metrics["backend_modal_wait_started_at"] = wait_started_at.isoformat()
+
         wait_task = asyncio.create_task(
             modal_pipeline_adapter_service.await_result_async(
                 config,
@@ -1353,6 +1360,14 @@ class GenerationModuleRuntimeService:
                 )
                 if wait_task in done:
                     result = await wait_task
+                    received_at = utc_now()
+                    result = dict(result or {})
+                    result["backend_result_received_at"] = received_at.isoformat()
+                    result["backend_result_wait_started_at"] = wait_started_at.isoformat()
+                    result["backend_result_wait_ms"] = max(
+                        0,
+                        int((received_at - wait_started_at).total_seconds() * 1000),
+                    )
                     self._remote_module_progress(
                         execution_id,
                         98.0,
@@ -1488,6 +1503,27 @@ class GenerationModuleRuntimeService:
                     or runtime_metrics.get("total_duration_ms")
                     or 0
                 )
+                backend_result_received_at = str(result.get("backend_result_received_at") or utc_now().isoformat())
+                backend_result_wait_started_at = str(result.get("backend_result_wait_started_at") or "") or None
+                backend_result_wait_ms = int(
+                    result.get("backend_result_wait_ms")
+                    or result.get("execution_time_ms")
+                    or 0
+                )
+                non_runtime_overhead_ms = max(0, backend_result_wait_ms - runtime_duration_ms)
+
+                def _metric_datetime(value: Any) -> datetime | None:
+                    if not value:
+                        return None
+                    try:
+                        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                    except (TypeError, ValueError):
+                        return None
+
+                runtime_started_at = _metric_datetime(runtime_metrics.get("modal_pipeline_started_at"))
+                runtime_returning_at = _metric_datetime(runtime_metrics.get("modal_pipeline_returning_at"))
+                result_received_dt = _metric_datetime(backend_result_received_at)
+
                 with self._lock:
                     metric_item = self._items[execution_id]
                     metric_item.runtime_metrics = runtime_metrics
@@ -1504,11 +1540,55 @@ class GenerationModuleRuntimeService:
                             metric_item.recovery_count > 0 or result.get("resumed")
                         ),
                         "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
+                        "backend_modal_wait_started_at": backend_result_wait_started_at,
+                        "backend_modal_result_received_at": backend_result_received_at,
+                        "backend_modal_wait_ms": backend_result_wait_ms,
+                        "modal_runtime_exact_ms": runtime_duration_ms or None,
+                        "modal_non_runtime_overhead_ms": non_runtime_overhead_ms,
+                        "modal_pipeline_started_at": runtime_metrics.get("modal_pipeline_started_at"),
+                        "modal_runtime_execute_finished_at": runtime_metrics.get("modal_runtime_execute_finished_at"),
+                        "modal_pipeline_returning_at": runtime_metrics.get("modal_pipeline_returning_at"),
                     })
+                    if runtime_started_at and metric_item.provider_submitted_at:
+                        try:
+                            metric_item.provider_metrics["modal_queue_to_runtime_ms"] = max(
+                                0, int((runtime_started_at - metric_item.provider_submitted_at).total_seconds() * 1000)
+                            )
+                        except TypeError:
+                            # Older persisted timestamps may be timezone-naive. Do not
+                            # risk finalization for a diagnostic-only metric.
+                            pass
+                    if runtime_returning_at and result_received_dt:
+                        try:
+                            metric_item.provider_metrics["modal_result_delivery_ms"] = max(
+                                0, int((result_received_dt - runtime_returning_at).total_seconds() * 1000)
+                            )
+                        except TypeError:
+                            pass
                     metric_snapshot = metric_item.model_copy(deep=True)
                 # Preserve the existing contract: exact runtime metrics are durable
                 # before a controlled provider failure is raised.
                 generation_module_execution_store_service.save(metric_snapshot)
+                exact_delivery_ms = metric_snapshot.provider_metrics.get("modal_result_delivery_ms")
+                queue_to_runtime_ms = metric_snapshot.provider_metrics.get("modal_queue_to_runtime_ms")
+                timing_parts = [
+                    f"espera Backend/FunctionCall={backend_result_wait_ms} ms",
+                    f"runtime exacto={runtime_duration_ms} ms" if runtime_duration_ms > 0 else "runtime exacto=no disponible",
+                ]
+                if queue_to_runtime_ms is not None:
+                    timing_parts.append(f"cola hasta runtime={int(queue_to_runtime_ms)} ms")
+                if exact_delivery_ms is not None:
+                    timing_parts.append(f"entrega resultado Modal→Backend={int(exact_delivery_ms)} ms")
+                else:
+                    timing_parts.append(f"overhead no-runtime combinado={non_runtime_overhead_ms} ms")
+                with self._lock:
+                    timing_item = self._items[execution_id]
+                    timing_item.logs.append(GenerationModuleExecutionLog(
+                        timestamp=utc_now(),
+                        message="Tiempos Modal: " + "; ".join(timing_parts) + ".",
+                    ))
+                    timing_snapshot = timing_item.model_copy(deep=True)
+                generation_module_execution_store_service.save(timing_snapshot)
 
                 if output.get("status") != "completed":
                     raise RuntimeError(
@@ -1604,6 +1684,16 @@ class GenerationModuleRuntimeService:
                         working_item.recovery_count > 0 or result.get("resumed")
                     ),
                     "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
+                    "backend_modal_wait_started_at": backend_result_wait_started_at,
+                    "backend_modal_result_received_at": backend_result_received_at,
+                    "backend_modal_wait_ms": backend_result_wait_ms,
+                    "modal_runtime_exact_ms": runtime_duration_ms or None,
+                    "modal_non_runtime_overhead_ms": non_runtime_overhead_ms,
+                    "modal_pipeline_started_at": runtime_metrics.get("modal_pipeline_started_at"),
+                    "modal_runtime_execute_finished_at": runtime_metrics.get("modal_runtime_execute_finished_at"),
+                    "modal_pipeline_returning_at": runtime_metrics.get("modal_pipeline_returning_at"),
+                    "modal_queue_to_runtime_ms": metric_snapshot.provider_metrics.get("modal_queue_to_runtime_ms"),
+                    "modal_result_delivery_ms": metric_snapshot.provider_metrics.get("modal_result_delivery_ms"),
                     "finalization_materialization_ms": materialization_ms,
                     "finalization_storage_ms": storage_ms,
                     "finalization_context_ms": context_ms,
@@ -1734,6 +1824,17 @@ class GenerationModuleRuntimeService:
                             metric_item.provider_metrics["finalization_total_ms"] = int(
                                 (time.perf_counter() - finalizing_started_monotonic) * 1000
                             )
+                            metric_item.logs.append(GenerationModuleExecutionLog(
+                                timestamp=utc_now(),
+                                message=(
+                                    "Tiempos finalización Backend: "
+                                    f"materialización={int(metric_item.provider_metrics.get('finalization_materialization_ms') or 0)} ms; "
+                                    f"storage={int(metric_item.provider_metrics.get('finalization_storage_ms') or 0)} ms; "
+                                    f"contexto={int(metric_item.provider_metrics.get('finalization_context_ms') or 0)} ms; "
+                                    f"billing={int(metric_item.provider_metrics.get('finalization_billing_ms') or 0)} ms; "
+                                    f"total={int(metric_item.provider_metrics.get('finalization_total_ms') or 0)} ms."
+                                ),
+                            ))
                 with self._lock:
                     final_snapshot = self._items[execution_id].model_copy(deep=True)
                 generation_module_execution_store_service.save(final_snapshot)

@@ -593,6 +593,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import modal
@@ -1999,6 +2000,7 @@ class ComfyUIServer:
             sys.path.insert(0, str(runtime_worker))
         from generation_runtime import GenerationRuntime
         runtime = GenerationRuntime(comfy_url=f"http://127.0.0.1:{{COMFYUI_PORT}}")
+        modal_pipeline_started_at = datetime.now(timezone.utc)
         started = time.monotonic()
         try:
             result = runtime.execute(payload)
@@ -2014,6 +2016,7 @@ class ComfyUIServer:
             )
             raise
         duration_ms = int((time.monotonic() - started) * 1000)
+        modal_runtime_execute_finished_at = datetime.now(timezone.utc)
         if isinstance(result, dict):
             metrics = result.get("metrics")
             if not isinstance(metrics, dict):
@@ -2023,6 +2026,8 @@ class ComfyUIServer:
             metrics["execution_time_ms"] = int(metrics.get("execution_time_ms") or duration_ms)
             metrics["duration_source"] = "runtime_exact"
             metrics["termination_status"] = str(result.get("status") or "completed")
+            metrics["modal_pipeline_started_at"] = modal_pipeline_started_at.isoformat()
+            metrics["modal_runtime_execute_finished_at"] = modal_runtime_execute_finished_at.isoformat()
         _modal_trace(
             "pipeline_end",
             role="pipeline_server",
@@ -2031,6 +2036,8 @@ class ComfyUIServer:
             status=result.get("status") if isinstance(result, dict) else None,
         )
         _emit_model_diagnostics(payload, phase="after_pipeline", execution_id=execution_id)
+        if isinstance(result, dict) and isinstance(result.get("metrics"), dict):
+            result["metrics"]["modal_pipeline_returning_at"] = datetime.now(timezone.utc).isoformat()
         return result
 
     @modal.asgi_app(requires_proxy_auth=False)
