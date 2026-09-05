@@ -1,5 +1,7 @@
 from typing import Any
+import io
 import mimetypes
+import zipfile
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -88,6 +90,57 @@ def test_storage_upload(
         file=file,
         folder="admin-test-uploads",
     )
+
+
+@router.get("/storage/files/download-bundle")
+def download_storage_files_bundle(
+    ids: str = Query(..., min_length=1, max_length=4000),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(admin_guard),
+):
+    parsed_ids: list[int] = []
+    seen_ids: set[int] = set()
+    for raw in ids.split(","):
+        value = raw.strip()
+        if not value:
+            continue
+        try:
+            file_id = int(value)
+        except ValueError as exc:
+            raise NotFoundException("Invalid storage file id.") from exc
+        if file_id <= 0 or file_id in seen_ids:
+            continue
+        seen_ids.add(file_id)
+        parsed_ids.append(file_id)
+
+    if not parsed_ids:
+        raise NotFoundException("No storage files requested.")
+
+    buffer = io.BytesIO()
+    used_names: set[str] = set()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for file_id in parsed_ids:
+            storage_file = storage_file_repository.get_by_id(db, file_id)
+            if not storage_file:
+                raise NotFoundException(f"Storage file {file_id} not found.")
+            content = storage_service.read_bytes(db, storage_file=storage_file)
+            original_name = storage_file.original_filename or f"storage-file-{storage_file.id}"
+            safe_name = original_name.replace("\\", "_").replace("/", "_") or f"storage-file-{storage_file.id}"
+            candidate = safe_name
+            stem, suffix = (candidate.rsplit(".", 1) + [""])[:2] if "." in candidate else (candidate, "")
+            counter = 2
+            while candidate in used_names:
+                candidate = f"{stem}-{counter}{'.' + suffix if suffix else ''}"
+                counter += 1
+            used_names.add(candidate)
+            archive.writestr(candidate, content)
+
+    payload = buffer.getvalue()
+    headers = {
+        "Content-Disposition": 'attachment; filename="generation-resources.zip"',
+        "Cache-Control": "private, no-store",
+    }
+    return Response(content=payload, media_type="application/zip", headers=headers)
 
 
 @router.get("/storage/files/{storage_file_id}/signed-url")

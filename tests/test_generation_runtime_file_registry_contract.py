@@ -80,6 +80,18 @@ def test_transport_registry_deduplicates_identical_generation_file_content(tmp_p
     assert registry_file["data"].startswith("data:image/png;base64,")
     assert "sha256" in registry_file
 
+    diagnostics = metrics["transport_unique_files"]
+    assert len(diagnostics) == 2
+    repeated = next(item for item in diagnostics if item["file_id"] == a_ref["__generation_file_ref__"])
+    assert repeated["occurrence_count"] == 3
+    assert repeated["paths"] == [
+        "steps[0].outputs.a",
+        "steps[0].outputs.b",
+        "outputs.final",
+    ]
+    assert repeated["filenames"] == ["first.png", "second.png", "final.png"]
+    assert repeated["node_ids"] == ["1", "2", "3"]
+
 
 def test_completed_runtime_response_uses_registry_and_backend_accepts_refs():
     runtime_source = (ROOT / "runpod_worker/generation_runtime/runtime.py").read_text(encoding="utf-8")

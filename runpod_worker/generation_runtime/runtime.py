@@ -570,10 +570,22 @@ class GenerationRuntime:
         files: dict[str, dict[str, Any]] = {}
         file_id_by_digest: dict[str, str] = {}
         path_content_cache: dict[str, tuple[bytes, str]] = {}
+        diagnostics_by_file_id: dict[str, dict[str, Any]] = {}
         occurrence_count = 0
         occurrence_declared_bytes = 0
 
-        def externalize(item: Any) -> Any:
+        def logical_path(parts: tuple[str, ...]) -> str:
+            if not parts:
+                return "$"
+            result = ""
+            for part in parts:
+                if part.startswith("["):
+                    result += part
+                else:
+                    result += ("." if result else "") + part
+            return result
+
+        def externalize(item: Any, path_parts: tuple[str, ...] = ()) -> Any:
             nonlocal occurrence_count, occurrence_declared_bytes
             if isinstance(item, dict) and item.get("__generation_file__"):
                 path = Path(item["local_path"])
@@ -604,6 +616,26 @@ class GenerationRuntime:
                         "sha256": digest,
                         "node_id": item.get("node_id"),
                     }
+                    diagnostics_by_file_id[file_id] = {
+                        "file_id": file_id,
+                        "sha256": digest,
+                        "size_bytes": size_bytes,
+                        "occurrence_count": 0,
+                        "paths": [],
+                        "filenames": [],
+                        "node_ids": [],
+                    }
+                diagnostic = diagnostics_by_file_id[file_id]
+                diagnostic["occurrence_count"] = int(diagnostic["occurrence_count"]) + 1
+                current_path = logical_path(path_parts)
+                if current_path not in diagnostic["paths"]:
+                    diagnostic["paths"].append(current_path)
+                filename = item.get("filename") or path.name
+                if filename and filename not in diagnostic["filenames"]:
+                    diagnostic["filenames"].append(filename)
+                node_id = item.get("node_id")
+                if node_id is not None and node_id not in diagnostic["node_ids"]:
+                    diagnostic["node_ids"].append(node_id)
                 return {
                     "__generation_file_ref__": file_id,
                     "filename": item.get("filename") or path.name,
@@ -612,9 +644,9 @@ class GenerationRuntime:
                     "node_id": item.get("node_id"),
                 }
             if isinstance(item, dict):
-                return {key: externalize(child) for key, child in item.items()}
+                return {key: externalize(child, path_parts + (str(key),)) for key, child in item.items()}
             if isinstance(item, list):
-                return [externalize(child) for child in item]
+                return [externalize(child, path_parts + (f"[{index}]",)) for index, child in enumerate(item)]
             return item
 
         externalized = externalize(value)
@@ -633,6 +665,7 @@ class GenerationRuntime:
             "transport_unique_declared_file_bytes": unique_declared_bytes,
             "transport_unique_base64_character_count": unique_base64_characters,
             "transport_saved_declared_file_bytes": max(0, occurrence_declared_bytes - unique_declared_bytes),
+            "transport_unique_files": list(diagnostics_by_file_id.values()),
         }
 
     def _externalize(self, value: Any) -> Any:
