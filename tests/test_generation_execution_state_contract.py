@@ -3,8 +3,8 @@ from types import SimpleNamespace
 from app.services.generation_execution_state_contract import generation_execution_state_contract
 
 
-def execution(status: str, cancel_requested: bool = False):
-    return SimpleNamespace(status=status, cancel_requested=cancel_requested)
+def execution(status: str, cancel_requested: bool = False, provider_status: str | None = None):
+    return SimpleNamespace(status=status, cancel_requested=cancel_requested, provider_status=provider_status)
 
 
 def test_client_active_excludes_cancellation_pending_execution():
@@ -33,3 +33,17 @@ def test_terminal_states_are_never_active_or_dispatchable():
         assert generation_execution_state_contract.is_terminal(item)
         assert not generation_execution_state_contract.is_active_for_client(item)
         assert not generation_execution_state_contract.is_dispatchable(item)
+
+
+def test_finalizing_is_operational_layer_not_new_primary_status():
+    item = execution("running", provider_status="FINALIZING")
+    assert generation_execution_state_contract.is_finalizing(item)
+    assert generation_execution_state_contract.is_active_for_client(item)
+    assert not generation_execution_state_contract.is_terminal(item)
+    assert not generation_execution_state_contract.is_provider_cancelable(item)
+
+
+def test_running_provider_work_remains_cancelable_before_finalizing():
+    item = execution("running", provider_status="RUNNING")
+    assert generation_execution_state_contract.is_provider_cancelable(item)
+    assert not generation_execution_state_contract.is_finalizing(item)

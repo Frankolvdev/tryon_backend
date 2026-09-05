@@ -16,6 +16,7 @@ from app.services.generation_module_upload_service import generation_module_uplo
 from app.services.generation_module_service import generation_module_service
 from app.services.audit_service import audit_service
 from app.services.generation_execution_media_service import generation_execution_media_service
+from app.services.generation_execution_state_contract import generation_execution_state_contract
 
 router = APIRouter()
 
@@ -78,7 +79,7 @@ def list_my_active_generation_executions(
     items, _ = generation_module_runtime_service.list(
         user_id=current_user.id, module_id=module_id, skip=0, limit=limit
     )
-    active = [item for item in items if item.status in {"queued", "running"}]
+    active = [item for item in items if generation_execution_state_contract.is_active_for_client(item)]
     return GenerationExecutionListResponse(items=generation_execution_media_service.hydrate_many(db, active), total=len(active), skip=0, limit=limit)
 
 

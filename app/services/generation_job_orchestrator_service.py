@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.db.database import SessionLocal
 from app.schemas.generation_module_runtime import GenerationModuleExecutionLog
 from app.services.generation_job_queue_service import generation_job_queue_service
+from app.services.generation_execution_state_contract import generation_execution_state_contract
 from app.services.ai_engine_settings_service import ai_engine_settings_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
 from app.services.generation_module_service import generation_module_service
@@ -241,7 +242,8 @@ class GenerationJobOrchestratorService:
         # Queued work remains Redis-owned. SADD dedupe keeps repeated startup
         # recovery idempotent if the queue already contains the execution.
         for item in self._iter_persisted(status="queued"):
-            generation_job_queue_service.enqueue(item.id, engine=item.engine)
+            if generation_execution_state_contract.is_dispatchable(item):
+                generation_job_queue_service.enqueue(item.id, engine=item.engine)
 
         # Snapshot running rows before mutating any state. This avoids pagination
         # skips if already-completed Modal calls finalize immediately during startup.

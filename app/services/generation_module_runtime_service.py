@@ -50,6 +50,7 @@ from app.services.infrastructure_provider_service import infrastructure_provider
 from app.services.modal_pipeline_adapter_service import modal_pipeline_adapter_service
 from app.services.generation_job_queue_service import generation_job_queue_service
 from app.services.generation_job_orchestrator_service import generation_job_orchestrator_service
+from app.services.generation_execution_state_contract import generation_execution_state_contract
 from app.services.generation_runtime import (
     GenerationRuntimeContext,
     GenerationRuntimeStepRegistry,
@@ -369,6 +370,11 @@ class GenerationModuleRuntimeService:
         with self._lock:
             item = self._items[execution_id]
             if item.status in {"completed", "failed", "cancelled"}:
+                return item.model_copy(deep=True)
+            # FINALIZING is an operational layer over status=running. Modal already
+            # returned success, so a user cancellation can no longer stop provider
+            # compute and must not discard/refund a valid result.
+            if not generation_execution_state_contract.is_provider_cancelable(item):
                 return item.model_copy(deep=True)
             was_queued = item.status == "queued"
             item.cancel_requested = True
@@ -1433,8 +1439,15 @@ class GenerationModuleRuntimeService:
         result: dict[str, Any] | None = None,
         error: BaseException | None = None,
     ) -> None:
-        """Finalize an async-supervised Modal call using existing execution semantics."""
+        """Finalize an async-supervised Modal call using existing execution semantics.
+
+        Primary status semantics stay untouched. Once Modal returns a successful
+        generation-runtime result, provider_status=FINALIZING becomes a durable
+        operational layer while Backend materializes/persists outputs. Network/storage
+        I/O deliberately happens outside the global execution lock.
+        """
         db = SessionLocal()
+        finalizing_started_monotonic: float | None = None
         try:
             with self._lock:
                 item = self._items.get(execution_id)
@@ -1502,68 +1515,115 @@ class GenerationModuleRuntimeService:
                         str(output.get("error") or "Modal Generation Runtime failed.")
                     )
 
-                remote_steps = output.get("steps") or []
+                # Success boundary: cancellation is still allowed before this lock, but
+                # after we durably publish FINALIZING the provider work is already done.
+                finalizing_started_at = utc_now()
+                finalizing_started_monotonic = time.perf_counter()
                 with self._lock:
                     item = self._items[execution_id]
                     if item.cancel_requested or item.status == "cancelled":
                         raise InterruptedError(
                             "Provider execution stopped after cancellation request."
                         )
-                    states_by_key = {
-                        str(state.step_key): state
-                        for state in item.steps
-                        if getattr(state, "step_key", None) is not None
-                    }
-                    for index, remote_step in enumerate(remote_steps):
-                        if not isinstance(remote_step, dict):
-                            continue
-                        state = states_by_key.get(
-                            str(remote_step.get("step_key") or "")
+                    item.provider_status = "FINALIZING"
+                    item.heartbeat_at = finalizing_started_at
+                    item.provider_metrics["finalizing_started_at"] = finalizing_started_at.isoformat()
+                    item.logs.append(
+                        GenerationModuleExecutionLog(
+                            timestamp=finalizing_started_at,
+                            message="Modal completed successfully; Backend is finalizing generation outputs.",
                         )
-                        if state is None:
-                            if index >= len(item.steps):
-                                continue
-                            state = item.steps[index]
-                        state.status = str(remote_step.get("status") or state.status)
-                        state.duration_ms = int(remote_step.get("duration_ms") or 0)
-                        state.outputs = self._materialize_modal_files(
-                            remote_step.get("outputs") or {},
-                            execution_id,
-                        )
-                        state.error = remote_step.get("error")
+                    )
+                    finalizing_snapshot = item.model_copy(deep=True)
+                generation_module_execution_store_service.save(finalizing_snapshot)
 
-                    normalized_outputs = self._materialize_modal_files(
-                        output.get("outputs") or {},
+                # Work on a private snapshot while touching filesystem/R2. This keeps
+                # reads, polling and harmless state checks responsive even on slow or
+                # unstable Internet connections.
+                working_item = finalizing_snapshot.model_copy(deep=True)
+                remote_steps = output.get("steps") or []
+
+                materialization_started = time.perf_counter()
+                states_by_key = {
+                    str(state.step_key): state
+                    for state in working_item.steps
+                    if getattr(state, "step_key", None) is not None
+                }
+                for index, remote_step in enumerate(remote_steps):
+                    if not isinstance(remote_step, dict):
+                        continue
+                    state = states_by_key.get(str(remote_step.get("step_key") or ""))
+                    if state is None:
+                        if index >= len(working_item.steps):
+                            continue
+                        state = working_item.steps[index]
+                    state.status = str(remote_step.get("status") or state.status)
+                    state.duration_ms = int(remote_step.get("duration_ms") or 0)
+                    state.outputs = self._materialize_modal_files(
+                        remote_step.get("outputs") or {},
                         execution_id,
                     )
-                    item.outputs = self._persist_final_outputs(
-                        db,
-                        execution_id=execution_id,
-                        user_id=item.user_id,
-                        outputs=normalized_outputs,
+                    state.error = remote_step.get("error")
+
+                normalized_outputs = self._materialize_modal_files(
+                    output.get("outputs") or {},
+                    execution_id,
+                )
+                materialization_ms = int((time.perf_counter() - materialization_started) * 1000)
+
+                storage_started = time.perf_counter()
+                working_item.outputs = self._persist_final_outputs(
+                    db,
+                    execution_id=execution_id,
+                    user_id=working_item.user_id,
+                    outputs=normalized_outputs,
+                )
+                storage_ms = int((time.perf_counter() - storage_started) * 1000)
+                self._assert_required_image_outputs(db, item=working_item)
+
+                context_started = time.perf_counter()
+                remote_context = output.get("context")
+                if isinstance(remote_context, dict):
+                    working_item.context = self._materialize_modal_files(
+                        remote_context,
+                        execution_id,
                     )
-                    self._assert_required_image_outputs(db, item=item)
-                    remote_context = output.get("context")
-                    if isinstance(remote_context, dict):
-                        item.context = self._materialize_modal_files(
-                            remote_context,
-                            execution_id,
-                        )
-                    item.runtime_metrics = runtime_metrics
-                    item.provider_metrics.update({
-                        "provider": "modal",
-                        "execution_time_ms": runtime_duration_ms or result.get("execution_time_ms"),
-                        "pipeline_duration_ms": runtime_metrics.get("pipeline_duration_ms"),
-                        "duration_source": (
-                            "runtime_exact" if runtime_duration_ms > 0 else "provider_observed"
-                        ),
-                        "runtime_url": result.get("runtime_url"),
-                        "provider_job_id": result.get("provider_job_id") or item.provider_job_id,
-                        "resumed_after_backend_restart": bool(
-                            item.recovery_count > 0 or result.get("resumed")
-                        ),
-                        "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
-                    })
+                context_ms = int((time.perf_counter() - context_started) * 1000)
+
+                working_item.runtime_metrics = runtime_metrics
+                working_item.provider_metrics.update({
+                    "provider": "modal",
+                    "execution_time_ms": runtime_duration_ms or result.get("execution_time_ms"),
+                    "pipeline_duration_ms": runtime_metrics.get("pipeline_duration_ms"),
+                    "duration_source": (
+                        "runtime_exact" if runtime_duration_ms > 0 else "provider_observed"
+                    ),
+                    "runtime_url": result.get("runtime_url"),
+                    "provider_job_id": result.get("provider_job_id") or working_item.provider_job_id,
+                    "resumed_after_backend_restart": bool(
+                        working_item.recovery_count > 0 or result.get("resumed")
+                    ),
+                    "termination_status": runtime_metrics.get("termination_status") or output.get("status"),
+                    "finalization_materialization_ms": materialization_ms,
+                    "finalization_storage_ms": storage_ms,
+                    "finalization_context_ms": context_ms,
+                })
+                if finalizing_started_monotonic is not None:
+                    working_item.provider_metrics["finalization_pre_billing_ms"] = int(
+                        (time.perf_counter() - finalizing_started_monotonic) * 1000
+                    )
+
+                with self._lock:
+                    item = self._items[execution_id]
+                    # FINALIZING cannot be user-cancelled. Preserve a terminal state if
+                    # another internal safety path nevertheless closed it.
+                    if item.status in {"completed", "failed", "cancelled"}:
+                        return
+                    item.steps = working_item.steps
+                    item.outputs = working_item.outputs
+                    item.context = working_item.context
+                    item.runtime_metrics = working_item.runtime_metrics
+                    item.provider_metrics = working_item.provider_metrics
                     item.status = "completed"
                     item.progress = 100
                     item.provider_status = "COMPLETED"
@@ -1639,16 +1699,13 @@ class GenerationModuleRuntimeService:
                 with self._lock:
                     item = self._items[execution_id]
                     item.finished_at = finished
-                    item.duration_ms = int(
-                        (finished - started).total_seconds() * 1000
-                    )
+                    item.duration_ms = int((finished - started).total_seconds() * 1000)
                     item.heartbeat_at = finished
                     item.provider_status = (
-                        "COMPLETED"
-                        if item.status == "completed"
-                        else item.status.upper()
+                        "COMPLETED" if item.status == "completed" else item.status.upper()
                     )
                     self._provider_refs.pop(execution_id, None)
+                billing_started = time.perf_counter()
                 try:
                     with self._lock:
                         billing_item = self._items[execution_id]
@@ -1667,6 +1724,16 @@ class GenerationModuleRuntimeService:
                                 ),
                             )
                         )
+                finally:
+                    if finalizing_started_monotonic is not None:
+                        with self._lock:
+                            metric_item = self._items[execution_id]
+                            metric_item.provider_metrics["finalization_billing_ms"] = int(
+                                (time.perf_counter() - billing_started) * 1000
+                            )
+                            metric_item.provider_metrics["finalization_total_ms"] = int(
+                                (time.perf_counter() - finalizing_started_monotonic) * 1000
+                            )
                 with self._lock:
                     final_snapshot = self._items[execution_id].model_copy(deep=True)
                 generation_module_execution_store_service.save(final_snapshot)
