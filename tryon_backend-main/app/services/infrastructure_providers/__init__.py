@@ -1,1 +1,0 @@
-from .registry import infrastructure_provider_registry

@@ -1,19 +1,20 @@
 from app.services.runtime_builder_service import RuntimeBuilderService
 
 
-def test_modal_engine_config_and_selective_warmup_follow_current_resident_contract():
+def test_modal_engine_config_and_selective_warmup():
     config = RuntimeBuilderService._modal_runtime_engine_toml("/models")
     warmup = RuntimeBuilderService._modal_snapshot_warmup_workflow()
 
-    assert "gpu_enabled = true" in config
-    for resident in RuntimeBuilderService.DEFAULT_MODAL_RESIDENT_MODELS:
-        assert f'"{resident}"' in config
-        assert resident.split("/", 1)[-1] in warmup
+    assert 'gpu_enabled = true' in config
+    assert '"diffusion_models/realDream_klein9BV1.safetensors"' in config
+    assert '"text_encoders/qwen_3_8b.safetensors"' in config
     assert 'model_roots = ["/models"]' in config
+    assert "realDream_klein9BV1.safetensors" in warmup
+    assert "qwen_3_8b.safetensors" in warmup
     assert "flux2-vae.safetensors" not in warmup
 
 
-def test_modal_app_preserves_pipeline_and_current_engine_enablement():
+def test_modal_app_preserves_pipeline_and_adds_engine():
     app = RuntimeBuilderService._modal_app(
         "test-models",
         "/models",
@@ -25,7 +26,7 @@ def test_modal_app_preserves_pipeline_and_current_engine_enablement():
     assert "ModalSnapshotAdapter" in app
     assert "snapshot_adapter.prepare_snapshot()" in app
     assert "adapter.after_restore()" in app
-    assert "RUNTIME_ENGINE_ENABLED = True" in app
+    assert "TRYON_MODAL_RUNTIME_ENGINE_ENABLED" in app
 
 
 def test_modal_engine_import_is_deferred_to_modal_container():

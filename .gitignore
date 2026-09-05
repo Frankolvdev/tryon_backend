@@ -54,6 +54,3 @@ node_modules/
 storage/local/
 # SDKs aislados por proveedor
 .provider_envs/
-
-# Local incremental hotfix packages must never be committed
-HOTFIX_*.zip

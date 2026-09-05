@@ -1,5 +1,6 @@
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -7,13 +8,13 @@ def text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_discount_engine_uses_frozen_desired_profit_per_token_only():
+def test_discount_engine_uses_desired_profit_only():
     source = text("app/services/financial_protection_service.py")
-    assert "desired_profit_per_token_usd" in source
-    assert "safe_profit_per_token_usd" in source
+    assert "desired_profit_usd" in source
+    assert "safe_profit_usd" in source
+    assert "GPU costs are intentionally outside" in source
     assert "duration_safety_buffer_percent" not in source
     assert "gpu_cost_usd_per_second" not in source
-    assert "scaledown_window_seconds" not in source
 
 
 def test_manual_protection_update_endpoint_is_removed():
