@@ -107,3 +107,78 @@ def test_completed_runtime_response_uses_registry_and_backend_accepts_refs():
     assert "file_registry.get(file_id)" in backend_source
     assert "materialized_ref_cache" in backend_source
     assert "Legacy runtimes that inline ``__generation_file__`` continue to work." in backend_source
+
+
+def test_transport_registry_prunes_intermediate_only_files_but_preserves_light_metadata(tmp_path):
+    intermediate = tmp_path / "intermediate.png"
+    final = tmp_path / "final.png"
+    intermediate.write_bytes(b"intermediate-bytes")
+    final.write_bytes(b"final-bytes")
+
+    runtime = GenerationRuntime.__new__(GenerationRuntime)
+    payload, metrics = runtime._externalize_transport(
+        {
+            "steps": [
+                {
+                    "outputs": {
+                        "temp": {
+                            "__generation_file__": True,
+                            "local_path": str(intermediate),
+                            "filename": "intermediate.png",
+                            "content_type": "image/png",
+                            "node_id": "10",
+                        },
+                        "final_copy": {
+                            "__generation_file__": True,
+                            "local_path": str(final),
+                            "filename": "final-from-step.png",
+                            "content_type": "image/png",
+                            "node_id": "20",
+                        },
+                    }
+                }
+            ],
+            "outputs": {
+                "output_1": {
+                    "__generation_file__": True,
+                    "local_path": str(final),
+                    "filename": "final.png",
+                    "content_type": "image/png",
+                    "node_id": "20",
+                }
+            },
+            "context": {
+                "input_image": {
+                    "__generation_file__": True,
+                    "local_path": str(intermediate),
+                    "filename": "input.jpg",
+                    "content_type": "image/jpeg",
+                }
+            },
+        }
+    )
+
+    assert len(payload["files"]) == 1
+    final_ref = payload["outputs"]["output_1"]
+    assert "__generation_file_ref__" in final_ref
+    assert payload["steps"][0]["outputs"]["final_copy"]["__generation_file_ref__"] == final_ref["__generation_file_ref__"]
+
+    omitted_step = payload["steps"][0]["outputs"]["temp"]
+    omitted_context = payload["context"]["input_image"]
+    assert omitted_step["__generation_file_omitted__"] is True
+    assert omitted_context["__generation_file_omitted__"] is True
+    assert "data" not in omitted_step
+    assert "local_path" not in omitted_step
+
+    assert metrics["transport_discovered_unique_file_count"] == 2
+    assert metrics["transport_unique_file_count"] == 1
+    assert metrics["transport_omitted_intermediate_unique_file_count"] == 1
+    assert metrics["transport_omitted_intermediate_declared_file_bytes"] == len(b"intermediate-bytes")
+
+    diagnostics = metrics["transport_unique_files"]
+    transported = next(item for item in diagnostics if item["transported"])
+    omitted = next(item for item in diagnostics if not item["transported"])
+    assert transported["file_id"] == final_ref["__generation_file_ref__"]
+    assert "outputs.output_1" in transported["paths"]
+    assert omitted["file_id"] is None
+    assert "steps[0].outputs.temp" in omitted["paths"]

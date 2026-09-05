@@ -562,15 +562,21 @@ class GenerationRuntime:
         return value
 
     def _externalize_transport(self, value: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Externalize generation files once and replace repetitions with file refs.
+        """Externalize only final-output generation files and replace repetitions with refs.
 
-        The registry is provider/storage agnostic. Backend still owns persistence and
-        storage selection; the remote runtime only deduplicates transport bytes.
+        The runtime keeps every intermediate file available while the pipeline executes,
+        but only generation files reachable from the resolved module ``outputs`` are
+        transported with heavy base64 payloads. Matching occurrences in ``steps`` or
+        ``context`` reuse the same registry refs. Intermediate-only files retain light
+        metadata so diagnostics/context shape remain inspectable without shipping bytes.
+
+        The registry remains provider/storage agnostic. Backend still owns persistence
+        and storage selection.
         """
         files: dict[str, dict[str, Any]] = {}
         file_id_by_digest: dict[str, str] = {}
         path_content_cache: dict[str, tuple[bytes, str]] = {}
-        diagnostics_by_file_id: dict[str, dict[str, Any]] = {}
+        diagnostics_by_digest: dict[str, dict[str, Any]] = {}
         occurrence_count = 0
         occurrence_declared_bytes = 0
 
@@ -585,47 +591,61 @@ class GenerationRuntime:
                     result += ("." if result else "") + part
             return result
 
+        def file_content_and_digest(item: dict[str, Any]) -> tuple[bytes, str]:
+            path = Path(item["local_path"])
+            cache_key = str(path.resolve())
+            cached = path_content_cache.get(cache_key)
+            if cached is None:
+                content = path.read_bytes()
+                cached = (content, hashlib.sha256(content).hexdigest())
+                path_content_cache[cache_key] = cached
+            return cached
+
+        selected_digests: set[str] = set()
+
+        def collect_selected(item: Any) -> None:
+            if isinstance(item, dict) and item.get("__generation_file__"):
+                _, digest = file_content_and_digest(item)
+                selected_digests.add(digest)
+                return
+            if isinstance(item, dict):
+                for child in item.values():
+                    collect_selected(child)
+                return
+            if isinstance(item, list):
+                for child in item:
+                    collect_selected(child)
+
+        # The resolved module outputs are the transport authority. No workflow-specific
+        # keys/node ids are hardcoded here.
+        collect_selected((value or {}).get("outputs") if isinstance(value, dict) else None)
+
         def externalize(item: Any, path_parts: tuple[str, ...] = ()) -> Any:
             nonlocal occurrence_count, occurrence_declared_bytes
             if isinstance(item, dict) and item.get("__generation_file__"):
                 path = Path(item["local_path"])
-                cache_key = str(path.resolve())
-                cached_content = path_content_cache.get(cache_key)
-                if cached_content is None:
-                    content = path.read_bytes()
-                    digest = hashlib.sha256(content).hexdigest()
-                    path_content_cache[cache_key] = (content, digest)
-                else:
-                    content, digest = cached_content
+                content, digest = file_content_and_digest(item)
                 size_bytes = len(content)
                 occurrence_count += 1
                 occurrence_declared_bytes += size_bytes
-                file_id = file_id_by_digest.get(digest)
-                if file_id is None:
-                    file_id = f"file_{len(files) + 1}"
-                    file_id_by_digest[digest] = file_id
-                    content_type = item.get("content_type") or "application/octet-stream"
-                    encoded = base64.b64encode(content).decode("ascii")
-                    files[file_id] = {
-                        "__generation_file__": True,
-                        "filename": item.get("filename") or path.name,
-                        "content_type": content_type,
-                        "size_bytes": size_bytes,
-                        "encoding": "base64",
-                        "data": "data:" + content_type + ";base64," + encoded,
-                        "sha256": digest,
-                        "node_id": item.get("node_id"),
-                    }
-                    diagnostics_by_file_id[file_id] = {
-                        "file_id": file_id,
+                selected = digest in selected_digests
+
+                diagnostic = diagnostics_by_digest.get(digest)
+                if diagnostic is None:
+                    diagnostic = {
+                        "file_id": None,
                         "sha256": digest,
                         "size_bytes": size_bytes,
                         "occurrence_count": 0,
                         "paths": [],
                         "filenames": [],
                         "node_ids": [],
+                        "transported": selected,
                     }
-                diagnostic = diagnostics_by_file_id[file_id]
+                    diagnostics_by_digest[digest] = diagnostic
+                elif selected:
+                    diagnostic["transported"] = True
+
                 diagnostic["occurrence_count"] = int(diagnostic["occurrence_count"]) + 1
                 current_path = logical_path(path_parts)
                 if current_path not in diagnostic["paths"]:
@@ -636,12 +656,42 @@ class GenerationRuntime:
                 node_id = item.get("node_id")
                 if node_id is not None and node_id not in diagnostic["node_ids"]:
                     diagnostic["node_ids"].append(node_id)
+
+                if not selected:
+                    return {
+                        "__generation_file_omitted__": True,
+                        "filename": filename,
+                        "content_type": item.get("content_type") or "application/octet-stream",
+                        "size_bytes": size_bytes,
+                        "sha256": digest,
+                        "node_id": node_id,
+                        "transport_reason": "intermediate_only",
+                    }
+
+                file_id = file_id_by_digest.get(digest)
+                if file_id is None:
+                    file_id = f"file_{len(files) + 1}"
+                    file_id_by_digest[digest] = file_id
+                    content_type = item.get("content_type") or "application/octet-stream"
+                    encoded = base64.b64encode(content).decode("ascii")
+                    files[file_id] = {
+                        "__generation_file__": True,
+                        "filename": filename,
+                        "content_type": content_type,
+                        "size_bytes": size_bytes,
+                        "encoding": "base64",
+                        "data": "data:" + content_type + ";base64," + encoded,
+                        "sha256": digest,
+                        "node_id": node_id,
+                    }
+                    diagnostic["file_id"] = file_id
+
                 return {
                     "__generation_file_ref__": file_id,
-                    "filename": item.get("filename") or path.name,
+                    "filename": filename,
                     "content_type": item.get("content_type") or "application/octet-stream",
                     "size_bytes": size_bytes,
-                    "node_id": item.get("node_id"),
+                    "node_id": node_id,
                 }
             if isinstance(item, dict):
                 return {key: externalize(child, path_parts + (str(key),)) for key, child in item.items()}
@@ -656,16 +706,32 @@ class GenerationRuntime:
             for item in files.values()
             if isinstance(item.get("data"), str) and "," in str(item.get("data"))
         )
+        all_unique_declared_bytes = sum(int(item.get("size_bytes") or 0) for item in diagnostics_by_digest.values())
+        transported_occurrences = sum(
+            int(item.get("occurrence_count") or 0)
+            for item in diagnostics_by_digest.values()
+            if item.get("transported")
+        )
+        omitted_unique_count = sum(1 for item in diagnostics_by_digest.values() if not item.get("transported"))
+        omitted_unique_bytes = sum(
+            int(item.get("size_bytes") or 0)
+            for item in diagnostics_by_digest.values()
+            if not item.get("transported")
+        )
         externalized["files"] = files
         return externalized, {
             "transport_generation_file_occurrences": occurrence_count,
             "transport_unique_file_count": len(files),
-            "transport_duplicate_file_occurrences": max(0, occurrence_count - len(files)),
+            "transport_duplicate_file_occurrences": max(0, transported_occurrences - len(files)),
             "transport_occurrence_declared_file_bytes": occurrence_declared_bytes,
             "transport_unique_declared_file_bytes": unique_declared_bytes,
             "transport_unique_base64_character_count": unique_base64_characters,
             "transport_saved_declared_file_bytes": max(0, occurrence_declared_bytes - unique_declared_bytes),
-            "transport_unique_files": list(diagnostics_by_file_id.values()),
+            "transport_discovered_unique_file_count": len(diagnostics_by_digest),
+            "transport_discovered_unique_declared_file_bytes": all_unique_declared_bytes,
+            "transport_omitted_intermediate_unique_file_count": omitted_unique_count,
+            "transport_omitted_intermediate_declared_file_bytes": omitted_unique_bytes,
+            "transport_unique_files": list(diagnostics_by_digest.values()),
         }
 
     def _externalize(self, value: Any) -> Any:
