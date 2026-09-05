@@ -11,6 +11,7 @@ from app.services.storage_service import storage_service
 from app.services.body_proportion_tool_service import body_proportion_tool_service
 from app.services.bubble_butt_tool_service import bubble_butt_tool_service
 from app.services.generation_module_execution_store_service import generation_module_execution_store_service
+from app.services.generation_result_mime import is_generation_image
 
 
 class AiModelProfileService:
@@ -210,7 +211,7 @@ class AiModelProfileService:
         stored = db.get(StorageFile, storage_file_id)
         if not stored or stored.user_id != user_id:
             raise LookupError("Generated image not found.")
-        if not str(stored.content_type or "").startswith("image/"):
+        if not is_generation_image(stored.content_type, stored.original_filename):
             raise ValueError("The selected generation result is not an image.")
 
         if (identity_face_storage_file_id is None) != (identity_face_output_id is None):
@@ -227,7 +228,7 @@ class AiModelProfileService:
             identity_face = db.get(StorageFile, identity_face_storage_file_id)
             if not identity_face or identity_face.user_id != user_id:
                 raise LookupError("Generated identity face image not found.")
-            if not str(identity_face.content_type or "").startswith("image/"):
+            if not is_generation_image(identity_face.content_type, identity_face.original_filename):
                 raise ValueError("The identity face generation result is not an image.")
 
         draft = dict(row.draft_json or {})

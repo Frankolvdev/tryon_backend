@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import mimetypes
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -8,6 +7,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.services.storage_service import storage_service
+from app.services.generation_result_mime import normalize_generation_content_type
 
 
 class GenerationModuleResultService:
@@ -33,12 +33,13 @@ class GenerationModuleResultService:
             if not path.is_file():
                 registered.append(enriched)
                 continue
-            content_type = enriched.get("content_type") or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            filename = enriched.get("filename") or path.name
+            content_type = normalize_generation_content_type(enriched.get("content_type"), filename)
             record = storage_service.save_bytes(
                 db=db,
                 user_id=user_id,
                 content=path.read_bytes(),
-                original_filename=enriched.get("filename") or path.name,
+                original_filename=filename,
                 content_type=content_type,
                 folder=f"generation-results/{execution_id}",
             )
