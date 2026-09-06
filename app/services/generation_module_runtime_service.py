@@ -2569,21 +2569,6 @@ class GenerationModuleRuntimeService:
             value = value.get(part) if isinstance(value, dict) else None
         return copy.deepcopy(value)
 
-    @staticmethod
-    def _utility_cleanup_workflow() -> dict[str, Any]:
-        # The sentinel is intentionally opaque to normal workflows. The runtime
-        # guard recognizes it as a stage boundary and bypasses selective keep-models.
-        return {
-            "tryon_full_vram_cleanup": {
-                "class_type": "LayerUtility: PurgeVRAM V2",
-                "inputs": {
-                    "anything": "__TRYON_STAGE_BOUNDARY_FULL_PURGE__",
-                    "purge_cache": True,
-                    "purge_models": True,
-                },
-            }
-        }
-
     def execute_utility_step(
         self,
         db: Session,
@@ -2630,33 +2615,13 @@ class GenerationModuleRuntimeService:
         }:
             local_target = self.get(execution_id).provider_endpoint_id
             local_adapter = self._local_adapter_for_engine(db, engine, local_target)
-            queued = local_adapter.queue_prompt(
-                workflow=self._utility_cleanup_workflow(),
-                extra_data={
-                    "generation_execution_id": str(execution_id),
-                    "utility_step_key": step["key"],
-                },
-            )
-            with self._lock:
-                self._provider_refs[execution_id] = {
-                    "engine": engine.value,
-                    "prompt_id": queued["prompt_id"],
-                    "client_id": queued["client_id"],
-                }
-                item = self._items[execution_id]
-                item.provider_job_id = queued["prompt_id"]
-                item.provider_status = "comfyui_queued"
-                generation_module_execution_store_service.save(item.model_copy(deep=True))
-            local_adapter.execute_queued_prompt(
-                prompt_id=queued["prompt_id"],
-                client_id=queued["client_id"],
-                job_public_id=str(execution_id),
+            self._provider_progress(execution_id, step["key"], 0.0, "Resetting local GPU runtime")
+            local_adapter.full_gpu_runtime_reset(
                 timeout_seconds=timeout,
-                download_outputs=False,
-                progress_callback=lambda progress, message, meta=None: self._provider_progress(
-                    execution_id, step["key"], progress, message
-                ),
+                execution_id=str(execution_id),
+                step_key=str(step["key"]),
             )
+            self._provider_progress(execution_id, step["key"], 1.0, "Local GPU runtime reset complete")
         else:
             # Modal/RunPod/Beam execute the full module inside the provider runtime,
             # so this local dispatcher must never be used for those engines.
@@ -2697,32 +2662,13 @@ class GenerationModuleRuntimeService:
                 )
             local_target = current.provider_endpoint_id
             local_adapter = self._local_adapter_for_engine(db, engine, local_target)
-            queued = local_adapter.queue_prompt(
-                workflow={
-                    "tryon_full_vram_cleanup": {
-                        "class_type": "LayerUtility: PurgeVRAM V2",
-                        "inputs": {
-                            "anything": "__TRYON_STAGE_BOUNDARY_FULL_PURGE__",
-                            "purge_cache": True,
-                            "purge_models": True,
-                        },
-                    }
-                },
-                extra_data={
-                    "generation_execution_id": str(execution_id),
-                    "python_step_key": step["key"],
-                },
-            )
-            local_adapter.execute_queued_prompt(
-                prompt_id=queued["prompt_id"],
-                client_id=queued["client_id"],
-                job_public_id=str(execution_id),
+            self._provider_progress(execution_id, step["key"], 0.0, "Resetting local GPU runtime")
+            local_adapter.full_gpu_runtime_reset(
                 timeout_seconds=timeout,
-                download_outputs=False,
-                progress_callback=lambda progress, message, meta=None: self._provider_progress(
-                    execution_id, step["key"], progress, message
-                ),
+                execution_id=str(execution_id),
+                step_key=str(step["key"]),
             )
+            self._provider_progress(execution_id, step["key"], 1.0, "Local GPU runtime reset complete")
             return copy.deepcopy(raw_inputs)
 
         # Python image ports receive real Pillow images instead of the internal

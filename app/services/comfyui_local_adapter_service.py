@@ -111,6 +111,48 @@ class ComfyUILocalAdapterService:
                 "error": str(error),
             }
 
+    def full_gpu_runtime_reset(
+        self,
+        *,
+        timeout_seconds: int = 120,
+        execution_id: str | None = None,
+        step_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Request a framework-aware GPU reset inside the persistent local runtime.
+
+        This deliberately does not submit a ComfyUI workflow. The reset endpoint is
+        implemented by the local runtime companion and executes inside the process
+        that owns the CUDA context, so it can release framework model references and
+        then perform generic Python/PyTorch/CUDA cleanup without restarting ComfyUI.
+        """
+        body: dict[str, Any] = {"mode": "full"}
+        if execution_id:
+            body["execution_id"] = str(execution_id)
+        if step_key:
+            body["step_key"] = str(step_key)
+
+        timeout = max(float(timeout_seconds), self._timeout_seconds())
+        with self._client(timeout=timeout) as client:
+            response = client.post(
+                f"{self._base_url()}/generation-runtime/gpu/reset",
+                json=body,
+            )
+            if response.status_code == 404:
+                raise RuntimeError(
+                    "The local generation runtime GPU reset companion is not installed "
+                    "or is not loaded by the target ComfyUI process."
+                )
+            response.raise_for_status()
+            data = response.json()
+
+        if not isinstance(data, dict) or data.get("ok") is not True:
+            detail = data.get("error") if isinstance(data, dict) else None
+            raise RuntimeError(
+                "Local GPU runtime reset failed"
+                + (f": {detail}" if detail else ".")
+            )
+        return data
+
     def upload_input(
         self,
         *,
