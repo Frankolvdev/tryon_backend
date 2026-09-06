@@ -406,14 +406,23 @@ class PricingService:
         return milliseconds / 1000.0 if milliseconds > 0 else None
 
     def _historical_duration_from_selector(
-        self, module_id: int, fallback: int, selector
+        self, module_id: int, fallback: int, selector, *, engine: str | None = None
     ) -> tuple[float, str, int, str, str | None]:
+        # UI ETA learning is provider/engine scoped. A slow Modal execution must
+        # never train Local/Owner Local (and vice versa). Keep the established
+        # rolling-five + outlier guard + conservative maximum formula unchanged.
         rows, _ = generation_module_execution_store_service.list(
-            module_id=module_id, status="completed", skip=0, limit=5,
+            module_id=module_id, status="completed", engine=engine, skip=0, limit=5,
         )
         samples: list[tuple[float, object]] = []
         for row in rows:
-            if str(getattr(row, "accounting_mode", "commercial") or "commercial") != "commercial":
+            accounting_mode = str(getattr(row, "accounting_mode", "commercial") or "commercial")
+            # Owner Local has no commercial accounting by design, but its real
+            # wall-clock durations are valid training samples for its own UI ETA.
+            if engine == "owner_local":
+                if accounting_mode != "owner_private":
+                    continue
+            elif accounting_mode != "commercial":
                 continue
             duration = selector(row)
             if duration is not None:
@@ -436,11 +445,16 @@ class PricingService:
         return round(estimate, 3), "historical_max", count, confidence, latest_at.isoformat() if latest_at else None
 
     def historical_backend_loading_duration(
-        self, module_id: int, fallback: int
+        self, module_id: int, fallback: int, *, engine: str | None = None
     ) -> tuple[float, str, int, str, str | None]:
-        """UI-only ETA based on Backend duration_ms; never used for pricing/costs."""
+        """UI-only ETA based on Backend duration_ms, isolated per provider engine.
+
+        This estimator never participates in pricing/costs. It intentionally keeps
+        the existing rolling five samples, median outlier guard and historical max
+        behavior; only the provider population is isolated.
+        """
         return self._historical_duration_from_selector(
-            module_id, fallback, self._backend_execution_duration_seconds
+            module_id, fallback, self._backend_execution_duration_seconds, engine=engine
         )
 
     def _historical_duration(

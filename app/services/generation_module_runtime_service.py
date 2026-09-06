@@ -171,7 +171,9 @@ class GenerationModuleRuntimeService:
                 _loading_backend_confidence,
                 _loading_backend_updated_at,
             ) = pricing_service.historical_backend_loading_duration(
-                module.id, int(pricing.estimated_duration_seconds or 30)
+                module.id,
+                int(pricing.estimated_duration_seconds or 30),
+                engine=engine.value if hasattr(engine, "value") else str(engine),
             )
         estimated_billable_seconds = (
             float(pricing.estimated_billable_seconds)

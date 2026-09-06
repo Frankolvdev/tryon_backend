@@ -23,3 +23,15 @@ def test_module_contract_exposes_estimate_explanation():
     for field in ("historical_samples_used", "estimate_confidence", "estimate_updated_at"):
         assert field in schema
         assert field in service
+
+
+def test_backend_loading_eta_is_provider_scoped_without_changing_pricing_estimator():
+    pricing = Path("app/services/pricing_service.py").read_text(encoding="utf-8")
+    runtime = Path("app/services/generation_module_runtime_service.py").read_text(encoding="utf-8")
+    assert 'status="completed", engine=engine, skip=0, limit=5' in pricing
+    assert 'engine == "owner_local"' in pricing
+    assert 'accounting_mode != "owner_private"' in pricing
+    assert 'engine=engine.value if hasattr(engine, "value") else str(engine)' in runtime
+    # Financial/provider-duration pricing learning remains on its original module-wide path.
+    assert 'def _historical_duration(\n        self, module_id: int, fallback: int' in pricing
+    assert 'estimate = max(duration for duration, _row in samples)' in pricing
