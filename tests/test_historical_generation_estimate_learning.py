@@ -31,7 +31,8 @@ def test_backend_loading_eta_is_provider_scoped_without_changing_pricing_estimat
     assert 'status="completed", engine=engine, skip=0, limit=5' in pricing
     assert 'engine == "owner_local"' in pricing
     assert 'accounting_mode != "owner_private"' in pricing
-    assert 'engine=engine.value if hasattr(engine, "value") else str(engine)' in runtime
+    assert 'engine_key = engine.value if hasattr(engine, "value") else str(engine)' in runtime
+    assert runtime.count('engine=engine_key') >= 2
     # Financial/provider-duration pricing learning remains on its original module-wide path.
     assert 'def _historical_duration(\n        self, module_id: int, fallback: int' in pricing
     assert 'estimate = max(duration for duration, _row in samples)' in pricing

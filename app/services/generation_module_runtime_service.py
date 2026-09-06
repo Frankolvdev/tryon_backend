@@ -150,20 +150,38 @@ class GenerationModuleRuntimeService:
             if pricing is not None
             else None
         )
-        estimated_duration_seconds = (
-            float(pricing.estimated_duration_seconds)
-            if pricing is not None and pricing.estimated_duration_seconds is not None
+        # Loading ETA is a UI concern and must be provider-scoped independently
+        # from financial pricing.  In particular, never use the learned pricing
+        # estimate as the fallback here: that estimate is intentionally module-wide
+        # for financial calculations and can otherwise make a fresh Local/Owner
+        # Local execution appear to inherit another provider's timing trend.
+        engine_key = engine.value if hasattr(engine, "value") else str(engine)
+        pricing_rule = (
+            pricing_rule_repository.get_for_generation_module(db, module.id)
+            if pricing is not None
             else None
         )
-        estimated_duration_source = (
-            str(pricing.estimated_duration_source)
-            if pricing is not None and pricing.estimated_duration_source
-            else None
+        loading_initial_duration_seconds = int(
+            getattr(pricing_rule, "initial_estimated_duration_seconds", None)
+            or 30
         )
+        estimated_duration_seconds = None
+        estimated_duration_source = None
         loading_backend_estimated_duration_seconds = None
         loading_backend_estimated_duration_source = None
         loading_backend_historical_samples_used = 0
         if pricing is not None:
+            (
+                estimated_duration_seconds,
+                estimated_duration_source,
+                _loading_runtime_historical_samples_used,
+                _loading_runtime_confidence,
+                _loading_runtime_updated_at,
+            ) = pricing_service.historical_runtime_loading_duration(
+                module.id,
+                loading_initial_duration_seconds,
+                engine=engine_key,
+            )
             (
                 loading_backend_estimated_duration_seconds,
                 loading_backend_estimated_duration_source,
@@ -172,8 +190,8 @@ class GenerationModuleRuntimeService:
                 _loading_backend_updated_at,
             ) = pricing_service.historical_backend_loading_duration(
                 module.id,
-                int(pricing.estimated_duration_seconds or 30),
-                engine=engine.value if hasattr(engine, "value") else str(engine),
+                loading_initial_duration_seconds,
+                engine=engine_key,
             )
         estimated_billable_seconds = (
             float(pricing.estimated_billable_seconds)

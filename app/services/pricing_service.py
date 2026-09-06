@@ -444,6 +444,19 @@ class PricingService:
         latest_at = latest.finished_at or latest.updated_at or latest.created_at
         return round(estimate, 3), "historical_max", count, confidence, latest_at.isoformat() if latest_at else None
 
+    def historical_runtime_loading_duration(
+        self, module_id: int, fallback: int, *, engine: str | None = None
+    ) -> tuple[float, str, int, str, str | None]:
+        """UI-only provider/runtime ETA isolated per execution engine.
+
+        This path is deliberately separate from the financial pricing estimator.
+        It uses the same rolling-five, outlier guard and conservative maximum
+        formula, but can never learn from a different provider.
+        """
+        return self._historical_duration_from_selector(
+            module_id, fallback, self._execution_duration_seconds, engine=engine
+        )
+
     def historical_backend_loading_duration(
         self, module_id: int, fallback: int, *, engine: str | None = None
     ) -> tuple[float, str, int, str, str | None]:
