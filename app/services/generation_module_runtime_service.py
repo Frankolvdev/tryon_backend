@@ -653,7 +653,24 @@ class GenerationModuleRuntimeService:
                     state.status = "completed"; state.finished_at = finished
                     state.duration_ms = int((finished - state.started_at).total_seconds() * 1000) if state.started_at else 0
                     state.outputs = outputs
-                    GenerationRuntimeContext.merge_step_outputs(item.context, step["key"], outputs)
+                    configuration = step.get("configuration") or {}
+                    source_code = str(configuration.get("source_code") or "")
+                    is_local_gpu_reset_passthrough = (
+                        engine in {GenerationExecutionEngine.LOCAL_DOCKER, GenerationExecutionEngine.OWNER_LOCAL}
+                        and (
+                            str(configuration.get("action") or "") == "comfyui_vram_purge"
+                            or self._VRAM_PURGE_SOURCE_MARKER in source_code
+                        )
+                    )
+                    if is_local_gpu_reset_passthrough:
+                        # Pipeline Utility outputs are addressable through the step namespace
+                        # (for example cleanup_7.input_1).  They must NOT be flattened back
+                        # into the module root: ports named input_1/input_2 would otherwise
+                        # overwrite the original module inputs and corrupt later workflow
+                        # bindings such as PrimitiveFloat.value.
+                        item.context[step["key"]] = copy.deepcopy(outputs)
+                    else:
+                        GenerationRuntimeContext.merge_step_outputs(item.context, step["key"], outputs)
                     item.progress = int(((index + 1) / max(len(steps), 1)) * 90)
                     item.logs.append(GenerationModuleExecutionLog(timestamp=finished, step_key=step["key"], message=f"Step '{step['name']}' completed."))
                     step_snapshot = item.model_copy(deep=True)
