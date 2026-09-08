@@ -114,7 +114,7 @@ class Settings(BaseSettings):
 
     I18N_CACHE_TTL_SECONDS: int = 300
 
-    FRONTEND_URL: str = "http://localhost:3000"
+    FRONTEND_URL: str = "http://localhost:3003"
 
     @property
     def DATABASE_URL(self) -> str:
