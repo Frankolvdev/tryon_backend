@@ -6,16 +6,19 @@ from pydantic import BaseModel, ConfigDict, Field
 StorageMode = Literal["auto", "local", "amazon_s3", "cloudflare_r2"]
 ToolKey = Literal[
     "eyebrows", "lips", "hairstyle",
-    "hips", "ass", "breasts", "height", "bubble_butt", "waist", "slim", "thick",
+    "hips", "butt_size", "breasts", "height", "bubble_butt", "waist", "complexion",
+    # Legacy aliases kept for bundle/backward compatibility.
+    "ass", "slim", "thick",
 ]
 
 
 class ModelGenerationAssetCreate(BaseModel):
     tool_key: ToolKey
     asset_key: str = Field(min_length=1, max_length=120)
-    title: str = Field(min_length=1, max_length=180)
-    value: str = Field(min_length=1, max_length=500)
+    title: str = Field(default="", max_length=180)
+    value: str = Field(default="", max_length=500)
     sort_order: float = 100.0
+    position: int | None = Field(default=None, ge=0)
     storage_mode: StorageMode = "auto"
     is_active: bool = True
     notes: str | None = None
@@ -24,9 +27,10 @@ class ModelGenerationAssetCreate(BaseModel):
 
 class ModelGenerationAssetUpdate(BaseModel):
     asset_key: str | None = Field(default=None, min_length=1, max_length=120)
-    title: str | None = Field(default=None, min_length=1, max_length=180)
-    value: str | None = Field(default=None, min_length=1, max_length=500)
+    title: str | None = Field(default=None, max_length=180)
+    value: str | None = Field(default=None, max_length=500)
     sort_order: float | None = None
+    position: int | None = Field(default=None, ge=0)
     storage_mode: StorageMode | None = None
     is_active: bool | None = None
     notes: str | None = None
@@ -40,6 +44,7 @@ class ModelGenerationAssetResponse(BaseModel):
     title: str
     value: str
     sort_order: float
+    position: int | None
     storage_mode: str
     poster_storage_file_id: int | None
     video_storage_file_id: int | None

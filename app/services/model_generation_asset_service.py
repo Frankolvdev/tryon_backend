@@ -16,10 +16,18 @@ class ModelGenerationAssetService:
     MODES = {"auto", "local", "amazon_s3", "cloudflare_r2"}
     TOOLS = {
         "eyebrows", "lips", "hairstyle",
-        "hips", "ass", "breasts", "height", "bubble_butt", "waist", "slim", "thick",
+        "hips", "butt_size", "breasts", "height", "bubble_butt", "waist", "complexion",
+        # Legacy aliases accepted so old bundles remain importable.
+        "ass", "slim", "thick",
     }
     IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
     VIDEO_TYPES = {"video/mp4", "video/webm", "video/quicktime"}
+    BODY_TOOLS = {"hips", "butt_size", "breasts", "height", "bubble_butt", "waist", "complexion"}
+    LEGACY_TOOL_MAP = {"ass": "butt_size", "slim": "complexion", "thick": "complexion"}
+
+    @classmethod
+    def _canonical_tool(cls, tool_key: str) -> str:
+        return cls.LEGACY_TOOL_MAP.get(tool_key, tool_key)
 
     @staticmethod
     def _slug(value: str) -> str:
@@ -39,7 +47,8 @@ class ModelGenerationAssetService:
         if tool_key:
             if tool_key not in self.TOOLS:
                 raise ValueError("Unsupported tool key.")
-            query = query.filter(ModelGenerationAsset.tool_key == tool_key)
+            canonical = self._canonical_tool(tool_key)
+            query = query.filter(ModelGenerationAsset.tool_key == canonical)
         if active_only:
             query = query.filter(ModelGenerationAsset.is_active.is_(True))
         return query.order_by(ModelGenerationAsset.tool_key, ModelGenerationAsset.sort_order, ModelGenerationAsset.id).all()
@@ -64,6 +73,7 @@ class ModelGenerationAssetService:
             "title": row.title,
             "value": row.value,
             "sort_order": row.sort_order,
+            "position": row.position,
             "storage_mode": row.storage_mode,
             "poster_storage_file_id": row.poster_storage_file_id,
             "video_storage_file_id": row.video_storage_file_id,
@@ -77,19 +87,34 @@ class ModelGenerationAssetService:
         }
 
     def create(self, db: Session, data: ModelGenerationAssetCreate) -> ModelGenerationAsset:
+        tool_key = self._canonical_tool(data.tool_key)
         key = self._slug(data.asset_key)
+        if tool_key in self.BODY_TOOLS:
+            if data.position is None:
+                raise ValueError("Position is required for body preview assets.")
+            position_exists = db.query(ModelGenerationAsset).filter(
+                ModelGenerationAsset.tool_key == tool_key,
+                ModelGenerationAsset.position == data.position,
+            ).first()
+            if position_exists:
+                raise ValueError("That Position is already used in this category.")
+            if tool_key == "complexion" and not data.title.strip():
+                raise ValueError("Title is required for Complexion.")
+        elif not data.title.strip() or not data.value.strip():
+            raise ValueError("Title and prompt value are required.")
         exists = db.query(ModelGenerationAsset).filter(
-            ModelGenerationAsset.tool_key == data.tool_key,
+            ModelGenerationAsset.tool_key == tool_key,
             ModelGenerationAsset.asset_key == key,
         ).first()
         if exists:
             raise ValueError("An asset with that key already exists in this tool.")
         row = ModelGenerationAsset(
-            tool_key=data.tool_key,
+            tool_key=tool_key,
             asset_key=key,
-            title=data.title.strip(),
-            value=data.value.strip(),
+            title=data.title.strip() if tool_key == "complexion" else ("" if tool_key in self.BODY_TOOLS else data.title.strip()),
+            value="" if tool_key in self.BODY_TOOLS else data.value.strip(),
             sort_order=data.sort_order,
+            position=data.position if tool_key in self.BODY_TOOLS else None,
             storage_mode=data.storage_mode,
             is_active=data.is_active,
             notes=data.notes,
@@ -116,6 +141,24 @@ class ModelGenerationAssetService:
             patch["value"] = patch["value"].strip()
         if "metadata" in patch:
             patch["metadata_json"] = patch.pop("metadata") or {}
+        if row.tool_key in self.BODY_TOOLS:
+            patch.pop("value", None)
+            if row.tool_key != "complexion":
+                patch.pop("title", None)
+            if "position" in patch:
+                if patch["position"] is None:
+                    raise ValueError("Position is required for body preview assets.")
+                position_exists = db.query(ModelGenerationAsset).filter(
+                    ModelGenerationAsset.tool_key == row.tool_key,
+                    ModelGenerationAsset.position == patch["position"],
+                    ModelGenerationAsset.id != row.id,
+                ).first()
+                if position_exists:
+                    raise ValueError("That Position is already used in this category.")
+            if row.tool_key == "complexion" and "title" in patch and not (patch["title"] or "").strip():
+                raise ValueError("Title is required for Complexion.")
+        else:
+            patch.pop("position", None)
         for key, value in patch.items():
             setattr(row, key, value)
         db.commit(); db.refresh(row)
@@ -205,18 +248,28 @@ class ModelGenerationAssetService:
         with zipfile.ZipFile(io.BytesIO(content), "r") as archive:
             manifest = json.loads(archive.read("manifest.json"))
             for item in manifest.get("items", []):
-                tool = item["tool_key"]
-                if tool not in self.TOOLS:
+                raw_tool = item["tool_key"]
+                if raw_tool not in self.TOOLS:
                     continue
+                tool = self._canonical_tool(raw_tool)
                 key = self._slug(item["asset_key"])
                 row = db.query(ModelGenerationAsset).filter(
                     ModelGenerationAsset.tool_key == tool,
                     ModelGenerationAsset.asset_key == key,
                 ).first()
+                imported_position = item.get("position")
+                if tool in self.BODY_TOOLS and imported_position is None:
+                    current_positions = [
+                        value for (value,) in db.query(ModelGenerationAsset.position)
+                        .filter(ModelGenerationAsset.tool_key == tool, ModelGenerationAsset.position.isnot(None)).all()
+                        if value is not None
+                    ]
+                    imported_position = (max(current_positions) if current_positions else 0) + 1
                 common = {
-                    "title": item["title"],
-                    "value": item["value"],
+                    "title": (item.get("title") or "").strip() if tool == "complexion" else ("" if tool in self.BODY_TOOLS else (item.get("title") or "").strip()),
+                    "value": "" if tool in self.BODY_TOOLS else (item.get("value") or "").strip(),
                     "sort_order": item.get("sort_order", 100),
+                    "position": imported_position if tool in self.BODY_TOOLS else None,
                     "storage_mode": target,
                     "is_active": item.get("is_active", True),
                     "notes": item.get("notes"),

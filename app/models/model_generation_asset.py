@@ -16,6 +16,7 @@ class ModelGenerationAsset(Base):
     title: Mapped[str] = mapped_column(String(180), nullable=False)
     value: Mapped[str] = mapped_column(String(500), nullable=False)
     sort_order: Mapped[float] = mapped_column(Float, nullable=False, default=100.0, index=True)
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     storage_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="auto")
     poster_storage_file_id: Mapped[int | None] = mapped_column(
         ForeignKey("storage_files.id", ondelete="SET NULL"), nullable=True, index=True
