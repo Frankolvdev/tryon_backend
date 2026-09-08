@@ -4,7 +4,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 StorageMode = Literal["auto", "local", "amazon_s3", "cloudflare_r2"]
-ToolKey = Literal["eyebrows", "lips", "hairstyle"]
+ToolKey = Literal[
+    "eyebrows", "lips", "hairstyle",
+    "hips", "ass", "breasts", "height", "bubble_butt", "waist", "slim", "thick",
+]
 
 
 class ModelGenerationAssetCreate(BaseModel):

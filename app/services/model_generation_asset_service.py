@@ -14,7 +14,10 @@ from app.services.storage_service import StorageProvider, storage_service
 
 class ModelGenerationAssetService:
     MODES = {"auto", "local", "amazon_s3", "cloudflare_r2"}
-    TOOLS = {"eyebrows", "lips", "hairstyle"}
+    TOOLS = {
+        "eyebrows", "lips", "hairstyle",
+        "hips", "ass", "breasts", "height", "bubble_butt", "waist", "slim", "thick",
+    }
     IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
     VIDEO_TYPES = {"video/mp4", "video/webm", "video/quicktime"}
 
