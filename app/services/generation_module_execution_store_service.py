@@ -10,6 +10,7 @@ from app.common.time import utc_now
 from app.db.database import SessionLocal
 from app.models.generation_module_execution import GenerationModuleExecution
 from app.schemas.generation_module_runtime import GenerationModuleExecutionResponse, GenerationModuleExecutionLog
+from app.services.generation_execution_state_contract import generation_execution_state_contract
 
 
 class GenerationModuleExecutionStoreService:
@@ -44,6 +45,10 @@ class GenerationModuleExecutionStoreService:
             row.finished_at = execution.finished_at
             row.updated_at = utc_now()
             db.commit()
+            # Persistence is authoritative; realtime publication is best-effort
+            # and deliberately happens only after the SQL commit succeeds.
+            from app.services.generation_execution_event_service import generation_execution_event_service
+            generation_execution_event_service.publish(execution)
         finally:
             db.close()
 
@@ -106,6 +111,32 @@ class GenerationModuleExecutionStoreService:
                 ))
             total = query.count()
             rows = query.order_by(desc(GenerationModuleExecution.created_at)).offset(skip).limit(limit).all()
+            return [self._response(row) for row in rows], total
+        finally:
+            db.close()
+
+    def list_active(
+        self,
+        *,
+        user_id: int,
+        module_id: int | None = None,
+        limit: int = 100,
+    ) -> tuple[list[GenerationModuleExecutionResponse], int]:
+        """Load only durable client-active rows before deserializing snapshots."""
+        db = SessionLocal()
+        try:
+            query = db.query(GenerationModuleExecution).filter(
+                GenerationModuleExecution.user_id == user_id,
+                GenerationModuleExecution.status.in_(tuple(generation_execution_state_contract.ACTIVE_STATUSES)),
+            )
+            if module_id is not None:
+                query = query.filter(GenerationModuleExecution.generation_module_id == module_id)
+            total = query.count()
+            rows = (
+                query.order_by(desc(GenerationModuleExecution.created_at))
+                .limit(limit)
+                .all()
+            )
             return [self._response(row) for row in rows], total
         finally:
             db.close()

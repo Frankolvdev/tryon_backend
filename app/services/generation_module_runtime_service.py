@@ -2993,3 +2993,29 @@ def _runtime_delete(self, execution_id: UUID, *, user_id: int | None = None):
 GenerationModuleRuntimeService.list = _runtime_list
 GenerationModuleRuntimeService.retry = _runtime_retry
 GenerationModuleRuntimeService.delete = _runtime_delete
+
+
+def _runtime_list_active_for_user(self, *, user_id: int, module_id: int | None = None, limit: int = 100):
+    """Fast client-active lookup preserving the live in-memory overlay."""
+    with self._lock:
+        live = [
+            item.model_copy(deep=True)
+            for item in self._items.values()
+            if item.user_id == user_id
+            and (module_id is None or item.module_id == module_id)
+            and generation_execution_state_contract.is_active_for_client(item)
+        ]
+
+    persisted, _ = generation_module_execution_store_service.list_active(
+        user_id=user_id,
+        module_id=module_id,
+        limit=max(1, limit),
+    )
+    merged = {item.id: item for item in persisted if generation_execution_state_contract.is_active_for_client(item)}
+    for item in live:
+        merged[item.id] = item
+    items = sorted(merged.values(), key=lambda item: item.created_at, reverse=True)[:limit]
+    return items, len(items)
+
+
+GenerationModuleRuntimeService.list_active_for_user = _runtime_list_active_for_user

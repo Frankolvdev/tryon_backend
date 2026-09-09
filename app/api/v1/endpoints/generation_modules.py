@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
@@ -17,6 +18,7 @@ from app.services.generation_module_service import generation_module_service
 from app.services.audit_service import audit_service
 from app.services.generation_execution_media_service import generation_execution_media_service
 from app.services.generation_execution_state_contract import generation_execution_state_contract
+from app.services.generation_execution_event_service import generation_execution_event_service
 
 router = APIRouter()
 
@@ -76,11 +78,34 @@ def list_my_active_generation_executions(
     db: Session = Depends(get_db),
     current_user: User = Depends(auth_guard),
 ):
-    items, _ = generation_module_runtime_service.list(
-        user_id=current_user.id, module_id=module_id, skip=0, limit=limit
+    items, _ = generation_module_runtime_service.list_active_for_user(
+        user_id=current_user.id, module_id=module_id, limit=limit
     )
+    # Keep the shared state contract as the final authority even though SQL has
+    # already narrowed the candidate rows to queued/running. This preserves
+    # cancel_requested semantics and guards future state-contract changes.
     active = [item for item in items if generation_execution_state_contract.is_active_for_client(item)]
-    return GenerationExecutionListResponse(items=generation_execution_media_service.hydrate_many(db, active), total=len(active), skip=0, limit=limit)
+    return GenerationExecutionListResponse(
+        items=generation_execution_media_service.hydrate_many(db, active),
+        total=len(active),
+        skip=0,
+        limit=limit,
+    )
+
+
+@router.get("/execution-events")
+async def stream_my_generation_execution_events(
+    current_user: User = Depends(auth_guard),
+):
+    return StreamingResponse(
+        generation_execution_event_service.stream(current_user.id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/execution-history", response_model=GenerationExecutionListResponse)
