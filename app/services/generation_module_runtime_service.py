@@ -2414,6 +2414,51 @@ class GenerationModuleRuntimeService:
             progress_snapshot = item.model_copy(deep=True)
         generation_module_execution_store_service.save(progress_snapshot)
 
+    @staticmethod
+    def _pipeline_trace_value(value: Any) -> Any:
+        """Return a JSON-safe diagnostic representation without shipping file payloads."""
+        if isinstance(value, dict):
+            if (
+                value.get("__generation_file__")
+                or value.get("storage_file_id")
+                or value.get("local_path")
+                or value.get("content_base64")
+            ):
+                return {
+                    "__generation_file__": True,
+                    "filename": value.get("filename"),
+                    "content_type": value.get("content_type"),
+                    "size_bytes": value.get("size_bytes"),
+                    "storage_file_id": value.get("storage_file_id"),
+                    "local_path": value.get("local_path"),
+                }
+            return {
+                str(key): GenerationModuleRuntimeService._pipeline_trace_value(item)
+                for key, item in value.items()
+                if str(key) != "content_base64"
+            }
+        if isinstance(value, list):
+            return [GenerationModuleRuntimeService._pipeline_trace_value(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return f"<{type(value).__name__}>"
+
+    def _append_pipeline_trace(self, execution_id: UUID, event: dict[str, Any]) -> None:
+        """Persist additive diagnostics only; never participate in runtime resolution."""
+        with self._lock:
+            item = self._items.get(execution_id)
+            if item is None:
+                return
+            metrics = dict(item.runtime_metrics or {})
+            trace = list(metrics.get("pipeline_trace") or [])
+            if len(trace) >= 500:
+                return
+            trace.append(self._pipeline_trace_value(event))
+            metrics["pipeline_trace"] = trace
+            item.runtime_metrics = metrics
+            snapshot = item.model_copy(deep=True)
+        generation_module_execution_store_service.save(snapshot)
+
     def _prepare_workflow(
         self,
         db: Session,
@@ -2428,6 +2473,7 @@ class GenerationModuleRuntimeService:
             raise AppException(f"Workflow step '{step['key']}' has no workflow JSON.")
         materialized: list[dict[str, Any]] = []
         cache: dict[str, dict[str, Any]] = {}
+        resolved_bindings: list[dict[str, Any]] = []
         for binding in configuration.get("input_bindings", []):
             source_key = binding.get("source_path") or binding.get("module_input_key")
             value = context
@@ -2464,6 +2510,21 @@ class GenerationModuleRuntimeService:
                     materialized.append(cached)
                 value = cached.get("relative_name") or cached.get("target_name") or cached.get("filename")
             node.setdefault("inputs", {})[binding["input_field"]] = value
+            resolved_bindings.append({
+                "source_path": source_key,
+                "node_id": str(binding.get("node_id")),
+                "class_type": str(node.get("class_type") or ""),
+                "node_title": str((node.get("_meta") or {}).get("title") or ""),
+                "input_field": binding.get("input_field"),
+                "value": self._pipeline_trace_value(value),
+            })
+        self._append_pipeline_trace(execution_id, {
+            "kind": "workflow_bindings",
+            "step_key": step.get("key"),
+            "step_name": step.get("name"),
+            "engine": engine.value,
+            "bindings": resolved_bindings,
+        })
         preserve_owner_windows_paths = (
             engine == GenerationExecutionEngine.OWNER_LOCAL
             and infrastructure_provider_service.get_owner_local(db).operating_system == "windows"
@@ -2683,6 +2744,13 @@ class GenerationModuleRuntimeService:
         timeout = int(configuration.get("timeout_seconds") or 300)
 
         raw_inputs = GenerationRuntimeContext.step_inputs(context, step.get("input_mapping"))
+        self._append_pipeline_trace(execution_id, {
+            "kind": "python_inputs",
+            "step_key": step.get("key"),
+            "step_name": step.get("name"),
+            "inputs": self._pipeline_trace_value(raw_inputs),
+            "input_mapping": self._pipeline_trace_value(step.get("input_mapping") or {}),
+        })
 
         # Pipeline Utility is intentionally transported as a normal Python step.
         # This keeps the exact proven input/output/context plumbing and only
@@ -2812,6 +2880,14 @@ class GenerationModuleRuntimeService:
         raw_result = persist(raw_result, "result")
         output_mapping = step.get("output_mapping") or {}
         if not output_mapping:
+            self._append_pipeline_trace(execution_id, {
+                "kind": "python_outputs",
+                "step_key": step.get("key"),
+                "step_name": step.get("name"),
+                "raw_outputs": self._pipeline_trace_value(raw_result),
+                "output_mapping": {},
+                "outputs": self._pipeline_trace_value(raw_result),
+            })
             return raw_result
 
         mapped_result: dict[str, Any] = {}
@@ -2822,6 +2898,14 @@ class GenerationModuleRuntimeService:
                     continue
                 value = value.get(part) if isinstance(value, dict) else None
             mapped_result[str(output_key)] = value
+        self._append_pipeline_trace(execution_id, {
+            "kind": "python_outputs",
+            "step_key": step.get("key"),
+            "step_name": step.get("name"),
+            "raw_outputs": self._pipeline_trace_value(raw_result),
+            "output_mapping": self._pipeline_trace_value(output_mapping),
+            "outputs": self._pipeline_trace_value(mapped_result),
+        })
         return mapped_result
 
     @staticmethod

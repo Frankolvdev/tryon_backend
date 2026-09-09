@@ -83,6 +83,30 @@ class GenerationRuntime:
         self.root.mkdir(parents=True, exist_ok=True)
         self._comfy_object_info: dict[str, Any] | None = None
 
+    @staticmethod
+    def _trace_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            if value.get("__generation_file__") or value.get("local_path") or value.get("content_base64"):
+                return {
+                    "__generation_file__": True,
+                    "filename": value.get("filename"),
+                    "content_type": value.get("content_type"),
+                    "size_bytes": value.get("size_bytes"),
+                    "local_path": value.get("local_path"),
+                }
+            return {
+                str(key): GenerationRuntime._trace_value(item)
+                for key, item in value.items()
+                if str(key) != "content_base64"
+            }
+        if isinstance(value, list):
+            return [GenerationRuntime._trace_value(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, Image.Image):
+            return {"__image__": True, "mode": value.mode, "size": list(value.size)}
+        return f"<{type(value).__name__}>"
+
     def execute(self, payload: dict[str, Any], progress: Callable[[float, str], None] | None = None) -> dict[str, Any]:
         if payload.get("runtime_contract") != self.CONTRACT:
             raise ValueError("Unsupported Generation Runtime contract.")
@@ -150,6 +174,7 @@ class GenerationRuntime:
         )
 
         states: list[dict[str, Any]] = []
+        pipeline_trace: list[dict[str, Any]] = []
         metrics = RuntimeMetricsCollector()
         for index, step in enumerate(steps):
             started = time.monotonic()
@@ -159,9 +184,9 @@ class GenerationRuntime:
                     progress((index / max(len(steps), 1)) * 100, f"Step '{key}' started.")
                 step_type = str(step.get("step_type") or "")
                 if step_type == "workflow":
-                    outputs = self._workflow(step, context, payload.get("execution_id"))
+                    outputs = self._workflow(step, context, payload.get("execution_id"), pipeline_trace)
                 elif step_type == "python":
-                    outputs = self._python(step, context, payload.get("execution_id"))
+                    outputs = self._python(step, context, payload.get("execution_id"), pipeline_trace)
                 elif step_type == "utility":
                     outputs = self._utility(step, context, payload.get("execution_id"))
                 else:
@@ -176,7 +201,9 @@ class GenerationRuntime:
                 duration_ms = int((time.monotonic() - started) * 1000)
                 metrics.add_step(step_key=key, step_type=str(step.get("step_type") or ""), duration_ms=duration_ms, status="failed")
                 states.append({"step_key": key, "step_type": str(step.get("step_type") or ""), "status": "failed", "duration_ms": duration_ms, "outputs": {}, "error": str(exc)})
-                return {"runtime_contract": self.CONTRACT, "status": "failed", "error": str(exc), "steps": states, "metrics": metrics.snapshot(status="failed", error=str(exc))}
+                failed_metrics = metrics.snapshot(status="failed", error=str(exc))
+                failed_metrics["pipeline_trace"] = pipeline_trace
+                return {"runtime_contract": self.CONTRACT, "status": "failed", "error": str(exc), "steps": states, "metrics": failed_metrics}
         outputs = GenerationRuntimeContext.resolve_module_outputs(module.get("outputs") or [], context)
         transport_payload, transport_metrics = self._externalize_transport({
             "steps": states,
@@ -185,6 +212,7 @@ class GenerationRuntime:
         })
         runtime_metrics = metrics.snapshot(status="completed")
         runtime_metrics.update(transport_metrics)
+        runtime_metrics["pipeline_trace"] = pipeline_trace
         return {
             "runtime_contract": self.CONTRACT,
             "status": "completed",
@@ -332,9 +360,16 @@ class GenerationRuntime:
             print(f"[runtime] Execute Python class remapped for node {node_id}: {current} -> {compatible[0]}")
         return workflow
 
-    def _workflow(self, step: dict[str, Any], context: dict[str, Any], execution_id: Any) -> dict[str, Any]:
+    def _workflow(
+        self,
+        step: dict[str, Any],
+        context: dict[str, Any],
+        execution_id: Any,
+        pipeline_trace: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         config = copy.deepcopy(step.get("configuration") or {})
         workflow = self._decode_workflow(config.get("workflow"))
+        resolved_bindings: list[dict[str, Any]] = []
         for binding in config.get("input_bindings") or []:
             source = binding.get("source_path") or binding.get("module_input_key")
             value = GenerationRuntimeContext.resolve(context, str(source or ""))
@@ -344,6 +379,21 @@ class GenerationRuntime:
             if isinstance(value, dict) and value.get("__generation_file__"):
                 value = self._upload_input(Path(value["local_path"]), str(execution_id))
             node.setdefault("inputs", {})[binding["input_field"]] = value
+            resolved_bindings.append({
+                "source_path": source,
+                "node_id": str(binding.get("node_id")),
+                "class_type": str(node.get("class_type") or ""),
+                "node_title": str((node.get("_meta") or {}).get("title") or ""),
+                "input_field": binding.get("input_field"),
+                "value": self._trace_value(value),
+            })
+        if pipeline_trace is not None and len(pipeline_trace) < 500:
+            pipeline_trace.append({
+                "kind": "workflow_bindings",
+                "step_key": step.get("key"),
+                "step_name": step.get("name"),
+                "bindings": resolved_bindings,
+            })
         workflow = self._normalize_workflow_model_paths(workflow)
         workflow = self._resolve_dynamic_node_types(workflow)
         result = self._execute_comfy(workflow, int(config.get("timeout_seconds") or 900))
@@ -497,12 +547,26 @@ class GenerationRuntime:
             },
         }
 
-    def _python(self, step: dict[str, Any], context: dict[str, Any], execution_id: Any) -> dict[str, Any]:
+    def _python(
+        self,
+        step: dict[str, Any],
+        context: dict[str, Any],
+        execution_id: Any,
+        pipeline_trace: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         config = step.get("configuration") or {}
         source = config.get("source_code") or ""
         entrypoint = config.get("entrypoint") or "run"
         timeout = int(config.get("timeout_seconds") or 300)
         raw_inputs = GenerationRuntimeContext.step_inputs(context, step.get("input_mapping"))
+        if pipeline_trace is not None and len(pipeline_trace) < 500:
+            pipeline_trace.append({
+                "kind": "python_inputs",
+                "step_key": step.get("key"),
+                "step_name": step.get("name"),
+                "inputs": self._trace_value(raw_inputs),
+                "input_mapping": self._trace_value(step.get("input_mapping") or {}),
+            })
 
         # Pipeline Utility deliberately reuses the proven Python step transport:
         # same input_mapping, ordering, enabled flag and context merge. The only
@@ -511,7 +575,15 @@ class GenerationRuntime:
             print(f"[runtime] Pipeline Utility '{step.get('key')}' FULL VRAM purge started.", flush=True)
             self._execute_comfy(self._vram_purge_workflow(), timeout)
             print(f"[runtime] Pipeline Utility '{step.get('key')}' FULL VRAM purge completed.", flush=True)
-            return copy.deepcopy(raw_inputs)
+            utility_result = copy.deepcopy(raw_inputs)
+            if pipeline_trace is not None and len(pipeline_trace) < 500:
+                pipeline_trace.append({
+                    "kind": "python_outputs",
+                    "step_key": step.get("key"),
+                    "step_name": step.get("name"),
+                    "outputs": self._trace_value(utility_result),
+                })
+            return utility_result
 
         inputs = self._to_images(raw_inputs)
         allowed = {"PIL", "math", "json", "io", "base64"}
@@ -535,7 +607,17 @@ class GenerationRuntime:
             except FutureTimeoutError as exc:
                 raise TimeoutError(f"Python step '{step.get('key')}' exceeded {timeout} seconds.") from exc
         result = {} if result is None else (result if isinstance(result, dict) else {"result": result})
-        return self._save_images(result, self.root / str(execution_id), str(step.get("key")))
+        saved_result = self._save_images(result, self.root / str(execution_id), str(step.get("key")))
+        if pipeline_trace is not None and len(pipeline_trace) < 500:
+            pipeline_trace.append({
+                "kind": "python_outputs",
+                "step_key": step.get("key"),
+                "step_name": step.get("name"),
+                "raw_outputs": self._trace_value(saved_result),
+                "output_mapping": self._trace_value(step.get("output_mapping") or {}),
+                "outputs": self._trace_value(saved_result),
+            })
+        return saved_result
 
     def _to_images(self, value: Any) -> Any:
         if isinstance(value, dict) and value.get("__generation_file__") and str(value.get("content_type") or "").startswith("image/"):
