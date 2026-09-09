@@ -104,12 +104,22 @@ class GenerationModuleService:
             updated_at=item.updated_at,
         )
 
-    def _response(self, db: Session, module: GenerationModule) -> GenerationModuleResponse:
+    def _response(
+        self,
+        db: Session,
+        module: GenerationModule,
+        *,
+        applied_by_module: dict[int, Any] | None = None,
+    ) -> GenerationModuleResponse:
         rule = pricing_rule_repository.get_for_generation_module(db, module.id)
         pricing = None
         if rule is not None:
             quote = pricing_service._to_response(db, rule)
-            applied = pricing_service.get_applied_rule_for_module(db, module.id)
+            applied = (
+                applied_by_module.get(module.id)
+                if applied_by_module is not None
+                else pricing_service.get_applied_rule_for_module(db, module.id)
+            )
             pricing = GenerationModulePricingResponse(
                 id=quote.id, required_tokens=(applied.estimated_tokens if applied and applied.estimated_tokens is not None else quote.required_tokens),
                 final_price_usd=(applied.estimated_final_price_usd if applied and applied.estimated_final_price_usd is not None else quote.final_price_usd),
@@ -248,7 +258,20 @@ class GenerationModuleService:
             is_active=is_active,
             search=search,
         )
-        response_items = [self._response(db, item) for item in items]
+        # Applied pricing is expensive because it includes runtime/provider and
+        # historical ETA resolution. Previously _response() recalculated the
+        # complete applied-pricing catalog once for every listed module (N x N
+        # work). Resolve it once per list request and reuse the exact same
+        # calculated objects. This is a read-path optimization only; formulas,
+        # provider selection, history rules and returned schema stay unchanged.
+        applied_by_module = {
+            item.generation_module_id: item
+            for item in pricing_service.list_applied_rules(db)
+        }
+        response_items = [
+            self._response(db, item, applied_by_module=applied_by_module)
+            for item in items
+        ]
         return GenerationModuleListResponse(
             items=response_items,
             total=total,
