@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db
-from app.api.v1.guards.auth_guard import auth_guard
+from app.api.v1.guards.auth_guard import auth_guard, auth_stream_user_id
 from app.common.exceptions import NotFoundException
 from app.models.user import User
 from app.common.enums import UserRole
@@ -95,10 +95,10 @@ def list_my_active_generation_executions(
 
 @router.get("/execution-events")
 async def stream_my_generation_execution_events(
-    current_user: User = Depends(auth_guard),
+    current_user_id: int = Depends(auth_stream_user_id),
 ):
     return StreamingResponse(
-        generation_execution_event_service.stream(current_user.id),
+        generation_execution_event_service.stream(current_user_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
