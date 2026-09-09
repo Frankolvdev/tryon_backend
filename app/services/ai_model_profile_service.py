@@ -1,6 +1,8 @@
 import json
+import secrets
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.ai_model_profile import AiModelProfile
@@ -84,8 +86,34 @@ class AiModelProfileService:
     def create(self, db: Session, user_id: int, name: str, sex: str) -> AiModelProfile:
         if sex == "man":
             raise ValueError("Male model creation is prepared but not enabled yet.")
-        row = AiModelProfile(user_id=user_id, name=name.strip(), sex=sex, stage="body")
-        db.add(row); db.commit(); db.refresh(row); return row
+
+        clean_name = name.strip()
+        is_draft_placeholder = clean_name == "Nueva modelo"
+
+        # Draft profiles need a durable row before Step 01, but their visible placeholder
+        # must never collide with the per-user unique-name constraint. Keep the legacy
+        # API contract (clients may still send "Nueva modelo") and convert only that
+        # placeholder into a private unique draft name on the server.
+        attempts = 5 if is_draft_placeholder else 1
+        for attempt in range(attempts):
+            stored_name = (
+                f"__draft_model_{secrets.randbelow(900_000_000_000_000) + 100_000_000_000_000}"
+                if is_draft_placeholder
+                else clean_name
+            )
+            row = AiModelProfile(user_id=user_id, name=stored_name, sex=sex, stage="body")
+            db.add(row)
+            try:
+                db.commit()
+            except IntegrityError as error:
+                db.rollback()
+                if is_draft_placeholder and attempt + 1 < attempts:
+                    continue
+                raise ValueError("You already have a model with that name.") from error
+            db.refresh(row)
+            return row
+
+        raise RuntimeError("Could not allocate a unique AI model draft name.")
 
     def set_body(
         self,
@@ -135,7 +163,14 @@ class AiModelProfileService:
         if len(json.dumps(safe_draft, ensure_ascii=False)) > 65536:
             raise ValueError("Draft is too large.")
         row.draft_json = safe_draft
-        db.add(row); db.commit(); db.refresh(row); return row
+        db.add(row)
+        try:
+            db.commit()
+        except IntegrityError as error:
+            db.rollback()
+            raise ValueError("You already have a model with that name.") from error
+        db.refresh(row)
+        return row
 
     def finalize(
         self,
