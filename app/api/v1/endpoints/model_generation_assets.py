@@ -8,9 +8,23 @@ router = APIRouter()
 
 
 @router.get("")
-def list_assets(tool_key: str | None = None, db: Session = Depends(get_db)):
+def list_assets(
+    tool_key: str | None = None,
+    tool_keys: str | None = None,
+    db: Session = Depends(get_db),
+):
     try:
-        rows = model_generation_asset_service.list(db, tool_key=tool_key, active_only=True)
+        requested_tools = (
+            [item.strip() for item in tool_keys.split(",") if item.strip()]
+            if tool_keys
+            else None
+        )
+        rows = model_generation_asset_service.list(
+            db,
+            tool_key=tool_key,
+            tool_keys=requested_tools,
+            active_only=True,
+        )
         return {"items": [model_generation_asset_service.response(db, row) for row in rows], "total": len(rows)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -42,13 +42,28 @@ class ModelGenerationAssetService:
             "modes": ["auto", "local", "amazon_s3", "cloudflare_r2"],
         }
 
-    def list(self, db: Session, *, tool_key: str | None = None, active_only: bool = False) -> list[ModelGenerationAsset]:
+    def list(
+        self,
+        db: Session,
+        *,
+        tool_key: str | None = None,
+        tool_keys: list[str] | None = None,
+        active_only: bool = False,
+    ) -> list[ModelGenerationAsset]:
         query = db.query(ModelGenerationAsset)
+        if tool_key and tool_keys:
+            raise ValueError("Use tool_key or tool_keys, not both.")
         if tool_key:
             if tool_key not in self.TOOLS:
                 raise ValueError("Unsupported tool key.")
             canonical = self._canonical_tool(tool_key)
             query = query.filter(ModelGenerationAsset.tool_key == canonical)
+        elif tool_keys:
+            unsupported = [item for item in tool_keys if item not in self.TOOLS]
+            if unsupported:
+                raise ValueError("Unsupported tool key.")
+            canonical_tools = sorted({self._canonical_tool(item) for item in tool_keys})
+            query = query.filter(ModelGenerationAsset.tool_key.in_(canonical_tools))
         if active_only:
             query = query.filter(ModelGenerationAsset.is_active.is_(True))
         return query.order_by(ModelGenerationAsset.tool_key, ModelGenerationAsset.sort_order, ModelGenerationAsset.id).all()
