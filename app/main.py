@@ -22,6 +22,7 @@ from app.middleware.abuse_detection_middleware import (
     AbuseDetectionMiddleware,
 )
 from app.middleware.i18n_middleware import I18nMiddleware
+from app.middleware.performance_timing_middleware import PerformanceTimingMiddleware
 from app.middleware.rate_limit_middleware import (
     RateLimitMiddleware,
 )
@@ -127,6 +128,10 @@ app.add_middleware(
 
 app.add_middleware(
     RateLimitMiddleware,
+)
+
+app.add_middleware(
+    PerformanceTimingMiddleware,
 )
 
 
