@@ -3,6 +3,7 @@ import json
 import re
 import zipfile
 from pathlib import Path
+from typing import List, Optional, Tuple
 from uuid import uuid4
 
 from PIL import Image, ImageOps
@@ -55,7 +56,7 @@ class ModelGenerationAssetService:
         active_only: bool = False,
         skip: int = 0,
         limit: int | None = None,
-    ) -> list[ModelGenerationAsset]:
+    ) -> List[ModelGenerationAsset]:
         query = db.query(ModelGenerationAsset)
         if tool_key and tool_keys:
             raise ValueError("Use tool_key or tool_keys, not both.")
@@ -215,7 +216,7 @@ class ModelGenerationAssetService:
         raise ValueError(f"Unsupported storage mode: {mode}")
 
     @staticmethod
-    def _optimize_face_reference(content: bytes) -> tuple[bytes, str, str]:
+    def _optimize_face_reference(content: bytes) -> Tuple[bytes, str, str]:
         try:
             with Image.open(io.BytesIO(content)) as source:
                 image = ImageOps.exif_transpose(source).convert("RGB")
@@ -226,10 +227,10 @@ class ModelGenerationAssetService:
         except Exception as exc:
             raise ValueError("No se pudo procesar la imagen facial.") from exc
 
-    def create_face_references(self, db: Session, *, files: list[tuple[bytes, str, str | None]], storage_mode: str) -> list[ModelGenerationAsset]:
+    def create_face_references(self, db: Session, *, files: List[Tuple[bytes, str, Optional[str]]], storage_mode: str) -> List[ModelGenerationAsset]:
         if storage_mode not in self.MODES:
             raise ValueError("Invalid storage target.")
-        created: list[ModelGenerationAsset] = []
+        created: List[ModelGenerationAsset] = []
         base_order = db.query(ModelGenerationAsset).filter(ModelGenerationAsset.tool_key == "facial_structures").count() * 10
         for index, (content, filename, content_type) in enumerate(files, start=1):
             ctype = (content_type or "").split(";", 1)[0].strip().lower()
