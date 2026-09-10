@@ -3,6 +3,9 @@ import json
 import re
 import zipfile
 from pathlib import Path
+from uuid import uuid4
+
+from PIL import Image, ImageOps
 
 from sqlalchemy.orm import Session
 
@@ -15,13 +18,14 @@ from app.services.storage_service import StorageProvider, storage_service
 class ModelGenerationAssetService:
     MODES = {"auto", "local", "amazon_s3", "cloudflare_r2"}
     TOOLS = {
-        "eyebrows", "lips", "hairstyle",
+        "eyebrows", "lips", "hairstyle", "facial_structures",
         "hips", "butt_size", "breasts", "height", "bubble_butt", "waist", "complexion",
         # Legacy aliases accepted so old bundles remain importable.
         "ass", "slim", "thick",
     }
     IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
     VIDEO_TYPES = {"video/mp4", "video/webm", "video/quicktime"}
+    PRIVATE_TOOLS = {"facial_structures"}
     BODY_TOOLS = {"hips", "butt_size", "breasts", "height", "bubble_butt", "waist", "complexion"}
     LEGACY_TOOL_MAP = {"ass": "butt_size", "slim": "complexion", "thick": "complexion"}
 
@@ -49,6 +53,8 @@ class ModelGenerationAssetService:
         tool_key: str | None = None,
         tool_keys: list[str] | None = None,
         active_only: bool = False,
+        skip: int = 0,
+        limit: int | None = None,
     ) -> list[ModelGenerationAsset]:
         query = db.query(ModelGenerationAsset)
         if tool_key and tool_keys:
@@ -66,7 +72,22 @@ class ModelGenerationAssetService:
             query = query.filter(ModelGenerationAsset.tool_key.in_(canonical_tools))
         if active_only:
             query = query.filter(ModelGenerationAsset.is_active.is_(True))
-        return query.order_by(ModelGenerationAsset.tool_key, ModelGenerationAsset.sort_order, ModelGenerationAsset.id).all()
+        query = query.order_by(ModelGenerationAsset.tool_key, ModelGenerationAsset.sort_order, ModelGenerationAsset.id)
+        if skip:
+            query = query.offset(skip)
+        if limit is not None:
+            query = query.limit(limit)
+        return query.all()
+
+    def count(self, db: Session, *, tool_key: str | None = None, active_only: bool = False) -> int:
+        query = db.query(ModelGenerationAsset)
+        if tool_key:
+            if tool_key not in self.TOOLS:
+                raise ValueError("Unsupported tool key.")
+            query = query.filter(ModelGenerationAsset.tool_key == self._canonical_tool(tool_key))
+        if active_only:
+            query = query.filter(ModelGenerationAsset.is_active.is_(True))
+        return query.count()
 
     def get(self, db: Session, asset_id: int) -> ModelGenerationAsset:
         row = db.get(ModelGenerationAsset, asset_id)
@@ -115,7 +136,7 @@ class ModelGenerationAssetService:
                 raise ValueError("That Position is already used in this category.")
             if tool_key == "complexion" and not data.title.strip():
                 raise ValueError("Title is required for Complexion.")
-        elif not data.title.strip() or not data.value.strip():
+        elif tool_key not in self.PRIVATE_TOOLS and (not data.title.strip() or not data.value.strip()):
             raise ValueError("Title and prompt value are required.")
         exists = db.query(ModelGenerationAsset).filter(
             ModelGenerationAsset.tool_key == tool_key,
@@ -193,6 +214,37 @@ class ModelGenerationAssetService:
             )
         raise ValueError(f"Unsupported storage mode: {mode}")
 
+    @staticmethod
+    def _optimize_face_reference(content: bytes) -> tuple[bytes, str, str]:
+        try:
+            with Image.open(io.BytesIO(content)) as source:
+                image = ImageOps.exif_transpose(source).convert("RGB")
+                image = ImageOps.fit(image, (512, 720), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+                output = io.BytesIO()
+                image.save(output, format="WEBP", quality=95, method=6)
+                return output.getvalue(), "face-reference.webp", "image/webp"
+        except Exception as exc:
+            raise ValueError("No se pudo procesar la imagen facial.") from exc
+
+    def create_face_references(self, db: Session, *, files: list[tuple[bytes, str, str | None]], storage_mode: str) -> list[ModelGenerationAsset]:
+        if storage_mode not in self.MODES:
+            raise ValueError("Invalid storage target.")
+        created: list[ModelGenerationAsset] = []
+        base_order = db.query(ModelGenerationAsset).filter(ModelGenerationAsset.tool_key == "facial_structures").count() * 10
+        for index, (content, filename, content_type) in enumerate(files, start=1):
+            ctype = (content_type or "").split(";", 1)[0].strip().lower()
+            if ctype not in self.IMAGE_TYPES:
+                raise ValueError(f"Unsupported image content type: {ctype or 'unknown'}.")
+            row = ModelGenerationAsset(
+                tool_key="facial_structures", asset_key=f"face-{uuid4().hex}", title="", value="",
+                sort_order=base_order + index * 10, position=None, storage_mode=storage_mode,
+                is_active=True, notes=None, metadata_json={"source_filename": filename, "normalized_size": "512x720"},
+            )
+            db.add(row); db.commit(); db.refresh(row)
+            self.upload_media(db, row.id, kind="poster", content=content, filename=filename, content_type=ctype)
+            created.append(row)
+        return created
+
     def upload_media(self, db: Session, asset_id: int, *, kind: str, content: bytes, filename: str, content_type: str | None) -> ModelGenerationAsset:
         row = self.get(db, asset_id)
         kind = kind.strip().lower()
@@ -202,6 +254,10 @@ class ModelGenerationAssetService:
         allowed = self.IMAGE_TYPES if kind == "poster" else self.VIDEO_TYPES
         if ctype not in allowed:
             raise ValueError(f"Unsupported {kind} content type: {ctype or 'unknown'}.")
+        if row.tool_key == "facial_structures":
+            if kind != "poster":
+                raise ValueError("Facial structures only accept images.")
+            content, filename, ctype = self._optimize_face_reference(content)
         stored = self._save(
             db,
             mode=row.storage_mode,

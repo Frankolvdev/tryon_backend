@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 StorageMode = Literal["auto", "local", "amazon_s3", "cloudflare_r2"]
 ToolKey = Literal[
-    "eyebrows", "lips", "hairstyle",
+    "eyebrows", "lips", "hairstyle", "facial_structures",
     "hips", "butt_size", "breasts", "height", "bubble_butt", "waist", "complexion",
     # Legacy aliases kept for bundle/backward compatibility.
     "ass", "slim", "thick",
