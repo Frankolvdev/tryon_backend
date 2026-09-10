@@ -5,11 +5,15 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
+from app.api.v1.guards.admin_guard import admin_guard
 from app.schemas.model_generation_asset import ModelGenerationAssetCreate, ModelGenerationAssetUpdate
 from app.services.model_generation_asset_service import model_generation_asset_service
 from app.services.model_generation_bundle_service import model_generation_bundle_service
 
-router = APIRouter(prefix="/tools-generation/model-assets")
+router = APIRouter(
+    prefix="/tools-generation/model-assets",
+    dependencies=[Depends(admin_guard)],
+)
 
 
 def bad_request(exc: Exception) -> HTTPException:

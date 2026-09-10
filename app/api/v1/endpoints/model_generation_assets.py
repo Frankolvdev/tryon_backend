@@ -1,11 +1,9 @@
-import hmac
-import os
-
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
+from app.api.v1.guards.internal_appweb_guard import internal_appweb_guard
 from app.models.model_generation_asset import ModelGenerationAsset
 from app.models.storage_file import StorageFile
 from app.services.model_generation_asset_service import model_generation_asset_service
@@ -14,18 +12,12 @@ from app.services.storage_service import storage_service
 router = APIRouter()
 
 
-def _require_appweb_internal_key(value: str | None) -> None:
-    expected = os.getenv("APPWEB_INTERNAL_KEY", "").strip()
-    if not expected or not value or not hmac.compare_digest(value, expected):
-        raise HTTPException(status_code=404, detail="Not found.")
-
 
 @router.get("/private/facial-structures/count")
 def private_face_count(
-    x_appweb_internal_key: str | None = Header(default=None),
+    _: None = Depends(internal_appweb_guard),
     db: Session = Depends(get_db),
 ):
-    _require_appweb_internal_key(x_appweb_internal_key)
     total = db.query(ModelGenerationAsset).filter(
         ModelGenerationAsset.tool_key == "facial_structures",
         ModelGenerationAsset.is_active.is_(True),
@@ -37,10 +29,9 @@ def private_face_count(
 @router.get("/private/facial-structures/reference")
 def private_face_reference(
     index: int = Query(ge=0),
-    x_appweb_internal_key: str | None = Header(default=None),
+    _: None = Depends(internal_appweb_guard),
     db: Session = Depends(get_db),
 ):
-    _require_appweb_internal_key(x_appweb_internal_key)
     row = db.query(ModelGenerationAsset).filter(
         ModelGenerationAsset.tool_key == "facial_structures",
         ModelGenerationAsset.is_active.is_(True),

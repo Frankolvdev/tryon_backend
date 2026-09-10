@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     RUNPOD_CALLBACK_SECRET: str | None = None
 
     WORKER_API_KEY: str | None = None
+    # Server-only credential used by AppWeb for private internal endpoints.
+    APPWEB_INTERNAL_KEY: str | None = None
 
     METRICS_BACKGROUND_COLLECTION_ENABLED: bool = True
     METRICS_COLLECTION_INTERVAL_SECONDS: int = 30
