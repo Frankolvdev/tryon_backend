@@ -2479,6 +2479,11 @@ class GenerationModuleRuntimeService:
             value = context
             for part in str(source_key or "").split("."):
                 value = value.get(part) if isinstance(value, dict) else None
+            source_asset = (
+                self._pipeline_trace_value(value)
+                if isinstance(value, dict) and self._is_generation_file_reference(value)
+                else None
+            )
             node = workflow.get(str(binding.get("node_id")))
             if not isinstance(node, dict):
                 raise AppException(f"Workflow node '{binding.get('node_id')}' was not found.")
@@ -2517,6 +2522,7 @@ class GenerationModuleRuntimeService:
                 "node_title": str((node.get("_meta") or {}).get("title") or ""),
                 "input_field": binding.get("input_field"),
                 "value": self._pipeline_trace_value(value),
+                **({"source_asset": source_asset} if source_asset is not None else {}),
             })
         self._append_pipeline_trace(execution_id, {
             "kind": "workflow_bindings",
