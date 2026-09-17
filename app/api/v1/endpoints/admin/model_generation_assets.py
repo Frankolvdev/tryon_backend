@@ -59,6 +59,11 @@ def upload_facial_structures(
     except ValueError as exc:
         raise bad_request(exc)
 
+
+@router.post("/facial-structures/cleanup-duplicates")
+def cleanup_duplicate_facial_structures(db: Session = Depends(get_db)):
+    return model_generation_asset_service.cleanup_duplicate_face_references(db)
+
 @router.patch("/{asset_id}")
 def update_asset(asset_id: int, data: ModelGenerationAssetUpdate, db: Session = Depends(get_db)):
     try:

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.models.model_generation_asset import ModelGenerationAsset
 from app.models.storage_file import StorageFile
 from app.schemas.model_generation_asset import ModelGenerationAssetCreate, ModelGenerationAssetUpdate
+from app.services.face_reference_duplicate_service import exact_duplicate_asset_ids
 from app.services.storage_service import StorageProvider, storage_service
 
 
@@ -245,6 +246,78 @@ class ModelGenerationAssetService:
             self.upload_media(db, row.id, kind="poster", content=content, filename=filename, content_type=ctype)
             created.append(row)
         return created
+
+    def cleanup_duplicate_face_references(self, db: Session) -> dict:
+        """Remove exact duplicates only from the private facial reference bank."""
+        rows = (
+            db.query(ModelGenerationAsset)
+            .filter(ModelGenerationAsset.tool_key == "facial_structures")
+            .order_by(ModelGenerationAsset.id.asc())
+            .all()
+        )
+        readable: List[Tuple[int, bytes]] = []
+        skipped = 0
+        for row in rows:
+            stored = self._file(db, row.poster_storage_file_id)
+            if stored is None:
+                skipped += 1
+                continue
+            try:
+                readable.append((row.id, storage_service.read_bytes(db, storage_file=stored)))
+            except Exception:
+                # A missing/unavailable object is never considered a duplicate.
+                skipped += 1
+
+        duplicate_ids, duplicate_groups = exact_duplicate_asset_ids(readable)
+        if not duplicate_ids:
+            return {
+                "checked": len(readable),
+                "removed": 0,
+                "duplicate_groups": 0,
+                "skipped": skipped,
+            }
+
+        duplicate_id_set = set(duplicate_ids)
+        duplicate_rows = [row for row in rows if row.id in duplicate_id_set]
+        candidate_file_ids = {
+            file_id
+            for row in duplicate_rows
+            for file_id in (row.poster_storage_file_id, row.video_storage_file_id)
+            if file_id is not None
+        }
+
+        # The database mutation is atomic and always leaves the oldest asset in
+        # each exact-content group. Other Models IA categories are untouched.
+        for row in duplicate_rows:
+            db.delete(row)
+        db.commit()
+
+        storage_cleanup_failed = 0
+        for file_id in candidate_file_ids:
+            still_used = db.query(ModelGenerationAsset).filter(
+                (ModelGenerationAsset.poster_storage_file_id == file_id)
+                | (ModelGenerationAsset.video_storage_file_id == file_id)
+            ).first()
+            if still_used is not None:
+                continue
+            stored = self._file(db, file_id)
+            if stored is None:
+                continue
+            try:
+                storage_service.delete_file(db, storage_file=stored)
+                db.delete(stored)
+                db.commit()
+            except Exception:
+                db.rollback()
+                storage_cleanup_failed += 1
+
+        return {
+            "checked": len(readable),
+            "removed": len(duplicate_rows),
+            "duplicate_groups": duplicate_groups,
+            "skipped": skipped,
+            "storage_cleanup_failed": storage_cleanup_failed,
+        }
 
     def upload_media(self, db: Session, asset_id: int, *, kind: str, content: bytes, filename: str, content_type: str | None) -> ModelGenerationAsset:
         row = self.get(db, asset_id)
