@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -26,17 +27,34 @@ def _face_signature(payload: str) -> str:
     return hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _encode_face_state(*, used_ids: list[int], current_pair: list[int]) -> str:
+def _encode_face_state(*, used_ids: list[int], current_pair: list[int], face_group: str) -> str:
     encoded = base64.urlsafe_b64encode(
-        json.dumps({"u": used_ids, "c": current_pair}, separators=(",", ":")).encode("utf-8")
+        json.dumps({"u": used_ids, "c": current_pair, "g": face_group}, separators=(",", ":")).encode("utf-8")
     ).decode("ascii").rstrip("=")
-    payload = f"v3.{encoded}"
+    payload = f"v4.{encoded}"
     return f"{payload}.{_face_signature(payload)}"
 
 
-def _decode_face_state(token: object, ordered_ids: list[int]) -> tuple[list[int], list[int]]:
+def _decode_face_state(token: object, ordered_ids: list[int]) -> tuple[list[int], list[int], str | None]:
     if not isinstance(token, str) or not token:
-        return [], []
+        return [], [], None
+    grouped = re.fullmatch(r"v4\.([A-Za-z0-9_-]+)\.([0-9a-f]{64})", token)
+    if grouped:
+        payload = f"v4.{grouped.group(1)}"
+        if not hmac.compare_digest(_face_signature(payload), grouped.group(2)):
+            raise HTTPException(status_code=400, detail="El historial facial no es válido.")
+        try:
+            encoded = grouped.group(1) + "=" * (-len(grouped.group(1)) % 4)
+            decoded = json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
+            used = [int(value) for value in decoded.get("u", [])]
+            pair = [int(value) for value in decoded.get("c", [])]
+            face_group = model_generation_asset_service.validate_face_group(str(decoded.get("g") or ""))
+        except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+            raise HTTPException(status_code=400, detail="El historial facial no es válido.")
+        if len(pair) not in {0, 2} or len(used) > 10000:
+            raise HTTPException(status_code=400, detail="El historial facial no es válido.")
+        return list(dict.fromkeys(used)), pair, face_group
+
     current = re.fullmatch(r"v3\.([A-Za-z0-9_-]+)\.([0-9a-f]{64})", token)
     if current:
         payload = f"v3.{current.group(1)}"
@@ -51,7 +69,7 @@ def _decode_face_state(token: object, ordered_ids: list[int]) -> tuple[list[int]
             raise HTTPException(status_code=400, detail="El historial facial no es válido.")
         if len(pair) not in {0, 2} or len(used) > 10000:
             raise HTTPException(status_code=400, detail="El historial facial no es válido.")
-        return list(dict.fromkeys(used)), pair
+        return list(dict.fromkeys(used)), pair, None
 
     # Compatibility with the temporary multi-pair index token. This lets a
     # deployment move forward or backward without invalidating saved drafts.
@@ -79,7 +97,7 @@ def _decode_face_state(token: object, ordered_ids: list[int]) -> tuple[list[int]
                 raise HTTPException(status_code=400, detail="El historial facial no es válido.")
             converted.append([ordered_ids[first_index], ordered_ids[second_index]])
         used = list(dict.fromkeys(asset_id for pair in converted for asset_id in pair))
-        return used, converted[0]
+        return used, converted[0], None
 
     # One-time migration from the original index-based AppWeb token.
     legacy = re.fullmatch(r"v1\.(\d+)\.(\d+)\.([A-Za-z0-9_-]+)", token)
@@ -102,7 +120,7 @@ def _decode_face_state(token: object, ordered_ids: list[int]) -> tuple[list[int]
         ):
             raise HTTPException(status_code=400, detail="El historial facial no es válido.")
         pair = [ordered_ids[first_index], ordered_ids[second_index]]
-        return pair.copy(), pair
+        return pair.copy(), pair, None
     raise HTTPException(status_code=400, detail="El historial facial no es válido.")
 
 
@@ -185,9 +203,43 @@ async def private_face_pair(
         raise HTTPException(status_code=400, detail="Solicitud de referencias inválida.")
     history_token = body.get("history_token") if isinstance(body, dict) else None
     reuse_current_pair = body.get("reuse_current_pair") is True if isinstance(body, dict) else False
+    try:
+        requested_group = model_generation_asset_service.validate_face_group(
+            str(body.get("face_group") or "") if isinstance(body, dict) else ""
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    token_group: str | None = None
+    if isinstance(history_token, str) and history_token.startswith("v4."):
+        _, _, token_group = _decode_face_state(history_token, [])
+    elif reuse_current_pair and isinstance(history_token, str) and history_token.startswith("v3."):
+        # Keep heads saved before grouped pools were deployed.
+        _, legacy_pair, _ = _decode_face_state(history_token, [])
+        if len(legacy_pair) == 2:
+            legacy_assets = db.query(ModelGenerationAsset).filter(
+                ModelGenerationAsset.id.in_(legacy_pair),
+                ModelGenerationAsset.tool_key == "facial_structures",
+            ).all()
+            legacy_groups = {
+                str((asset.metadata_json or {}).get("face_group") or model_generation_asset_service.DEFAULT_FACE_GROUP)
+                for asset in legacy_assets
+            }
+            if len(legacy_assets) == 2 and len(legacy_groups) == 1:
+                try:
+                    token_group = model_generation_asset_service.validate_face_group(next(iter(legacy_groups)))
+                except ValueError:
+                    token_group = None
+    selected_group = token_group if reuse_current_pair and token_group else requested_group
 
     # The full active inventory and its StorageFile rows are resolved in one
     # query. Stable asset IDs drive the cycle; no image hashes or offsets.
+    group_value = ModelGenerationAsset.metadata_json["face_group"].as_string()
+    group_filter = (
+        or_(group_value == selected_group, group_value.is_(None))
+        if selected_group == model_generation_asset_service.DEFAULT_FACE_GROUP
+        else group_value == selected_group
+    )
     rows = (
         db.query(ModelGenerationAsset, StorageFile)
         .join(StorageFile, StorageFile.id == ModelGenerationAsset.poster_storage_file_id)
@@ -195,17 +247,20 @@ async def private_face_pair(
             ModelGenerationAsset.tool_key == "facial_structures",
             ModelGenerationAsset.is_active.is_(True),
             ModelGenerationAsset.poster_storage_file_id.isnot(None),
+            group_filter,
         )
         .order_by(ModelGenerationAsset.id.asc())
         .all()
     )
     if len(rows) < 2:
-        raise HTTPException(status_code=409, detail="Se requieren al menos dos estructuras faciales activas.")
+        raise HTTPException(status_code=409, detail=f"Se requieren al menos dos estructuras faciales activas en el grupo {selected_group}.")
 
     by_id = {asset.id: stored for asset, stored in rows}
     active_ids = list(by_id)
     active_set = set(active_ids)
-    used_ids, current_pair = _decode_face_state(history_token, active_ids)
+    used_ids, current_pair, decoded_group = _decode_face_state(history_token, active_ids)
+    if decoded_group and decoded_group != selected_group:
+        used_ids, current_pair = [], []
     used_ids = [asset_id for asset_id in used_ids if asset_id in active_set]
     current_pair = [asset_id for asset_id in current_pair if asset_id in active_set]
 
@@ -238,7 +293,7 @@ async def private_face_pair(
         first_type=first_stored.content_type or "image/webp",
         second=second_content,
         second_type=second_stored.content_type or "image/webp",
-        token=_encode_face_state(used_ids=used_ids, current_pair=current_pair),
+        token=_encode_face_state(used_ids=used_ids, current_pair=current_pair, face_group=selected_group),
         cycle_executions=cycle_executions,
         remaining_executions=remaining_executions,
     )

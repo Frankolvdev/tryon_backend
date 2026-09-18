@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from PIL import Image, ImageOps
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.model_generation_asset import ModelGenerationAsset
@@ -30,6 +31,12 @@ class ModelGenerationAssetService:
     PRIVATE_TOOLS = {"facial_structures"}
     BODY_TOOLS = {"hips", "butt_size", "breasts", "height", "bubble_butt", "waist", "complexion"}
     LEGACY_TOOL_MAP = {"ass": "butt_size", "slim": "complexion", "thick": "complexion"}
+    FACE_GROUPS = {
+        "east_asian", "southeast_asian", "south_central_asian",
+        "middle_eastern_north_african", "african_afrodescendant",
+        "european", "latin_caribbean", "mixed_pacific",
+    }
+    DEFAULT_FACE_GROUP = "mixed_pacific"
 
     @classmethod
     def _canonical_tool(cls, tool_key: str) -> str:
@@ -57,6 +64,7 @@ class ModelGenerationAssetService:
         active_only: bool = False,
         skip: int = 0,
         limit: int | None = None,
+        face_group: str | None = None,
     ) -> List[ModelGenerationAsset]:
         query = db.query(ModelGenerationAsset)
         if tool_key and tool_keys:
@@ -74,6 +82,15 @@ class ModelGenerationAssetService:
             query = query.filter(ModelGenerationAsset.tool_key.in_(canonical_tools))
         if active_only:
             query = query.filter(ModelGenerationAsset.is_active.is_(True))
+        if face_group is not None:
+            face_group = self.validate_face_group(face_group)
+            if tool_key != "facial_structures":
+                raise ValueError("Face group is only valid for facial structures.")
+            group_value = ModelGenerationAsset.metadata_json["face_group"].as_string()
+            query = query.filter(
+                or_(group_value == face_group, group_value.is_(None))
+                if face_group == self.DEFAULT_FACE_GROUP else group_value == face_group
+            )
         query = query.order_by(ModelGenerationAsset.tool_key, ModelGenerationAsset.sort_order, ModelGenerationAsset.id)
         if skip:
             query = query.offset(skip)
@@ -81,7 +98,8 @@ class ModelGenerationAssetService:
             query = query.limit(limit)
         return query.all()
 
-    def count(self, db: Session, *, tool_key: str | None = None, active_only: bool = False) -> int:
+    def count(self, db: Session, *, tool_key: str | None = None, active_only: bool = False,
+              face_group: str | None = None) -> int:
         query = db.query(ModelGenerationAsset)
         if tool_key:
             if tool_key not in self.TOOLS:
@@ -89,7 +107,22 @@ class ModelGenerationAssetService:
             query = query.filter(ModelGenerationAsset.tool_key == self._canonical_tool(tool_key))
         if active_only:
             query = query.filter(ModelGenerationAsset.is_active.is_(True))
+        if face_group is not None:
+            face_group = self.validate_face_group(face_group)
+            if tool_key != "facial_structures":
+                raise ValueError("Face group is only valid for facial structures.")
+            group_value = ModelGenerationAsset.metadata_json["face_group"].as_string()
+            query = query.filter(
+                or_(group_value == face_group, group_value.is_(None))
+                if face_group == self.DEFAULT_FACE_GROUP else group_value == face_group
+            )
         return query.count()
+
+    def validate_face_group(self, face_group: str) -> str:
+        normalized = (face_group or "").strip().lower()
+        if normalized not in self.FACE_GROUPS:
+            raise ValueError("Unsupported facial structure group.")
+        return normalized
 
     def get(self, db: Session, asset_id: int) -> ModelGenerationAsset:
         row = db.get(ModelGenerationAsset, asset_id)
@@ -104,6 +137,9 @@ class ModelGenerationAssetService:
     def response(self, db: Session, row: ModelGenerationAsset) -> dict:
         poster = self._file(db, row.poster_storage_file_id)
         video = self._file(db, row.video_storage_file_id)
+        metadata = dict(row.metadata_json or {})
+        if row.tool_key == "facial_structures":
+            metadata.setdefault("face_group", self.DEFAULT_FACE_GROUP)
         return {
             "id": row.id,
             "tool_key": row.tool_key,
@@ -119,7 +155,7 @@ class ModelGenerationAssetService:
             "video_url": storage_service.create_presigned_url(db, storage_file=video) if video else None,
             "is_active": row.is_active,
             "notes": row.notes,
-            "metadata": dict(row.metadata_json or {}),
+            "metadata": metadata,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
@@ -179,6 +215,13 @@ class ModelGenerationAssetService:
             patch["value"] = patch["value"].strip()
         if "metadata" in patch:
             patch["metadata_json"] = patch.pop("metadata") or {}
+            if row.tool_key == "facial_structures":
+                current_metadata = dict(row.metadata_json or {})
+                current_metadata.update(patch["metadata_json"])
+                current_metadata["face_group"] = self.validate_face_group(
+                    str(current_metadata.get("face_group") or self.DEFAULT_FACE_GROUP)
+                )
+                patch["metadata_json"] = current_metadata
         if row.tool_key in self.BODY_TOOLS:
             patch.pop("value", None)
             if row.tool_key != "complexion":
@@ -228,9 +271,11 @@ class ModelGenerationAssetService:
         except Exception as exc:
             raise ValueError("No se pudo procesar la imagen facial.") from exc
 
-    def create_face_references(self, db: Session, *, files: List[Tuple[bytes, str, Optional[str]]], storage_mode: str) -> List[ModelGenerationAsset]:
+    def create_face_references(self, db: Session, *, files: List[Tuple[bytes, str, Optional[str]]],
+                               storage_mode: str, face_group: str) -> List[ModelGenerationAsset]:
         if storage_mode not in self.MODES:
             raise ValueError("Invalid storage target.")
+        face_group = self.validate_face_group(face_group)
         created: List[ModelGenerationAsset] = []
         base_order = db.query(ModelGenerationAsset).filter(ModelGenerationAsset.tool_key == "facial_structures").count() * 10
         for index, (content, filename, content_type) in enumerate(files, start=1):
@@ -240,7 +285,9 @@ class ModelGenerationAssetService:
             row = ModelGenerationAsset(
                 tool_key="facial_structures", asset_key=f"face-{uuid4().hex}", title="", value="",
                 sort_order=base_order + index * 10, position=None, storage_mode=storage_mode,
-                is_active=True, notes=None, metadata_json={"source_filename": filename, "normalized_size": "512x720"},
+                is_active=True, notes=None, metadata_json={
+                    "source_filename": filename, "normalized_size": "512x720", "face_group": face_group,
+                },
             )
             db.add(row); db.commit(); db.refresh(row)
             self.upload_media(db, row.id, kind="poster", content=content, filename=filename, content_type=ctype)
@@ -420,6 +467,10 @@ class ModelGenerationAssetService:
                     "notes": item.get("notes"),
                     "metadata_json": item.get("metadata") or {},
                 }
+                if tool == "facial_structures":
+                    common["metadata_json"]["face_group"] = self.validate_face_group(
+                        str(common["metadata_json"].get("face_group") or self.DEFAULT_FACE_GROUP)
+                    )
                 if row:
                     for k, v in common.items(): setattr(row, k, v)
                     updated += 1

@@ -26,10 +26,12 @@ def storage_options(db: Session = Depends(get_db)):
 
 
 @router.get("")
-def list_assets(tool_key: str | None = None, skip: int = Query(default=0, ge=0), limit: int | None = Query(default=None, ge=1, le=200), db: Session = Depends(get_db)):
+def list_assets(tool_key: str | None = None, face_group: str | None = None,
+                skip: int = Query(default=0, ge=0), limit: int | None = Query(default=None, ge=1, le=200),
+                db: Session = Depends(get_db)):
     try:
-        total = model_generation_asset_service.count(db, tool_key=tool_key) if limit is not None else None
-        rows = model_generation_asset_service.list(db, tool_key=tool_key, skip=skip, limit=limit)
+        total = model_generation_asset_service.count(db, tool_key=tool_key, face_group=face_group) if limit is not None else None
+        rows = model_generation_asset_service.list(db, tool_key=tool_key, skip=skip, limit=limit, face_group=face_group)
         return {"items": [model_generation_asset_service.response(db, row) for row in rows], "total": total if total is not None else len(rows)}
     except ValueError as exc:
         raise bad_request(exc)
@@ -48,13 +50,16 @@ def create_asset(data: ModelGenerationAssetCreate, db: Session = Depends(get_db)
 def upload_facial_structures(
     media: list[UploadFile] = File(...),
     storage_mode: str = Form("auto"),
+    face_group: str = Form(...),
     db: Session = Depends(get_db),
 ):
     try:
         files = [(item.file.read(), item.filename or "face.jpg", item.content_type) for item in media]
         if not files:
             raise ValueError("Selecciona al menos una imagen.")
-        rows = model_generation_asset_service.create_face_references(db, files=files, storage_mode=storage_mode)
+        rows = model_generation_asset_service.create_face_references(
+            db, files=files, storage_mode=storage_mode, face_group=face_group
+        )
         return {"items": [model_generation_asset_service.response(db, row) for row in rows], "total": len(rows)}
     except ValueError as exc:
         raise bad_request(exc)
