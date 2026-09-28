@@ -749,6 +749,63 @@ fi
             and RuntimeBuilderService.python_minor_tuple(config.python_version) == (3, 10)
         )
         if modern_profile_selected or modern_stack_selected:
+            # Modal Modern only: keep Hugging Face Hub aligned with the supported
+            # Transformers range. Some exported custom-node requirements still pin
+            # huggingface_hub==0.23.4, which is incompatible with Transformers >=4.50.3.
+            hf_hub_version = "0.36.2"
+            constraints_at = next(
+                (
+                    index
+                    for index, line in enumerate(lines)
+                    if line.startswith("RUN printf '%s\\n' 'transformers>=4.50.3,<5'")
+                ),
+                None,
+            )
+            if constraints_at is None:
+                raise RuntimeError(
+                    "No se encontró el punto seguro para fijar huggingface-hub en Dockerfile.modal Modern."
+                )
+            lines[constraints_at] = lines[constraints_at].replace(
+                "printf '%s\\n' 'transformers>=4.50.3,<5'",
+                f"printf '%s\\n' 'transformers>=4.50.3,<5' 'huggingface-hub=={hf_hub_version}'",
+                1,
+            )
+
+            runtime_requirements_at = next(
+                (
+                    index
+                    for index, line in enumerate(lines)
+                    if line.startswith("RUN if [ -s /tmp/runtime-requirements.txt ]; then ")
+                ),
+                None,
+            )
+            if runtime_requirements_at is None:
+                raise RuntimeError(
+                    "No se encontró el punto seguro para normalizar huggingface-hub en requirements de Modal Modern."
+                )
+            lines[runtime_requirements_at] = (
+                "RUN if [ -s /tmp/runtime-requirements.txt ]; then "
+                f"sed -Ei 's/^huggingface[-_]hub.*$/huggingface-hub=={hf_hub_version}/I' "
+                "/tmp/runtime-requirements.txt && "
+                "python -m pip install --constraint /tmp/runtime-constraints.txt "
+                "-r /tmp/runtime-requirements.txt; fi"
+            )
+
+            custom_requirements_at = next(
+                (
+                    index
+                    for index, line in enumerate(lines)
+                    if line.startswith("RUN find /app/ComfyUI/custom_nodes -type f -name requirements.txt")
+                ),
+                None,
+            )
+            if custom_requirements_at is not None:
+                lines[custom_requirements_at] = lines[custom_requirements_at].replace(
+                    'sed -Ei "',
+                    f'sed -Ei "s/^huggingface[-_]hub.*$/huggingface-hub=={hf_hub_version}/I; ',
+                    1,
+                )
+
             apt_prefix = "RUN apt-get update && apt-get install -y --no-install-recommends "
             apt_at = next(
                 (index for index, line in enumerate(lines) if line.startswith(apt_prefix)),
