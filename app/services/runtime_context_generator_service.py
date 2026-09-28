@@ -749,63 +749,6 @@ fi
             and RuntimeBuilderService.python_minor_tuple(config.python_version) == (3, 10)
         )
         if modern_profile_selected or modern_stack_selected:
-            # Modal Modern only: keep Hugging Face Hub aligned with the supported
-            # Transformers range. Some exported custom-node requirements still pin
-            # huggingface_hub==0.23.4, which is incompatible with Transformers >=4.50.3.
-            hf_hub_version = "0.36.2"
-            constraints_at = next(
-                (
-                    index
-                    for index, line in enumerate(lines)
-                    if line.startswith("RUN printf '%s\\n' 'transformers>=4.50.3,<5'")
-                ),
-                None,
-            )
-            if constraints_at is None:
-                raise RuntimeError(
-                    "No se encontró el punto seguro para fijar huggingface-hub en Dockerfile.modal Modern."
-                )
-            lines[constraints_at] = lines[constraints_at].replace(
-                "printf '%s\\n' 'transformers>=4.50.3,<5'",
-                f"printf '%s\\n' 'transformers>=4.50.3,<5' 'huggingface-hub=={hf_hub_version}'",
-                1,
-            )
-
-            runtime_requirements_at = next(
-                (
-                    index
-                    for index, line in enumerate(lines)
-                    if line.startswith("RUN if [ -s /tmp/runtime-requirements.txt ]; then ")
-                ),
-                None,
-            )
-            if runtime_requirements_at is None:
-                raise RuntimeError(
-                    "No se encontró el punto seguro para normalizar huggingface-hub en requirements de Modal Modern."
-                )
-            lines[runtime_requirements_at] = (
-                "RUN if [ -s /tmp/runtime-requirements.txt ]; then "
-                f"sed -Ei 's/^huggingface[-_]hub.*$/huggingface-hub=={hf_hub_version}/I' "
-                "/tmp/runtime-requirements.txt && "
-                "python -m pip install --constraint /tmp/runtime-constraints.txt "
-                "-r /tmp/runtime-requirements.txt; fi"
-            )
-
-            custom_requirements_at = next(
-                (
-                    index
-                    for index, line in enumerate(lines)
-                    if line.startswith("RUN find /app/ComfyUI/custom_nodes -type f -name requirements.txt")
-                ),
-                None,
-            )
-            if custom_requirements_at is not None:
-                lines[custom_requirements_at] = lines[custom_requirements_at].replace(
-                    'sed -Ei "',
-                    f'sed -Ei "s/^huggingface[-_]hub.*$/huggingface-hub=={hf_hub_version}/I; ',
-                    1,
-                )
-
             apt_prefix = "RUN apt-get update && apt-get install -y --no-install-recommends "
             apt_at = next(
                 (index for index, line in enumerate(lines) if line.startswith(apt_prefix)),
@@ -872,6 +815,39 @@ fi
         workdir = (config.container_workdir or "/app").rstrip("/")
         comfy_target = f"{workdir}/ComfyUI"
         external_models = not models
+
+        # Modal Modern only: normalize legacy Hugging Face Hub pins before the
+        # generic validation build runs. Modal builds this generic image first,
+        # then Dockerfile.modal inherits the same dependency base for publishing.
+        # Keep every other provider/profile byte-for-byte on the previous commands.
+        profile = RuntimeBuilderService.validated_profile_for_config(config)
+        modern_profile_selected = bool(
+            profile and profile.get("id") == "universal-modern-2026-08"
+        )
+        modern_stack_selected = bool(
+            str(getattr(config, "comfyui_commit", "") or "").strip().lower()
+            in {"v0.31.0", "0.31.0"}
+            and RuntimeBuilderService.cuda_major_minor(config.cuda_version) == "13.0"
+            and RuntimeBuilderService.python_minor_tuple(config.python_version) == (3, 10)
+        )
+        modal_modern = bool(
+            str(getattr(config, "provider", "") or "").strip().lower() == "modal"
+            and (modern_profile_selected or modern_stack_selected)
+        )
+        hf_hub_version = "0.36.2"
+        constraint_packages = "'transformers>=4.50.3,<5'"
+        runtime_requirements_prepare = ""
+        custom_requirements_prepare = ""
+        if modal_modern:
+            constraint_packages += f" 'huggingface-hub=={hf_hub_version}'"
+            runtime_requirements_prepare = (
+                f"sed -Ei 's/^huggingface[-_]hub.*$/huggingface-hub=={hf_hub_version}/I' "
+                "/tmp/runtime-requirements.txt && "
+            )
+            custom_requirements_prepare = (
+                f"s/^huggingface[-_]hub.*$/huggingface-hub=={hf_hub_version}/I; "
+            )
+
         lines = [
             f"FROM nvidia/cuda:{RuntimeBuilderService.normalize_cuda_version(config.cuda_version)}-cudnn-runtime-ubuntu22.04",
             'ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PATH="/opt/conda/bin:$PATH" TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"',
@@ -885,14 +861,14 @@ fi
             lines.append(f"RUN git -C {comfy_target} checkout {config.comfyui_commit}")
         lines += [
             f"RUN python -m pip install --index-url {config.pytorch_index_url} {RuntimeBuilderService.torch_install_packages(config)}",
-            f"RUN printf '%s\\n' 'transformers>=4.50.3,<5' > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' {comfy_target}/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r {comfy_target}/requirements.txt",
+            f"RUN printf '%s\\n' {constraint_packages} > /tmp/runtime-constraints.txt && sed -Ei 's/^transformers.*$/transformers>=4.50.3,<5/I; /^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|$)/Id' {comfy_target}/requirements.txt && python -m pip install --constraint /tmp/runtime-constraints.txt -r {comfy_target}/requirements.txt",
             "COPY requirements.txt /tmp/runtime-requirements.txt",
-            "RUN if [ -s /tmp/runtime-requirements.txt ]; then python -m pip install --constraint /tmp/runtime-constraints.txt -r /tmp/runtime-requirements.txt; fi",
+            f"RUN if [ -s /tmp/runtime-requirements.txt ]; then {runtime_requirements_prepare}python -m pip install --constraint /tmp/runtime-constraints.txt -r /tmp/runtime-requirements.txt; fi",
         ]
         if nodes:
             lines += [
                 f"COPY custom_nodes/ {comfy_target}/custom_nodes/",
-                f"RUN find {comfy_target}/custom_nodes -type f -name requirements.txt -print | sort | while IFS= read -r req; do echo '[runtime] Installing' \"$req\"; sed -Ei \"/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|\\$)/Id\" \"$req\"; python -m pip install --constraint /tmp/runtime-constraints.txt -r \"$req\" || exit 1; done",
+                f"RUN find {comfy_target}/custom_nodes -type f -name requirements.txt -print | sort | while IFS= read -r req; do echo '[runtime] Installing' \"$req\"; sed -Ei \"{custom_requirements_prepare}/^(torch|torchvision|torchaudio|xformers|triton|onnxruntime-gpu|flash-attn)([<>=!~ ;]|\\$)/Id\" \"$req\"; python -m pip install --constraint /tmp/runtime-constraints.txt -r \"$req\" || exit 1; done",
                 'RUN set -eu; check_output="$(python -m pip check 2>&1)" && { printf \'%s\\n\' "$check_output"; exit 0; }; check_status=$?; printf \'%s\\n\' "$check_output"; unexpected="$(printf \'%s\\n\' "$check_output" | sed -E \'/^decord 0\\.6\\.0 is not supported on this platform$/d; /^[[:space:]]*$/d\')"; if [ -n "$unexpected" ]; then echo \'[runtime] pip check encontró errores no permitidos.\' >&2; exit "$check_status"; fi; echo \'[runtime] Advertencia conocida ignorada: decord 0.6.0 no declara soporte para esta plataforma.\'',
                 RuntimeBuilderService.runtime_stack_assertion(config),
             ]
