@@ -325,7 +325,6 @@ class GenerationRuntime:
             for node_id, node in workflow.items()
             if isinstance(node, dict)
             and str(node.get("class_type") or "").startswith("ExecutePython")
-            and str((node.get("_meta") or {}).get("title") or "").strip().lower() == "execute python"
         ]
         if not dynamic_nodes:
             return workflow
