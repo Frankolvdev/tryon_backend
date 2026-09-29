@@ -839,7 +839,7 @@ fi
         runtime_requirements_prepare = ""
         custom_requirements_prepare = ""
         if modal_modern:
-            constraint_packages += f" 'huggingface-hub=={hf_hub_version}'"
+            constraint_packages += f" 'huggingface-hub=={hf_hub_version}' 'pixeloe==0.1.4'"
             runtime_requirements_prepare = (
                 f"sed -Ei 's/^huggingface[-_]hub.*$/huggingface-hub=={hf_hub_version}/I' "
                 "/tmp/runtime-requirements.txt && "
